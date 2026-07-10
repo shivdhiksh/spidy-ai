@@ -1,0 +1,143 @@
+# =============================================================================
+# Spidy — Master Configuration File
+# Edit this file to customise your Spidy instance.
+# All values can be overridden by environment variables prefixed with SPIDY_.
+# =============================================================================
+
+# --------------------------------------------------------------------------- #
+# Application                                                                 #
+# --------------------------------------------------------------------------- #
+app:
+  name: "Spidy"
+  version: "0.1.0"
+  user_name: "Shiva"             # Your name — used in greetings
+  debug: false                   # Set true for verbose output during dev
+  log_level: "INFO"              # DEBUG | INFO | WARNING | ERROR | CRITICAL
+
+# --------------------------------------------------------------------------- #
+# Paths                                                                       #
+# --------------------------------------------------------------------------- #
+paths:
+  data_dir: "%APPDATA%/Spidy"          # Persistent user data
+  log_dir: "%APPDATA%/Spidy/logs"      # Log files
+  memory_dir: "%APPDATA%/Spidy/memory" # SQLite + ChromaDB storage
+  models_dir: "assets/models"          # AI model files
+  plugins_dir: "plugins"               # Plugin discovery root
+
+# --------------------------------------------------------------------------- #
+# Logging                                                                     #
+# --------------------------------------------------------------------------- #
+logging:
+  level: "INFO"                   # Global log level
+  rotation: "10 MB"               # Rotate when file reaches this size
+  retention: "30 days"            # Keep logs for this many days
+  format: "{time:YYYY-MM-DD HH:mm:ss.SSS} | {level:<8} | {name}:{line} | {message}"
+  colorize: true                  # Coloured console output
+  backtrace: true                 # Full tracebacks on errors
+  diagnose: true                  # Variable values in tracebacks (dev only)
+
+# --------------------------------------------------------------------------- #
+# Voice Engine                                                                #
+# --------------------------------------------------------------------------- #
+voice:
+  # Wake Word
+  wake_word:
+    enabled: true
+    model: "hey_jarvis"           # Closest available; "hey_spidy" TBD
+    threshold: 0.5                # Detection confidence threshold (0.0–1.0)
+    chunk_size: 1280              # Audio frames per chunk (16kHz)
+
+  # Speech Recognition
+  stt:
+    model: "base.en"              # tiny.en | base.en | small.en | medium.en
+    device: "auto"                # auto | cpu | cuda
+    compute_type: "int8"          # int8 (CPU) | float16 (GPU)
+    language: "en"
+    vad_filter: true              # Voice Activity Detection to skip silence
+    vad_threshold: 0.5
+
+  # Text-to-Speech
+  tts:
+    engine: "piper"               # piper | kokoro | system
+    voice: "en_US-ryan-high"      # Piper male voice model
+    speed: 1.0                    # Playback speed multiplier
+    volume: 1.0                   # Output volume (0.0–1.0)
+
+  # Audio Device
+  audio:
+    input_device: null            # null = system default
+    output_device: null           # null = system default
+    sample_rate: 16000
+    channels: 1
+
+# --------------------------------------------------------------------------- #
+# Reasoning Engine                                                            #
+# --------------------------------------------------------------------------- #
+reasoning:
+  provider: "ollama"              # ollama | openai | groq
+  model: "llama3.2:3b"           # Model to use with the provider
+  base_url: "http://localhost:11434"  # Ollama local server URL
+  api_key: null                   # Required only for cloud providers
+  temperature: 0.7
+  max_tokens: 1024
+  timeout_seconds: 30
+  system_prompt_path: "config/system_prompt.txt"
+
+# --------------------------------------------------------------------------- #
+# Memory Engine                                                               #
+# --------------------------------------------------------------------------- #
+memory:
+  short_term:
+    max_messages: 20              # Rolling window for conversation context
+
+  long_term:
+    db_filename: "spidy_memory.db"
+
+  semantic:
+    collection_name: "spidy_memories"
+    embedding_model: "all-MiniLM-L6-v2"  # Lightweight, fast embeddings
+
+# --------------------------------------------------------------------------- #
+# UI / Overlay                                                                #
+# --------------------------------------------------------------------------- #
+ui:
+  enabled: true
+  theme: "dark"                   # dark | light
+  opacity: 0.92                   # Window opacity (0.0–1.0)
+  position: "top-right"           # top-right | top-left | center | bottom-right
+  width: 420
+  height: 600
+  always_on_top: true
+  animate: true
+  hotkey: "ctrl+space"            # Backup wake hotkey
+
+# --------------------------------------------------------------------------- #
+# Permissions                                                                 #
+# --------------------------------------------------------------------------- #
+permissions:
+  policy_file: "permissions/policies/default_policy.yaml"
+  require_confirmation_for:
+    - "delete_file"
+    - "run_script"
+    - "registry_edit"
+    - "shutdown"
+    - "install_software"
+  audit_log_enabled: true
+  audit_log_file: "spidy_audit.log"
+
+# --------------------------------------------------------------------------- #
+# Plugins                                                                     #
+# --------------------------------------------------------------------------- #
+plugins:
+  enabled: true
+  auto_discover: true
+  sandbox: true                   # Run plugins in subprocess isolation
+
+# --------------------------------------------------------------------------- #
+# System Monitoring                                                           #
+# --------------------------------------------------------------------------- #
+system:
+  poll_interval_seconds: 5        # How often to refresh system stats
+  cpu_alert_threshold: 90         # Alert when CPU > N%
+  ram_alert_threshold: 85         # Alert when RAM > N%
+  battery_alert_threshold: 20     # Alert when battery < N%

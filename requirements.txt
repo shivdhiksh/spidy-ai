@@ -1,0 +1,12 @@
+# Spidy — Core Runtime Requirements
+# Pinned for reproducible installs.
+# To install: pip install -r requirements.txt
+
+pyyaml==6.0.2
+pydantic==2.7.4
+pydantic-settings==2.3.4
+loguru==0.7.2
+anyio==4.4.0
+sounddevice==0.4.7
+numpy>=2.0.0
+psutil==5.9.8

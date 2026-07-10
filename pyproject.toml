@@ -1,0 +1,134 @@
+[build-system]
+requires = ["setuptools>=72", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spidy"
+version = "0.1.0"
+description = "Spidy — AI Desktop Companion for Windows"
+authors = [{ name = "Shiva", email = "shiva@spidy.local" }]
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"  # Tested with 3.11 and 3.13
+
+dependencies = [
+    # Configuration
+    "pyyaml>=6.0.2",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+
+    # Logging
+    "loguru>=0.7.2",
+
+    # Async
+    "anyio>=4.4.0",
+
+    # Audio
+    "sounddevice>=0.4.7",
+    "numpy>=2.0.0",  # 2.x has Python 3.13 wheels
+
+    # System
+    "psutil>=5.9.8",
+]
+
+[project.optional-dependencies]
+# ── Milestone 1: Voice Pipeline ─────────────────────────────
+perception = [
+    "faster-whisper>=1.0.3",       # STT (CUDA-accelerated)
+    "openwakeword>=0.6.0",         # Wake word detection
+    "piper-tts>=1.2.0",            # TTS (CPU-based)
+]
+# ── Milestone 2: Context & Observer ─────────────────────────
+context = [
+    "pywin32>=306",                # Windows API (active window, accessibility)
+]
+# ── Milestone 3: Brain / Intelligence ───────────────────────
+brain = [
+    "openai>=1.30.0",              # OpenAI-compatible API client
+    "tiktoken>=0.7.0",             # Token counting for context window
+]
+# ── Milestone 5: UI ─────────────────────────────────────────
+ui = [
+    "PySide6>=6.7.0",              # Qt6 GUI framework
+]
+# ── Milestone 6: Skills ──────────────────────────────────────
+skills = [
+    "playwright>=1.44.0",          # Browser automation
+    "opencv-python>=4.9.0.80",     # Computer vision
+    "easyocr>=1.7.1",              # OCR (GPU-accelerated)
+    "mss>=9.0.2",                  # Fast screenshot capture
+    "pypdf>=4.2.0",                # PDF reading
+    "python-docx>=1.1.0",          # Word document reading
+]
+# ── Milestone 7: Memory ──────────────────────────────────────
+memory = [
+    "sqlalchemy>=2.0.30",          # ORM for SQLite
+    "chromadb>=0.5.3",             # Vector store for semantic memory
+    "sentence-transformers>=3.0.0", # Embeddings for ChromaDB
+]
+# ── Install everything ───────────────────────────────────────
+all = [
+    "spidy[perception,context,brain,ui,skills,memory]",
+]
+
+[project.scripts]
+spidy = "spidy.main:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["spidy*"]
+
+# --------------------------------------------------------------------------- #
+# Ruff (linter + formatter)                                                   #
+# --------------------------------------------------------------------------- #
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "B",    # flake8-bugbear
+    "C4",   # flake8-comprehensions
+    "UP",   # pyupgrade
+    "SIM",  # flake8-simplify
+]
+ignore = [
+    "E501",  # line too long — handled by formatter
+]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+# --------------------------------------------------------------------------- #
+# Mypy (static type checking)                                                 #
+# --------------------------------------------------------------------------- #
+[tool.mypy]
+python_version = "3.11"
+strict = false
+ignore_missing_imports = true
+warn_return_any = true
+warn_unused_ignores = true
+
+# --------------------------------------------------------------------------- #
+# Pytest                                                                      #
+# --------------------------------------------------------------------------- #
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+addopts = "-v --tb=short"
+log_cli = true
+log_cli_level = "DEBUG"
+
+# --------------------------------------------------------------------------- #
+# Coverage                                                                    #
+# --------------------------------------------------------------------------- #
+[tool.coverage.run]
+source = ["spidy"]
+omit = ["tests/*", "scripts/*"]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 70

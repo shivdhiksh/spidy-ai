@@ -1,0 +1,134 @@
+# =============================================================================
+# Spidy — Default Permission Policy
+# Defines which operations require user confirmation and at what tier.
+#
+# Tiers:
+#   T0 - auto      : Execute immediately, no prompt
+#   T1 - notify    : Show notification, auto-proceed after 3 seconds
+#   T2 - confirm   : Show confirmation dialog, wait for Yes/No
+#   T3 - elevated  : Require typed confirmation phrase
+# =============================================================================
+
+version: "1.0"
+
+permissions:
+
+  # ─── READ OPERATIONS (always safe) ─────────────────────────────────────── #
+  - action: "read_file"
+    tier: "T0"
+    description: "Read a file's content"
+
+  - action: "list_files"
+    tier: "T0"
+    description: "List directory contents"
+
+  - action: "search_files"
+    tier: "T0"
+    description: "Search for files by name or content"
+
+  - action: "capture_screenshot"
+    tier: "T0"
+    description: "Take a screenshot of the current screen"
+
+  - action: "read_clipboard"
+    tier: "T1"
+    description: "Read the clipboard contents"
+
+  # ─── APPLICATION CONTROL ────────────────────────────────────────────────── #
+  - action: "open_application"
+    tier: "T0"
+    description: "Launch an installed application"
+
+  - action: "close_application"
+    tier: "T1"
+    description: "Close a running application"
+
+  - action: "focus_window"
+    tier: "T0"
+    description: "Bring a window to the foreground"
+
+  # ─── FILE WRITE OPERATIONS ──────────────────────────────────────────────── #
+  - action: "create_file"
+    tier: "T0"
+    description: "Create a new file"
+
+  - action: "create_folder"
+    tier: "T0"
+    description: "Create a new folder"
+
+  - action: "write_file"
+    tier: "T1"
+    description: "Write or overwrite a file"
+
+  - action: "rename_file"
+    tier: "T1"
+    description: "Rename a file or folder"
+
+  - action: "move_file"
+    tier: "T1"
+    description: "Move a file to another location"
+
+  - action: "copy_file"
+    tier: "T0"
+    description: "Copy a file to another location"
+
+  # ─── DESTRUCTIVE FILE OPERATIONS ────────────────────────────────────────── #
+  - action: "delete_file"
+    tier: "T2"
+    description: "Delete a file (moves to Recycle Bin)"
+    confirmation_message: "Are you sure you want to delete '{target}'?"
+
+  - action: "delete_folder"
+    tier: "T2"
+    description: "Delete a folder and all its contents"
+    confirmation_message: "Are you sure you want to delete the folder '{target}' and all its contents?"
+
+  - action: "permanent_delete"
+    tier: "T3"
+    description: "Permanently delete (bypass Recycle Bin)"
+    confirmation_phrase: "PERMANENTLY DELETE"
+
+  # ─── BROWSER OPERATIONS ─────────────────────────────────────────────────── #
+  - action: "open_url"
+    tier: "T0"
+    description: "Open a URL in the browser"
+
+  - action: "web_search"
+    tier: "T0"
+    description: "Perform a web search"
+
+  - action: "fill_web_form"
+    tier: "T2"
+    description: "Automatically fill a web form"
+    confirmation_message: "Spidy wants to fill out a form on '{url}'. Proceed?"
+
+  # ─── TERMINAL / SCRIPT OPERATIONS ───────────────────────────────────────── #
+  - action: "run_terminal_command"
+    tier: "T2"
+    description: "Execute a terminal command"
+    confirmation_message: "Run command: {command}"
+
+  - action: "run_script"
+    tier: "T2"
+    description: "Execute a script file"
+    confirmation_message: "Execute script: {target}"
+
+  # ─── SYSTEM OPERATIONS ──────────────────────────────────────────────────── #
+  - action: "modify_registry"
+    tier: "T3"
+    description: "Read or write Windows Registry"
+    confirmation_phrase: "MODIFY REGISTRY"
+
+  - action: "install_software"
+    tier: "T3"
+    description: "Install a software package"
+    confirmation_phrase: "INSTALL"
+
+  - action: "system_shutdown"
+    tier: "T3"
+    description: "Shutdown or restart the computer"
+    confirmation_phrase: "SHUTDOWN"
+
+  - action: "write_clipboard"
+    tier: "T1"
+    description: "Write content to the clipboard"

@@ -1,0 +1,1 @@
+﻿# spidy\permissions package
