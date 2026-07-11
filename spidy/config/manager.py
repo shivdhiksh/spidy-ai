@@ -208,14 +208,58 @@ class MemoryConfig(BaseModel):
 
 class UIConfig(BaseModel):
     enabled: bool = True
-    theme: str = "dark"
+    theme: str = "dark"              # "dark" | "light"
     opacity: float = 0.92
-    position: str = "top-right"
-    width: int = 420
-    height: int = 600
+    position: str = "top-right"      # "top-right" | "top-left" | "bottom-right" | "bottom-left"
+    width: int = 400
+    height: int = 580
     always_on_top: bool = True
     animate: bool = True
-    hotkey: str = "ctrl+space"
+    hotkey: str = "ctrl+space"       # Global toggle hotkey
+
+    # Animation
+    animation_speed_ms: int = 250    # Fade/slide duration in ms
+
+    # Notifications
+    notification_duration_ms: int = 4000  # Toast auto-dismiss delay
+
+    # Position
+    edge_margin: int = 20            # Pixels from screen edge
+    compact_mode: bool = False       # Mini overlay (future M7+)
+
+    # Glassmorphism
+    glassmorphism_enabled: bool = True
+    accent_color: str = "#6C63FF"   # Spidy brand purple
+
+    # Interaction
+    click_through_when_idle: bool = False  # Pass clicks through in IDLE state
+
+    # Wake-word readiness (visual prep for M6 integration)
+    wake_ready_glow: bool = True    # Animated edge glow in WAKE_READY state
+    drag_to_reposition: bool = True # Allow dragging the overlay
+
+    @field_validator("position")
+    @classmethod
+    def validate_position(cls, v: str) -> str:
+        valid = {"top-right", "top-left", "bottom-right", "bottom-left"}
+        if v not in valid:
+            raise ValueError(f"position must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("theme")
+    @classmethod
+    def validate_theme(cls, v: str) -> str:
+        valid = {"dark", "light"}
+        if v not in valid:
+            raise ValueError(f"theme must be one of {valid}, got '{v}'")
+        return v
+
+    @field_validator("opacity")
+    @classmethod
+    def validate_opacity(cls, v: float) -> float:
+        if not 0.0 < v <= 1.0:
+            raise ValueError("opacity must be between 0.0 (exclusive) and 1.0")
+        return v
 
 
 class PermissionsConfig(BaseModel):

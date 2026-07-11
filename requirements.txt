@@ -10,3 +10,7 @@ anyio==4.4.0
 sounddevice==0.4.7
 numpy>=2.0.0
 psutil==5.9.8
+
+# Milestone 5 — Desktop Overlay UI
+PySide6>=6.7.0          # Qt6 Python bindings for the overlay window
+keyboard>=0.13.5        # Global hotkey registration (Windows/Linux/macOS)

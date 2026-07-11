@@ -8,11 +8,92 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Planned — Milestone 5: Desktop Agent + Vision
-- App launcher, file manager, screenshot, window management
-- Vision pipeline (screenshot → LLM vision analysis)
-- T2 permission confirmation dialogs (UI)
+### Planned — Milestone 6: Wake Word + Voice Integration
+- "Hey Spidy" wake-word detection (connect to `overlay.show_for_wake_word`)
+- Real-time STT → UIWaveformDataEvent pipeline
+- Voice command loop (WAKE_READY → LISTENING → THINKING → SPEAKING → IDLE)
+- T2 permission confirmation dialogs using the overlay
 - Context-aware system state injection
+
+---
+
+## [0.5.0] — 2026-07-11 · Milestone 5: Desktop Overlay UI
+
+### Added
+
+**UI EventBus Events** (`spidy/ui/events.py`)
+- 12 event types covering inbound (show/hide/state/message/notify/waveform/theme) and outbound (ready/closed/hotkey/mic/settings) UI events
+- `UIShowEvent.source` field: prepared for `"wake_word"` trigger (M6)
+- `UIHotkeyPressedEvent`: published when global hotkey fires
+
+**UI State Machine** (`spidy/ui/state.py`)
+- `UIState` enum: `IDLE`, `WAKE_READY`, `LISTENING`, `THINKING`, `SPEAKING`, `ERROR`
+- `UIStateMachine`: enforced allowed-transition graph, strict/lenient mode, listener callbacks, reset
+- `WAKE_READY` state pre-wired for M6 wake-word (no voice activation yet)
+
+**Theme System** (`spidy/ui/themes/`)
+- `ThemeColors`: 55 frozen color tokens per theme
+- `DARK_THEME`: deep navy + electric violet (#6C63FF) glassmorphism palette
+- `LIGHT_THEME`: pearl white + frosted glass with adjusted accent
+- `ThemeManager`: registry, set/toggle, listener callbacks, `build_default_theme_manager()`
+
+**Global Hotkey Manager** (`spidy/ui/hotkey.py`)
+- System-wide hotkey via `keyboard` library (Ctrl+Space default)
+- Thread-safe EventBus bridging via `asyncio.run_coroutine_threadsafe`
+- Graceful degradation if `keyboard` unavailable
+- `parse_hotkey()` / `validate_hotkey()` utilities
+
+**Qt Widgets** (`spidy/ui/widgets/`)
+- `WaveformWidget`: 20-bar animated audio visualiser (simulated + real-data modes, 20fps)
+- `MicrophoneButton`: animated round button with idle/listening/thinking/speaking states (25fps)
+- `SpeakingIndicator`: three-dot wave animation with staggered phase (25fps)
+- `ChatView` + `ChatBubble`: scrollable conversation display, fade-in bubbles, 80-message cap
+
+**Notification System** (`spidy/ui/notifications.py`)
+- `ToastWidget`: fade-in/out with left accent stripe and 4 severity levels
+- `NotificationManager`: vertical stacking, max-stack enforcement, auto-dismiss
+
+**System Tray** (`spidy/ui/tray.py`)
+- `SystemTrayManager`: vector-drawn 'S' tray icon (no file assets)
+- Context menu: Show/Hide, Dark/Light mode, Settings, Exit
+- Native OS balloon notifications
+
+**Main Overlay Window** (`spidy/ui/overlay.py`)
+- `OverlayWindow`: frameless, always-on-top `Qt.WindowType.Tool` PySide6 widget
+- **Windows acrylic blur** via `SetWindowCompositionAttribute` with fallback
+- Slide-from-edge + fade-in via `QPropertyAnimation`
+- State-driven widget visibility (all 6 states fully wired)
+- Edge glow animation in `WAKE_READY` state (prepared for M6)
+- `show_for_wake_word()` slot (ready for M6 voice connection)
+- `UISignalBridge(QObject)`: thread-safe async→Qt bridge using PySide6 signal auto-queuing
+
+**Qt Application Lifecycle** (`spidy/ui/app.py`)
+- `SpidyApp`: owns QApplication, OverlayWindow, SystemTrayManager, GlobalHotkeyManager
+- Subscribes to `ui.*` + `voice.*` EventBus topics
+- Bridges Qt callbacks to asyncio EventBus via `run_coroutine_threadsafe`
+
+**UIConfig Extended** (`spidy/config/manager.py`)
+- 9 new M5 fields: `animation_speed_ms`, `notification_duration_ms`, `edge_margin`, `compact_mode`, `glassmorphism_enabled`, `accent_color`, `click_through_when_idle`, `wake_ready_glow`, `drag_to_reposition`
+- New field validators for `theme`, `position`, `opacity`
+
+### Changed
+- `UIConfig.width` default: 420 → 400; `height`: 600 → 580 (matches overlay layout)
+- `spidy/ui/__init__.py`: now exports all public UI symbols (events, state, themes, hotkey)
+- `spidy/ui/widgets/__init__.py`: exports all widget classes
+- `spidy/ui/themes/__init__.py`: exports all theme types + factory
+
+### Dependencies
+- Added `PySide6>=6.7.0` (Qt6 Python bindings)
+- Added `keyboard>=0.13.5` (global hotkey registration)
+
+### Tests
+- **183 new tests** across 4 test files
+- `test_ui_events.py`: 40 tests — all 12 event types
+- `test_ui_state.py`: 50 tests — state machine transitions, listeners, properties
+- `test_ui_theme.py`: 45 tests — hex color validation, ThemeManager, toggle
+- `test_ui_hotkey_config.py`: 22 tests — hotkey parse/validate, UIConfig validators
+- `test_ui_overlay.py`: 50 tests — Qt widgets and OverlayWindow (offscreen platform)
+- **Total: 568 tests passing**
 
 ---
 

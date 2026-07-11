@@ -265,10 +265,81 @@ All added to `SpidyConfig` as `llm`, `skills`, `executor` fields.
 
 ---
 
-## Next: Milestone 5 — Awaiting approval
+## Milestone 5 — Desktop Overlay UI ✅
 
-> **Awaiting user approval before starting.**
+**Status:** Complete  
+**Tests:** 568 passed, 0 failed (385 previous + 183 new M5 tests)  
+**New dependencies:** `PySide6>=6.7.0`, `keyboard>=0.13.5`
+
+### What was built
+
+#### `spidy/ui/events.py` — UI EventBus Events
+- 12 event types: `UIShowEvent`, `UIHideEvent`, `UIStateChangeEvent`, `UIMessageEvent`, `UINotifyEvent`, `UIWaveformDataEvent`, `UIThemeChangeEvent`, `UIReadyEvent`, `UIClosedEvent`, `UIHotkeyPressedEvent`, `UIMicButtonClickedEvent`, `UISettingsOpenedEvent`
+- UI communicates **exclusively** through the EventBus — no direct imports from Brain or Voice
+- `UIShowEvent.source` field prepared for `"wake_word"` trigger in M6
+
+#### `spidy/ui/state.py` — UI State Machine
+- `UIState` enum: `IDLE`, `WAKE_READY`, `LISTENING`, `THINKING`, `SPEAKING`, `ERROR`
+- `UIStateMachine`: enforced transition graph, strict/lenient modes, listener callbacks
+- `WAKE_READY` state pre-wired for M6 wake-word integration (no activation logic yet)
+
+#### `spidy/ui/themes/` — Theme System
+- `ThemeColors` (55 color tokens), `ThemeFonts`, `ThemeGeometry` — all frozen dataclasses
+- `DARK_THEME`: Deep navy + electric violet (#6C63FF) + teal — glassmorphism palette
+- `LIGHT_THEME`: Pearl white + frosted glass — adjusted accent for contrast
+- `ThemeManager`: registry, set/toggle, listener callbacks
+- `build_default_theme_manager()` convenience factory
+
+#### `spidy/ui/hotkey.py` — Global Hotkey Manager
+- Uses `keyboard` library (pure Python ctypes on Windows)
+- Thread-safe: fires callback in OS hook thread → `asyncio.run_coroutine_threadsafe`
+- Graceful degradation: logs warning if `keyboard` unavailable (CI/restricted envs)
+- `parse_hotkey()` / `validate_hotkey()` utilities for hotkey string normalization
+
+#### `spidy/ui/widgets/` — Qt Widgets
+- **`WaveformWidget`**: 20-bar animated visualiser; simulated sine-wave mode + real amplitude mode; 20fps QTimer, exponential smoothing
+- **`MicrophoneButton`**: Animated round button; idle (purple), listening (red pulsing ring), thinking (spinner arc), speaking (wave icon); 25fps
+- **`SpeakingIndicator`**: Three-dot wave animation; staggered phase offsets; 25fps
+- **`ChatView` + `ChatBubble`**: Scrollable conversation with fade-in bubbles, auto-scroll, 80-message cap, theme-aware
+
+#### `spidy/ui/notifications.py` — Toast Notification System
+- `ToastWidget`: fade-in/out animation, left accent stripe, info/success/warning/error levels
+- `NotificationManager`: max-stack enforcement, vertical stacking above overlay, theme-aware
+
+#### `spidy/ui/tray.py` — System Tray Integration
+- `SystemTrayManager`: vector-drawn Spidy 'S' tray icon (no file assets needed)
+- Context menu: Show/Hide, Dark/Light mode, Settings, Exit Spidy
+- Native OS balloon notifications via `QSystemTrayIcon.showMessage()`
+
+#### `spidy/ui/overlay.py` — Main Overlay Window
+- `OverlayWindow(QWidget)`: frameless, always-on-top, `Qt.WindowType.Tool` (no taskbar)
+- **Windows acrylic blur** via `SetWindowCompositionAttribute` (ACCENT_ENABLE_ACRYLICBLURBEHIND), falls back silently on unsupported configs
+- Slide-in animation from screen edge + fade-in via `QPropertyAnimation`
+- State-driven widget show/hide (waveform, indicator, mic button state, status labels)
+- Edge glow animation (animated border) in `WAKE_READY` state
+- `show_for_wake_word()` slot prepared for M6 connection
+- `UISignalBridge(QObject)`: thread-safe bridge — asyncio → Qt signals via auto-queued PySide6 emissions
+
+#### `spidy/ui/app.py` — Qt Application Lifecycle
+- `SpidyApp`: owns `QApplication`, `OverlayWindow`, `SystemTrayManager`, `GlobalHotkeyManager`, `UISignalBridge`
+- EventBus subscriptions for all `ui.*` topics
+- Forward-compatible handlers: `voice.listening_started/stopped`, `voice.speaking_started/stopped`
+- `_publish_sync()` bridge: Qt callbacks → `asyncio.run_coroutine_threadsafe` → EventBus
+
+### Architecture decisions
+
+1. **EventBus-first UI** — The overlay never imports Brain, Skills, or Voice modules. All communication is through the EventBus, making the UI fully replaceable.
+
+2. **UISignalBridge pattern** — PySide6 auto-queues cross-thread signal emissions. The bridge is instantiated in the Qt main thread; asyncio code calls `bridge.request_*()` methods which emit signals that Qt safely delivers on the main thread.
+
+3. **Wake-word readiness** — `UIState.WAKE_READY`, `UIShowEvent.source`, `show_for_wake_word()` slot, and edge glow animation are all implemented but intentionally disconnected from any voice pipeline. In M6, a single line connects `VoiceEngine.wake_word_detected → overlay.show_for_wake_word`.
+
+4. **Windows acrylic blur** — Applied via `user32.SetWindowCompositionAttribute` (ABGR GradientColor `0xCC0D0E1A` ≈ 80% transparent deep navy). Falls back to custom `paintEvent` rounded-rect background on failure. No exception propagation.
+
+5. **GC safety** — PySide6 child widgets must have an explicit Python-side parent to avoid the C++ object being collected by Python GC. All widgets created in `_make_bubble` and `_build_ui` have parents set.
+
+6. **Test isolation** — Qt tests use `QT_QPA_PLATFORM=offscreen` env var. `isHidden()` is used instead of `isVisible()` for child widget tests since Qt's `isVisible()` includes ancestry chain.
 
 ---
 
-*Last updated: 2026-07-11*
+*Last updated: 2026-07-11 — Milestone 5 complete (568 tests passing)*
