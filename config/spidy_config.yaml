@@ -71,6 +71,38 @@ voice:
     channels: 1
 
 # --------------------------------------------------------------------------- #
+# Context Observer (Milestone 2)                                               #
+# --------------------------------------------------------------------------- #
+context:
+  enabled: true                   # Master switch for the entire context layer
+
+  snapshot_interval: 10.0         # Seconds between full desktop snapshots
+
+  # Active Window (pywin32)
+  window_poll_interval: 0.5       # How often to check the foreground window
+
+  # Clipboard (permission-aware)
+  clipboard_enabled: true         # Set false for privacy
+  clipboard_poll_interval: 1.0
+
+  # Process Monitor (psutil)
+  process_monitor_enabled: true
+  process_poll_interval: 3.0      # Seconds between process list snapshots
+
+  # System Resources (psutil + torch.cuda)
+  resource_monitor_enabled: true
+  resource_poll_interval: 5.0     # Seconds between resource polls
+  cpu_alert_threshold: 90.0       # % — alert when CPU exceeds this
+  ram_alert_threshold: 85.0       # % — alert when RAM exceeds this
+  battery_alert_threshold: 20.0   # % — alert when battery drops below this
+
+  # Downloads Watcher (watchdog)
+  download_monitor_enabled: true
+
+  # Notifications (stub — planned for Milestone 5)
+  notification_monitor_enabled: true
+
+# --------------------------------------------------------------------------- #
 # Reasoning Engine                                                            #
 # --------------------------------------------------------------------------- #
 reasoning:

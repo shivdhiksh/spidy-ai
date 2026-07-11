@@ -55,6 +55,7 @@ from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
     from spidy.perception.voice.engine import VoiceEngine
+    from spidy.perception.context.observer_manager import ObserverManager
 
 log = get_logger(__name__)
 
@@ -78,6 +79,7 @@ class SpidyCore:
         self._bus: EventBus | None = None
         self._device_mgr: DeviceManager | None = None
         self._voice_engine: VoiceEngine | None = None
+        self._observer_mgr: ObserverManager | None = None
         self._shutdown_event = asyncio.Event()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -207,6 +209,24 @@ class SpidyCore:
                 )
                 self._voice_engine = None
 
+        # ── Start ObserverManager (if context monitoring enabled) ─────────
+        if self._settings and self._settings.context.enabled:
+            try:
+                from spidy.perception.context.observer_manager import ObserverManager
+                self._observer_mgr = ObserverManager(
+                    bus=self._bus,
+                    config=self._settings.context,
+                )
+                await self._observer_mgr.start()
+                log.info("ObserverManager running. Desktop context is active.")
+            except Exception as exc:
+                log.warning(
+                    "ObserverManager failed to start (non-fatal): {exc}. "
+                    "Running without context observation.",
+                    exc=exc,
+                )
+                self._observer_mgr = None
+
         # Announce to all modules that we are live
         await self._bus.publish(SpidyStartedEvent())
 
@@ -221,6 +241,10 @@ class SpidyCore:
 
         self._transition(LifecycleState.STOPPING)
         log.info("Stopping Spidy...")
+
+        # Stop ObserverManager
+        if self._observer_mgr is not None:
+            await self._observer_mgr.stop()
 
         # Stop VoiceEngine first (releases audio resources)
         if self._voice_engine is not None:

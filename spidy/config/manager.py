@@ -195,6 +195,40 @@ class SystemConfig(BaseModel):
     battery_alert_threshold: int = 20
 
 
+class ContextConfig(BaseModel):
+    """Configuration for the Milestone 2 Context Observer layer."""
+
+    enabled: bool = True
+
+    # Snapshot (aggregate event published periodically)
+    snapshot_interval: float = 10.0   # seconds between snapshot events
+
+    # Active Window
+    window_poll_interval: float = 0.5  # seconds
+
+    # Clipboard
+    clipboard_enabled: bool = True
+    clipboard_poll_interval: float = 1.0
+
+    # Process monitor
+    process_monitor_enabled: bool = True
+    process_poll_interval: float = 3.0
+
+    # System resources
+    resource_monitor_enabled: bool = True
+    resource_poll_interval: float = 5.0
+    cpu_alert_threshold: float = 90.0
+    ram_alert_threshold: float = 85.0
+    battery_alert_threshold: float = 20.0
+
+    # Downloads
+    download_monitor_enabled: bool = True
+
+
+    # Notifications
+    notification_monitor_enabled: bool = True
+
+
 class SpidyConfig(BaseModel):
     """
     Root configuration model.
@@ -208,6 +242,7 @@ class SpidyConfig(BaseModel):
     paths: PathsConfig = Field(default_factory=PathsConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
+    context: ContextConfig = Field(default_factory=ContextConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
