@@ -8,13 +8,149 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Planned — Milestone 3: Reasoning & Conversation
-- LLM client abstraction (Ollama local / cloud fallback)
-- Intent resolution pipeline
-- Conversation context manager with rolling window
-- Response routing to skills
+### Planned — Milestone 4: Multi-LLM + Real Intent Classification
+- OpenAI / Claude / Gemini LLM backends
+- LLM-based intent classifier (replaces heuristic M3 classifier)
+- Streaming response support for real-time TTS
 
 ---
+
+## [0.3.0] — 2026-07-11 — Milestone 3: Brain Core (Lifelong AI Companion Kernel)
+
+### Product Reframe
+
+Spidy is now designed as a **Lifelong AI Companion**, not just a desktop assistant.
+The Brain architecture was designed from day one to support:
+long-term memory, preference learning, habit learning, workflow learning,
+personal knowledge graph, multi-LLM, optional web search, document knowledge base,
+and continuous learning from user feedback.
+
+### Added
+
+**`spidy/brain/` package — 9 new files**
+
+- `types.py` — All shared Brain data types:
+  - `Intent` — classified action + entities + confidence + source
+  - `Entity` — named entity (name + value)
+  - `ConversationTurn` — single conversation exchange (role, text, intent, timestamp)
+  - `Decision` — what the Brain decided (mode + skill_name + rationale)
+  - `DecisionMode` — enum: SKILL / LLM_DIRECT / CLARIFY / REJECT
+  - `TurnRole` — enum: USER / ASSISTANT / SYSTEM
+  - `Plan` + `PlanStep` — ordered execution plan
+  - `ToolResult` — outcome of executing a plan step
+
+- `events.py` — 6 new EventBus events:
+  - `BrainProcessingStartedEvent` (brain.processing_started)
+  - `BrainResponseReadyEvent` (brain.response_ready)
+  - `BrainSessionStartedEvent` (brain.session_started)
+  - `BrainSessionEndedEvent` (brain.session_ended)
+  - `BrainToolCalledEvent` (brain.tool_called)
+  - `BrainToolResultEvent` (brain.tool_result)
+
+- `interfaces.py` — **Three forward-declared Lifelong AI Companion ABCs**:
+  - `MemoryInterface` — 4 methods: store, recall, search, clear → M6
+  - `KnowledgeInterface` — 3 methods: query, ingest, search_rag → M8+
+  - `LearningInterface` — 3 methods: record_feedback, get_preference, get_habit → M9+
+  - All raise `NotImplementedError` in M3 — permanent contracts, not stubs
+  - Brain accepts `None` for all; companion features degrade gracefully
+
+- `intent_classifier.py` — `IntentClassifier` (heuristic strategy, M3):
+  - 15+ action categories: file_*, app_*, web_*, system_*, note_*, timer_*, etc.
+  - Keyword pattern matching with per-rule confidence levels
+  - Entity extraction for query, app_name, filename, note_content, timer_duration
+  - Falls back to `action="chat"` for open-ended conversational input
+  - Designed as a strategy — LLM-based classifier (M4+) replaces via subclass
+
+- `conversation_manager.py` — `ConversationManager`:
+  - Rolling context window (deque, max_turns configurable)
+  - O(1) append + oldest-turn eviction
+  - `get_llm_messages()` — builds OpenAI-format message list with system prompt
+  - `get_summary()` — one-line recent context for DecisionEngine
+  - Session lifecycle: `start_session()` / `end_session()`
+  - Publishes `brain.session_started` / `brain.session_ended` events
+
+- `decision_engine.py` — `DecisionEngine`:
+  - SKILL: action in SkillRegistry → dispatch to skill
+  - LLM_DIRECT: `chat` or unknown action → answer via LLM
+  - CLARIFY: confidence < 0.6 → ask for clarification
+  - REJECT: empty utterance or system-reserved action
+  - Accepts optional `MemoryInterface` for future context enrichment (M6)
+
+- `planner.py` — `Planner`:
+  - Converts Decision → Plan (single-step in M3)
+  - SKILL decision: extracts entity params from Intent
+  - LLM decision: creates llm step with conversation context
+  - CLARIFY: creates clarify step with question text
+  - REJECT: creates noop step
+  - Accepts optional `KnowledgeInterface` for future RAG injection (M8+)
+
+- `tool_router.py` — `ToolRouter`:
+  - Routes skill steps to `SkillRegistry.find_skill_for_action()` → `skill.execute()`
+  - Routes llm steps to `BaseLLMClient.complete()`
+  - Handles clarify and noop steps directly
+  - All errors caught → `ToolResult.fail()` (never raises to Brain)
+  - Publishes `brain.tool_called` + `brain.tool_result` events per step
+  - Accepts optional `LearningInterface` for future feedback collection (M9+)
+
+- `brain.py` — `Brain` (top-level orchestrator):
+  - `process(utterance)` — full pipeline: classify → decide → plan → route
+  - `start()` / `stop()` lifecycle (subscribes to `voice.user_spoke`)
+  - `_on_user_spoke()` — EventBus handler for voice integration
+  - Accepts memory, knowledge, learning companion slots (all None by default)
+  - `_compose_response()` — aggregates ToolResults into final response text
+
+**`spidy/llm/` package — 3 new files**
+
+- `client.py` — Multi-backend LLM abstraction:
+  - `LLMMessage` (frozen dataclass: role + content)
+  - `LLMUsage` (token counts)
+  - `LLMResponse` (text, model, usage, finish_reason, success, error_message)
+  - `BaseLLMClient` (ABC: complete, stream, close)
+  - `LLMClientFactory.build(config)` — dispatches to correct backend
+
+- `backends/__init__.py` — Package init
+
+- `backends/ollama.py` — `OllamaClient`:
+  - Uses stdlib `urllib` + `asyncio.to_thread()` — zero extra dependencies
+  - `complete()` → POST /api/chat (stream=false)
+  - `stream()` → POST /api/chat (stream=true) → async generator
+  - Returns `LLMResponse.failure()` if Ollama is not running (never raises)
+
+**Config**
+
+- `BrainConfig` (new Pydantic model in `spidy/config/manager.py`):
+  - `intent_classifier` — strategy selection ("heuristic" / "llm")
+  - `min_intent_confidence` — clarify threshold (default 0.6)
+  - `max_conversation_turns` — rolling window size (default 20)
+  - `decision_mode` — auto / skill_only / llm_only
+  - `tool_routing_enabled` — enable skill dispatch
+  - `enable_memory` / `enable_knowledge` / `enable_learning` — companion feature flags
+  - `enable_web_search` — optional web search (M4+)
+- Added `brain: BrainConfig` field to `SpidyConfig`
+
+**SpidyCore**
+
+- `spidy/core/app.py` — Brain wired into `_run()` + `_stop()` lifecycle
+  - Creates `SkillRegistry`, builds `OllamaClient`, instantiates `Brain`
+  - Non-fatal: logs warning + continues without Brain if construction fails
+
+**Tests**
+
+- `tests/unit/test_brain.py` — **106 unit tests** across 9 test classes:
+  - `TestBrainConfig` (4 tests)
+  - `TestIntentClassifier` (14 tests)
+  - `TestConversationManager` (15 tests)
+  - `TestDecisionEngine` (7 tests)
+  - `TestPlanner` (7 tests)
+  - `TestToolRouter` (10 tests)
+  - `TestBrainPipeline` (12 tests)
+  - `TestBrainInterfaces` (13 tests)
+  - `TestLLMClient` (7 tests)
+  - `TestBrainEvents` (6 tests)
+  - `TestBrainTypes` (11 tests)
+
+---
+
 
 ## [0.2.0] — 2026-07-11 — Milestone 2: Context Observer Layer
 

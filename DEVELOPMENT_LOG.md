@@ -106,15 +106,79 @@ ObserverManager
 
 ---
 
-## Next: Milestone 3 — Reasoning & Conversation
+## Milestone 3 — Brain Core ✅
+
+**Status:** Complete and fully verified  
+**Tests:** 106 tests, all passing (2026-07-11)
+
+### Context: Lifelong AI Companion Architecture
+
+This milestone introduced a critical product reframe: Spidy is not just a desktop assistant — it is a **Lifelong AI Companion**. The Brain was designed from scratch to support this:
+
+- Long-term memory (M6), knowledge graph + RAG (M8+), continuous learning (M9+)
+- Multi-LLM provider support (Ollama today; OpenAI/Claude/Gemini planned M4+)
+- All future companion systems slot in as interface implementations with no Brain restructuring
+
+### Architecture
+
+```
+Brain (orchestrator)
+├── IntentClassifier      utterance → Intent (heuristic M3, LLM-based M4+)
+├── ConversationManager   rolling context window + session lifecycle
+├── DecisionEngine        Intent → Decision (SKILL / LLM_DIRECT / CLARIFY / REJECT)
+├── Planner               Decision → Plan (ordered PlanSteps)
+├── ToolRouter            Plan → ToolResult(s) via SkillRegistry or LLM
+│
+├── MemoryInterface       [PLACEHOLDER] long-term recall, M6
+├── KnowledgeInterface    [PLACEHOLDER] document RAG + knowledge graph, M8+
+└── LearningInterface     [PLACEHOLDER] preferences + habits + feedback, M9+
+```
+
+### Files added
+
+| File | Purpose |
+|------|---------|
+| `spidy/brain/types.py` | Shared data types: Intent, Entity, Decision, Plan, PlanStep, ToolResult, ConversationTurn |
+| `spidy/brain/events.py` | EventBus events: brain.processing_started, brain.response_ready, session/tool events |
+| `spidy/brain/interfaces.py` | **Three forward-declared ABCs** for Lifelong AI Companion integration |
+| `spidy/brain/intent_classifier.py` | Heuristic IntentClassifier (15+ action categories, entity extraction) |
+| `spidy/brain/conversation_manager.py` | ConversationManager (rolling window, session lifecycle, LLM message builder) |
+| `spidy/brain/decision_engine.py` | DecisionEngine (intent → SKILL/LLM_DIRECT/CLARIFY/REJECT via registry lookup) |
+| `spidy/brain/planner.py` | Planner (Decision → single-step Plan; multi-step ready for M4+) |
+| `spidy/brain/tool_router.py` | ToolRouter (executes Plans via SkillRegistry or LLM; emits tool events) |
+| `spidy/brain/brain.py` | Brain top-level orchestrator; subscribes to voice.user_spoke events |
+| `spidy/brain/__init__.py` | Public API: `from spidy.brain import Brain` |
+| `spidy/llm/client.py` | Multi-backend LLM abstraction: LLMMessage, LLMResponse, BaseLLMClient, LLMClientFactory |
+| `spidy/llm/backends/__init__.py` | Package init |
+| `spidy/llm/backends/ollama.py` | OllamaClient (stdlib urllib, zero extra deps, graceful fail if Ollama not running) |
+| `tests/unit/test_brain.py` | 106 unit tests across all 9 test classes |
+
+### Files modified
+
+| File | Change |
+|------|--------|
+| `spidy/config/manager.py` | Added `BrainConfig` with companion feature flags; added to `SpidyConfig` |
+| `spidy/core/app.py` | Wired Brain into `_run()` and `_stop()` lifecycle |
+
+### Key design decisions
+
+1. **Companion interfaces as permanent contracts** — `MemoryInterface`, `KnowledgeInterface`, `LearningInterface` are not stubs to be deleted later. They are the permanent ABCs that future milestones fill in via subclassing.
+
+2. **Brain accepts None for all companion slots** — No features break when interfaces are absent. The Brain degrades gracefully: context window only, no RAG, no personalisation.
+
+3. **Heuristic IntentClassifier as strategy** — The M3 classifier uses keyword rules. It's designed as a replaceable strategy; an LLM-based classifier (M4+) subclasses and overrides `classify()`.
+
+4. **OllamaClient uses zero extra dependencies** — Python stdlib `urllib` + `asyncio.to_thread()`. No httpx or openai package needed. Future providers are added in M4.
+
+5. **BrainConfig separate from ReasoningConfig** — `ReasoningConfig` owns LLM connection settings; `BrainConfig` owns Brain behavior and companion feature flags. Both live in `SpidyConfig`.
+
+6. **EventBus is the only coupling** — Brain → EventBus for voice.user_spoke events. VoiceEngine, UI, and Memory systems are all decoupled.
+
+---
+
+## Next: Milestone 4 — Awaiting approval
 
 > **Awaiting user approval before starting.**
-
-Planned scope (subject to approval):
-- LLM client abstraction (local Ollama + cloud fallback)
-- Intent resolution pipeline
-- Conversation context manager
-- Response routing
 
 ---
 

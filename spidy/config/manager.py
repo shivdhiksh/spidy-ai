@@ -134,7 +134,8 @@ class VoiceConfig(BaseModel):
 
 
 class ReasoningConfig(BaseModel):
-    provider: str = "ollama"
+    """LLM provider and generation settings."""
+    provider: str = "ollama"       # "ollama" | "openai" | "claude" | "gemini"
     model: str = "llama3.2:3b"
     base_url: str = "http://localhost:11434"
     api_key: str | None = None
@@ -142,6 +143,48 @@ class ReasoningConfig(BaseModel):
     max_tokens: int = 1024
     timeout_seconds: int = 30
     system_prompt_path: str = "config/system_prompt.txt"
+
+
+class BrainConfig(BaseModel):
+    """
+    Configuration for the Brain Core (Milestone 3) and its future
+    Lifelong AI Companion extensions.
+
+    Companion feature flags
+    -----------------------
+    These flags are ``False`` by default and will be activated by future
+    milestones when the corresponding implementations are ready.
+    Setting them to ``True`` before implementation is available has no
+    effect — the Brain will log a warning and continue without the feature.
+    """
+
+    # ── Intent Classifier ─────────────────────────────────────────────────
+    # Classifier strategy: "heuristic" (M3) | "llm" (M4+)
+    intent_classifier: str = "heuristic"
+    # Minimum confidence to act on an intent without asking to clarify
+    min_intent_confidence: float = 0.6
+
+    # ── Conversation Window ───────────────────────────────────────────────
+    # Maximum number of turns to keep in the rolling context window
+    max_conversation_turns: int = 20
+
+    # ── Decision Engine ───────────────────────────────────────────────────
+    # Decision mode override: "auto" | "skill_only" | "llm_only"
+    decision_mode: str = "auto"
+    # Whether to route intents to registered skills
+    tool_routing_enabled: bool = True
+
+    # ── Companion Features (future milestones) ────────────────────────────
+    # Milestone 6: Long-term memory, episodic recall, semantic search
+    enable_memory: bool = False
+    # Milestone 8+: Knowledge graph, RAG, document ingestion
+    enable_knowledge: bool = False
+    # Milestone 9+: Preference learning, habit detection, feedback loop
+    enable_learning: bool = False
+
+    # ── Multi-LLM Support (Milestone 4+) ─────────────────────────────────
+    # Whether to enable optional web search (requires user permission)
+    enable_web_search: bool = False
 
 
 class ShortTermMemoryConfig(BaseModel):
@@ -244,6 +287,7 @@ class SpidyConfig(BaseModel):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
+    brain: BrainConfig = Field(default_factory=BrainConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)

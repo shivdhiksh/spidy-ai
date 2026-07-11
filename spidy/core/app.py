@@ -54,6 +54,7 @@ from spidy.logging import configure as configure_logging
 from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
+    from spidy.brain.brain import Brain
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
 
@@ -80,6 +81,7 @@ class SpidyCore:
         self._device_mgr: DeviceManager | None = None
         self._voice_engine: VoiceEngine | None = None
         self._observer_mgr: ObserverManager | None = None
+        self._brain: Brain | None = None
         self._shutdown_event = asyncio.Event()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -227,6 +229,32 @@ class SpidyCore:
                 )
                 self._observer_mgr = None
 
+        # ── Start Brain (always on, if reasoning config present) ──────────
+        if self._settings:
+            try:
+                from spidy.brain.brain import Brain
+                from spidy.llm.client import LLMClientFactory
+                from spidy.skills.registry import SkillRegistry
+
+                skill_registry = SkillRegistry()
+                llm_client = LLMClientFactory.build(self._settings.reasoning)
+
+                self._brain = Brain(
+                    bus=self._bus,
+                    config=self._settings.reasoning,
+                    skill_registry=skill_registry,
+                    llm_client=llm_client,
+                    user_name=self._settings.app.user_name,
+                )
+                await self._brain.start()
+                log.info("Brain running. Ready to process utterances.")
+            except Exception as exc:
+                log.warning(
+                    "Brain failed to start (non-fatal): {exc}. Running without Brain.",
+                    exc=exc,
+                )
+                self._brain = None
+
         # Announce to all modules that we are live
         await self._bus.publish(SpidyStartedEvent())
 
@@ -241,6 +269,10 @@ class SpidyCore:
 
         self._transition(LifecycleState.STOPPING)
         log.info("Stopping Spidy...")
+
+        # Stop Brain
+        if self._brain is not None:
+            await self._brain.stop()
 
         # Stop ObserverManager
         if self._observer_mgr is not None:
