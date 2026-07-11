@@ -220,9 +220,81 @@ class UIConfig(BaseModel):
 
 class PermissionsConfig(BaseModel):
     policy_file: str = "permissions/policies/default_policy.yaml"
+    # T0: always allow (no confirmation)
+    # T1: confirm once per session
+    # T2: confirm every time
+    # T3: requires explicit unlock
     require_confirmation_for: list[str] = Field(default_factory=list)
+    # Default tier for actions not explicitly mapped
+    default_tier: str = "T0"
     audit_log_enabled: bool = True
     audit_log_file: str = "spidy_audit.log"
+
+
+class LLMProviderConfig(BaseModel):
+    """
+    Per-provider LLM configuration.
+    Each entry in MultiLLMConfig.providers is one of these.
+    """
+    name: str                          # e.g. "ollama", "openai", "claude", "gemini"
+    enabled: bool = True
+    model: str = ""                    # model name; falls back to provider default
+    base_url: str = ""                 # override base URL (useful for Ollama)
+    api_key: str = ""                  # API key (empty = env var or unauthenticated)
+    temperature: float = 0.7
+    max_tokens: int = 1024
+    timeout_seconds: int = 30
+
+
+class MultiLLMConfig(BaseModel):
+    """
+    Ordered list of LLM providers with failover policy.
+
+    Providers are tried in order. On failure the router falls back
+    to the next enabled provider in the list.
+    """
+    providers: list[LLMProviderConfig] = Field(
+        default_factory=lambda: [
+            LLMProviderConfig(name="ollama", model="llama3.2:3b",
+                              base_url="http://localhost:11434"),
+        ]
+    )
+    # Number of consecutive failures before a provider is skipped for a session
+    failure_threshold: int = 3
+    # If True, fall back to the next provider automatically on failure
+    auto_fallback: bool = True
+
+
+class SkillsConfig(BaseModel):
+    """
+    Configuration for the built-in skill set.
+    Individual flags let users disable specific skills.
+    """
+    # Built-in Tier 0 skills (always safe, no confirmation)
+    help_skill_enabled: bool = True
+    time_skill_enabled: bool = True
+    greet_skill_enabled: bool = True
+
+    # Built-in Tier 0/1 skills
+    note_skill_enabled: bool = True
+    timer_skill_enabled: bool = True
+    system_skill_enabled: bool = True
+
+    # Notes storage location (relative to app data dir)
+    notes_file: str = "notes.jsonl"
+
+
+class ExecutorConfig(BaseModel):
+    """
+    Skill execution engine settings.
+    Controls retry behaviour and per-skill timeouts.
+    """
+    max_retries: int = 2
+    retry_delay_seconds: float = 0.5
+    skill_timeout_seconds: float = 30.0
+    # Whether to check permission tiers before executing
+    permission_checking_enabled: bool = True
+
 
 
 class PluginsConfig(BaseModel):
@@ -287,7 +359,10 @@ class SpidyConfig(BaseModel):
     voice: VoiceConfig = Field(default_factory=VoiceConfig)
     context: ContextConfig = Field(default_factory=ContextConfig)
     reasoning: ReasoningConfig = Field(default_factory=ReasoningConfig)
+    llm: MultiLLMConfig = Field(default_factory=MultiLLMConfig)
     brain: BrainConfig = Field(default_factory=BrainConfig)
+    skills: SkillsConfig = Field(default_factory=SkillsConfig)
+    executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)

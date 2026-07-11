@@ -8,10 +8,60 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Planned — Milestone 4: Multi-LLM + Real Intent Classification
-- OpenAI / Claude / Gemini LLM backends
-- LLM-based intent classifier (replaces heuristic M3 classifier)
-- Streaming response support for real-time TTS
+### Planned — Milestone 5: Desktop Agent + Vision
+- App launcher, file manager, screenshot, window management
+- Vision pipeline (screenshot → LLM vision analysis)
+- T2 permission confirmation dialogs (UI)
+- Context-aware system state injection
+
+---
+
+## [0.4.0] — 2026-07-11 · Milestone 4: Multi-LLM + Skills Runtime
+
+### Added
+
+**Multi-LLM Backend Layer**
+- `spidy/llm/backends/openai.py` — `OpenAIClient` using stdlib `urllib` (no `openai` package)
+- `spidy/llm/backends/claude.py` — `ClaudeClient` for Anthropic Messages API with system-message extraction and consecutive-role merging
+- `spidy/llm/backends/gemini.py` — `GeminiClient` for Google Generative Language API with OpenAI→Gemini role mapping
+- `spidy/llm/router.py` — `LLMRouter` implementing `BaseLLMClient` with ordered failover, per-provider failure threshold, `reset_failures()`, and streaming support
+- `spidy/llm/events.py` — `LLMRequestStartedEvent`, `LLMResponseReadyEvent`, `LLMProviderFailedEvent`, `LLMProviderSwitchedEvent`
+
+**Permission Manager**
+- `spidy/permissions/manager.py` — `PermissionTier` enum (T0–T3), `PermissionManager` with tier evaluation, policy override via config, per-session T1 tracking, T3 unlock, audit log (JSONL)
+- `spidy/permissions/events.py` — `PermissionGrantedEvent`, `PermissionDeniedEvent`, `PermissionRequestedEvent`
+
+**Skill Executor**
+- `spidy/execution/executor.py` — `SkillExecutor` with permission gate, configurable retry loop, per-skill timeout, EventBus lifecycle events
+- `spidy/execution/events.py` — `SkillExecutionStartedEvent`, `SkillExecutionCompletedEvent`, `SkillExecutionFailedEvent`, `SkillRetryEvent`
+
+**Built-in Skills (6)**
+- `HelpSkill` — Lists all registered capabilities from the SkillRegistry (T0)
+- `TimeSkill` — Current time/date/day/datetime (T0, stdlib only)
+- `GreetSkill` — Personalised greetings, farewells, and self-introduction with time-of-day awareness (T0)
+- `NoteSkill` — JSONL notes file: take (T1), read (T0), find (T0), clear (T2); thread-safe
+- `TimerSkill` — In-memory asyncio countdown timers with human duration parsing (T0)
+- `SystemSkill` — Live CPU/RAM/battery info via psutil; volume/lock stubs for M7 (T0/T1)
+- `register_builtin_skills()` — Convenience loader with per-skill enable flags from `SkillsConfig`
+
+**Config Extensions**
+- `LLMProviderConfig` — Per-provider config with name, enabled, model, base_url, api_key, temperature, max_tokens, timeout
+- `MultiLLMConfig` — Ordered providers list, failure_threshold, auto_fallback
+- `SkillsConfig` — Per-skill enable flags, notes_file path
+- `ExecutorConfig` — max_retries, retry_delay_seconds, skill_timeout_seconds, permission_checking_enabled
+- All new config models wired into `SpidyConfig` as `llm`, `skills`, `executor` fields
+
+**Tests**
+- `tests/unit/test_llm_backends.py` — 52 tests (data types, OpenAI, Claude, Gemini, LLMRouter, factory, events)
+- `tests/unit/test_permissions.py` — 24 tests (tier enum, T0–T3, policy override, EventBus)
+- `tests/unit/test_executor.py` — 16 tests (execution, retry, timeout, permissions, events)
+- `tests/unit/test_builtin_skills.py` — 44 tests (all 6 skills, loader)
+- **Total: 136 new tests; 385 total — all passing**
+
+### Changed
+- `spidy/llm/client.py` — Added `provider_name` class attribute, `health_check()` method, `build_from_provider_config()` and `build_router()` factory methods; expanded provider dispatch to all four backends
+- `spidy/llm/backends/ollama.py` — Added `provider_name = "ollama"`, `health_check()` implementation
+- `spidy/permissions/__init__.py` — Exports `PermissionManager`, `PermissionTier`
 
 ---
 

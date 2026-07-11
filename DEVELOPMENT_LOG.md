@@ -176,7 +176,96 @@ Brain (orchestrator)
 
 ---
 
-## Next: Milestone 4 — Awaiting approval
+## Milestone 4 — Multi-LLM + Skills Runtime ✅
+
+**Status:** Complete and fully verified  
+**Tests:** 134 new tests (385 total, all passing) — 2026-07-11
+
+### What was built
+
+**Multi-LLM Backend Layer (`spidy/llm/`)**
+
+| File | Purpose |
+|------|---------|
+| `backends/openai.py` | OpenAIClient — stdlib urllib, no openai package required |
+| `backends/claude.py` | ClaudeClient — Anthropic Messages API, system-message extraction |
+| `backends/gemini.py` | GeminiClient — Google Generative Language API, role mapping |
+| `router.py` | LLMRouter — ordered failover, EventBus events, failure threshold |
+| `events.py` | LLM EventBus events: request_started, response_ready, provider_failed, provider_switched |
+| `client.py` | Updated — `health_check()`, `provider_name`, `build_router()`, `build_from_provider_config()` |
+
+**All four backends use Python stdlib `urllib` only — zero cloud package dependencies.**
+
+**Permission Manager (`spidy/permissions/`)**
+
+| File | Purpose |
+|------|---------|
+| `manager.py` | `PermissionTier` enum (T0–T3), `PermissionManager` with tier evaluation, audit log, session tracking |
+| `events.py` | `PermissionGrantedEvent`, `PermissionDeniedEvent`, `PermissionRequestedEvent` |
+
+Tier semantics:
+- T0 — Always allowed (time, help, greet)
+- T1 — Auto-approved per session (take_note, set_volume)
+- T2 — Auto-denied in M4 (confirmation UI is M5+)
+- T3 — Locked until `unlock_t3()` is called
+
+**Skill Executor (`spidy/execution/`)**
+
+| File | Purpose |
+|------|---------|
+| `executor.py` | `SkillExecutor` — permission gate, retry loop, timeout, EventBus events |
+| `events.py` | `SkillExecutionStartedEvent`, `SkillExecutionCompletedEvent`, `SkillExecutionFailedEvent`, `SkillRetryEvent` |
+
+**Built-in Skills (`spidy/skills/builtin/`)**
+
+| Skill | Actions | Tiers |
+|-------|---------|-------|
+| `HelpSkill` | `show_help` | T0 |
+| `TimeSkill` | `get_time`, `get_date`, `get_day`, `get_datetime` | T0 |
+| `GreetSkill` | `greet`, `farewell`, `introduce` | T0 |
+| `NoteSkill` | `take_note` (T1), `read_notes`, `find_note` (T0), `clear_notes` (T2) | Mixed |
+| `TimerSkill` | `set_timer`, `list_timers`, `cancel_timer` | T0 |
+| `SystemSkill` | `get_system_info` (T0), `set_volume`, `lock_screen` (T1, stubs) | Mixed |
+
+**Config Extensions (`spidy/config/manager.py`)**
+
+| Model | Fields |
+|-------|--------|
+| `LLMProviderConfig` | name, enabled, model, base_url, api_key, temperature, max_tokens, timeout |
+| `MultiLLMConfig` | providers list, failure_threshold, auto_fallback |
+| `SkillsConfig` | per-skill enable flags, notes_file |
+| `ExecutorConfig` | max_retries, retry_delay_seconds, skill_timeout_seconds, permission_checking_enabled |
+
+All added to `SpidyConfig` as `llm`, `skills`, `executor` fields.
+
+**Tests**
+
+| File | Tests | Coverage |
+|------|-------|---------|
+| `test_llm_backends.py` | 52 | Data types, OpenAI, Claude, Gemini clients, LLMRouter, LLMClientFactory, events |
+| `test_permissions.py` | 24 | Tier enum, T0/T1/T2/T3 evaluation, policy override, EventBus events |
+| `test_executor.py` | 16 | Basic execution, retry, timeout, permission gate, event publishing |
+| `test_builtin_skills.py` | 44 | All 6 built-in skills + register_builtin_skills() |
+| **Total new** | **136** | |
+| **Grand total** | **385** | All passing |
+
+### Key design decisions
+
+1. **Zero cloud dependencies** — All four LLM backends use Python stdlib `urllib` + `asyncio.to_thread()`. OpenAI, Claude, and Gemini are fully implemented without their official SDKs.
+
+2. **LLMRouter is a BaseLLMClient** — The router itself implements the same interface as individual backends. Any code that accepts `BaseLLMClient` works with single providers or the router transparently.
+
+3. **Failure threshold per provider** — Once a provider exceeds N consecutive failures it is skipped for the session. `reset_failures()` re-enables it.
+
+4. **PermissionManager is injected, not global** — SkillExecutor receives `PermissionManager | None`. With None, all actions are allowed (useful in tests and for the Brain's internal tool routing).
+
+5. **T2 auto-denied in M4** — Confirmation dialogs require a UI (M5+). T2 actions are blocked in M4 to prevent unconfirmed destructive operations.
+
+6. **Built-in skills are self-contained** — Each skill only imports Python stdlib. `register_builtin_skills()` is individually guarded so one registration failure doesn't prevent the rest from loading.
+
+---
+
+## Next: Milestone 5 — Awaiting approval
 
 > **Awaiting user approval before starting.**
 

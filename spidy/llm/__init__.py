@@ -1,8 +1,18 @@
-"""
-spidy.llm — Multi-Backend LLM Client Package
+# spidy/llm package
+from spidy.llm.client import (
+    BaseLLMClient,
+    LLMClientFactory,
+    LLMMessage,
+    LLMResponse,
+    LLMUsage,
+)
+from spidy.llm.router import LLMRouter
 
-Public API
-----------
-    from spidy.llm.client import BaseLLMClient, LLMClientFactory, LLMMessage, LLMResponse
-    from spidy.llm.backends.ollama import OllamaClient
-"""
+__all__ = [
+    "BaseLLMClient",
+    "LLMClientFactory",
+    "LLMMessage",
+    "LLMResponse",
+    "LLMUsage",
+    "LLMRouter",
+]
