@@ -8,11 +8,111 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Planned — Milestone 7: Wake Word + Voice Integration
-- "Hey Spidy" wake-word detection (connect to `overlay.show_for_wake_word`)
-- Real-time STT → UIWaveformDataEvent pipeline
-- Voice command loop (WAKE_READY → LISTENING → THINKING → SPEAKING → IDLE)
-- Context-aware system state injection
+_No unreleased changes. Milestone 8 planning in progress._
+
+---
+
+## [0.7.0] — 2026-07-11 · Milestone 7: Browser Agent
+
+### Added
+
+**Browser Agent Core** (`spidy/browser/`)
+
+**`BrowserAgent`** (`browser/agent.py`) — Owns the browser session lifecycle; provides a clean async API to BrowserSkill. Auto-starts on first use. Supports:
+- `start()` / `stop()` with CDP attach before launching a new window
+- `open_url(url, new_tab)` — navigate to any URL, optionally in a new tab
+- `close_tab(tab_id)` — close a specific tab by ID
+- `get_current_page_info()` — returns `PageInfo` (title, URL, tab_id, load_time_ms)
+- `get_all_tabs()` — returns list of `TabInfo` (all open tabs)
+- `navigate_back()` / `navigate_forward()` / `refresh()`
+- `search_google(query)` / `search_youtube(query)` — open search results pages
+- `read_page_text(max_chars)` — extract visible body text
+- `download_file(url, dest_dir)` — returns `DownloadResult`
+- `get_browser_history(limit)` — reads Chrome/Edge SQLite history (best-effort)
+
+**`BrowserBackend` ABC** (`browser/backends/base.py`) — Stable async contract for any browser automation backend. Mirrors `BaseLLMClient` pattern — makes Playwright swappable.
+
+**`PlaywrightBackend`** (`browser/backends/playwright_backend.py`) — Playwright async API implementation:
+- Chromium / Firefox / WebKit engine selection
+- CDP attach to existing Chrome session (`--remote-debugging-port=9222`) before launching new window
+- Headed mode by default (user sees the browser)
+- Download handler with configurable destination directory
+- `get_browser_history()` via Chrome/Edge SQLite copy (non-destructive, temp file)
+- Graceful degradation if `playwright` is not installed (RuntimeError → caught by BrowserAgent)
+
+**Browser Types** (`browser/types.py`) — Five frozen dataclasses:
+- `PageInfo(title, url, tab_id, load_time_ms)`
+- `TabInfo(tab_id, title, url, is_active)`
+- `DownloadResult(filename, path, size_bytes, success, error)`
+- `HistoryEntry(title, url, visit_time)`
+- `SearchResult(title, url, snippet)` — reserved for future result-scraping
+
+---
+
+**Browser Skills** (`spidy/skills/browser/`)
+
+**`BrowserSkill`** (`browser_skill.py`) — 14 capabilities (T0/T1/T2):
+
+| Action | Tier | Description |
+|--------|------|-------------|
+| `get_page_info` | T0 | Read current page title + URL |
+| `list_tabs` | T0 | List all open tabs |
+| `read_page` | T0 | Extract visible text from page |
+| `open_browser` | T1 | Launch browser or ensure it's open |
+| `open_url` | T1 | Navigate to a URL |
+| `open_new_tab` | T1 | Open a URL in a new tab |
+| `navigate_back` | T1 | Go back in browser history |
+| `navigate_forward` | T1 | Go forward in browser history |
+| `refresh_page` | T1 | Reload current page |
+| `search_google` | T1 | Open Google search results |
+| `search_youtube` | T1 | Open YouTube search results |
+| `close_browser` | T2 | Close browser + all tabs (confirmation required) |
+| `close_tab` | T2 | Close a specific tab (confirmation required) |
+| `download_file` | T2 | Download a file to disk (confirmation required) |
+
+**`register_browser_skills(registry, config, bus)`** — Skill loader; follows the same pattern as `register_desktop_skills()`.
+
+---
+
+**Browser Events** (`spidy/skills/browser/events.py`) — 12 typed EventBus events (`browser.*`):
+
+`BrowserLaunchedEvent`, `BrowserClosedEvent`, `PageNavigatedEvent`, `TabClosedEvent`, `PageReadEvent`, `SearchResultsEvent`, `DownloadStartedEvent`, `DownloadCompletedEvent`, `NavigationBackEvent`, `NavigationForwardEvent`, `PageRefreshedEvent`, `BrowserErrorEvent`
+
+---
+
+**Config Extensions**
+
+- `BrowserConfig` Pydantic model added to `spidy/config/manager.py`
+- `browser:` section added to `config/spidy_config.yaml`
+- `browser_skill_enabled` + 9 browser configuration fields added to `SkillsConfig`
+- `browser: BrowserConfig` field added to `SpidyConfig`
+- `playwright>=1.44.0` added to `requirements.txt`
+
+**Core Integration**
+
+- `spidy/core/app.py`: `register_browser_skills()` called after `register_desktop_skills()` in the startup sequence
+
+---
+
+### Tests Added
+
+| File | Tests |
+|------|-------|
+| `tests/unit/test_browser_types.py` | 15 |
+| `tests/unit/test_browser_events.py` | 37 |
+| `tests/unit/test_browser_agent.py` | 40 |
+| `tests/unit/test_browser_skill.py` | 62 |
+| `tests/integration/test_browser_skill_integration.py` | 22 |
+| **Total new** | **176** |
+| **Grand total (all milestones)** | **914** |
+
+### Architecture Notes
+
+- **BrowserSkill → BrowserAgent → BrowserBackend ← PlaywrightBackend** — Brain/BrowserSkill never import Playwright directly.
+- **Lazy init** — Browser does not launch at startup; first T1/T2 action triggers `BrowserAgent.start()`.
+- **CDP attach** — If Chrome is already open with `--remote-debugging-port=9222`, Spidy attaches to that session (no new window). Falls back to launching a new browser.
+- **Headed by default** — User sees the browser. Set `browser.headless: true` in config for background operation.
+- **T2 confirmation** — `close_browser`, `close_tab`, and `download_file` require interactive T2 confirmation through the existing `PermissionManager` framework.
 
 ---
 

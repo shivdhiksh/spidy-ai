@@ -339,6 +339,20 @@ class SkillsConfig(BaseModel):
     desktop_file_search_max_results: int = 50
     desktop_file_search_root: str = "~"   # Expanded to home directory at runtime
 
+    # ── Milestone 7 — Browser Agent Skills ────────────────────────────────
+    browser_skill_enabled: bool = True
+
+    # Browser configuration (mirrors BrowserConfig fields for convenience)
+    browser_type: str = "chromium"          # chromium | firefox | webkit
+    browser_headless: bool = False          # headed by default (user sees browser)
+    browser_download_dir: str = "~"         # default download directory
+    browser_connect_to_existing: bool = True  # try CDP attach before launching
+    browser_cdp_endpoint: str = "http://localhost:9222"
+    browser_page_load_timeout_ms: int = 30_000
+    browser_navigation_timeout_ms: int = 10_000
+    browser_read_page_max_chars: int = 5000
+    browser_history_limit: int = 20
+
 
 class ExecutorConfig(BaseModel):
     """
@@ -400,6 +414,24 @@ class ContextConfig(BaseModel):
     notification_monitor_enabled: bool = True
 
 
+class BrowserConfig(BaseModel):
+    """
+    Browser Agent configuration (Milestone 7).
+
+    Controls which browser engine to use, whether to run headless,
+    where to save downloads, and how to connect to existing sessions.
+    """
+    browser_type: str = "chromium"           # "chromium" | "firefox" | "webkit"
+    headless: bool = False                   # headed by default (user sees the browser)
+    download_dir: str = "~"                  # default download destination (home dir)
+    connect_to_existing: bool = True         # try CDP attach first
+    cdp_endpoint: str = "http://localhost:9222"  # Chrome DevTools endpoint
+    page_load_timeout_ms: int = 30_000       # page navigation timeout
+    navigation_timeout_ms: int = 10_000      # back/forward/refresh timeout
+    read_page_max_chars: int = 5000          # max chars from read_page action
+    history_limit: int = 20                  # max history entries returned
+
+
 class SpidyConfig(BaseModel):
     """
     Root configuration model.
@@ -424,6 +456,7 @@ class SpidyConfig(BaseModel):
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
+    browser: BrowserConfig = Field(default_factory=BrowserConfig)
 
 
 # ─── ConfigManager ────────────────────────────────────────────────────────────

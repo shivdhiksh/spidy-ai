@@ -415,5 +415,63 @@ All skills flow through `SkillExecutor` → `PermissionManager` → `EventBus`.
 7. **AppSkill close_app is T2** — Even though closing an app is "mild", it can cause data loss if unsaved. T2 requires explicit user confirmation dialog.
 
 ---
+---
 
 *Last updated: 2026-07-11 — Milestone 6 complete (765 tests passing)*
+
+---
+
+## Milestone 7 — Browser Agent ✅
+
+**Status:** Complete  
+**Tests:** 914 passing (176 new; 0 regressions)  
+**Commit:** see git log
+
+### What was built
+
+**Package: `spidy/browser/`**
+
+- **`BrowserBackend` ABC** (`backends/base.py`) — Stable async contract for any browser automation backend. All methods are async. Mirrors `BaseLLMClient` ABC pattern. Enables Selenium/CDP-direct backends in future milestones without touching BrowserSkill.
+
+- **`PlaywrightBackend`** (`backends/playwright_backend.py`) — Playwright async API implementation. CDP attach to existing Chrome session before launching new window. Multi-tab management via Playwright Page list. Download handling. Chrome/Edge SQLite history (temp-file copy to avoid lock). Graceful degradation if `playwright` is not installed.
+
+- **`BrowserAgent`** (`agent.py`) — Owns one browser session. Auto-starts on first use. Provides search URL builder for Google/YouTube. Passes `max_chars` down to backend for `read_page_text`. All actions log via `get_logger(__name__)`.
+
+- **`browser/types.py`** — Five frozen dataclasses: `PageInfo`, `TabInfo`, `DownloadResult`, `HistoryEntry`, `SearchResult`.
+
+**Package: `spidy/skills/browser/`**
+
+- **`BrowserSkill`** — 14 capabilities in T0/T1/T2 tiers. Lazy BrowserAgent init. EventBus event publishing on every action. `on_unload()` stops the browser. T2 actions (close_browser, close_tab, download_file) require PermissionManager confirmation.
+
+- **`events.py`** — 12 typed EventBus events in `browser.*` namespace.
+
+- **`register_browser_skills(registry, config, bus)`** — Loader following M6 pattern. Reads `browser_skill_enabled` and all 9 browser config fields from `SkillsConfig`.
+
+**Config:**
+
+- `BrowserConfig` Pydantic model added to `manager.py`
+- `browser: BrowserConfig` field added to `SpidyConfig`
+- `SkillsConfig` extended with `browser_skill_enabled` + 9 browser-specific fields
+- `config/spidy_config.yaml` updated with `skills.browser_*` and `browser:` section
+
+### Key design decisions
+
+1. **Brain never imports Playwright** — The dependency chain is strict: `BrowserSkill → BrowserAgent → BrowserBackend ← PlaywrightBackend`. This is analogous to M4's `BaseLLMClient` pattern.
+
+2. **Lazy init** — `BrowserSkill._get_or_create_agent()` creates the agent on first call; `on_unload()` stops it. Zero browser windows at Spidy startup.
+
+3. **CDP attach** — `PlaywrightBackend._try_cdp_attach()` tries `chromium.connect_over_cdp(endpoint)` before launching. Falls back silently. Allows Spidy to reuse an already-open Chrome without opening a second window.
+
+4. **Headless=False by default** — Personal assistant use case. Config overrides available.
+
+5. **T2 for close_tab / close_browser / download_file** — Closing visible tabs is disruptive; downloads write to disk. Both use the existing M6 PermissionManager confirmation flow.
+
+6. **search_google / search_youtube navigate, not scrape** — Opens `google.com/search?q=...` and `youtube.com/results?search_query=...`. No ToS violations. Page can be read with `read_page` afterward.
+
+7. **FakeBackend in tests** — All unit tests use an in-memory `FakeBackend(BrowserBackend)` implementation. No real Playwright calls in the test suite. Integration tests also mock at backend level.
+
+8. **History via SQLite copy** — `get_browser_history()` copies the Chrome `History` file to a temp file before opening it (avoids SQLITE_BUSY from the running browser). Returns empty list on failure.
+
+---
+
+*Last updated: 2026-07-11 — Milestone 7 complete (914 tests passing)*

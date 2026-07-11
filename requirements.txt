@@ -21,3 +21,6 @@ winshell>=0.6           # Windows shell utilities (recycle bin management)
 pywin32>=306            # Win32 API bindings (window management, COM support)
 screen-brightness-control>=0.23.0  # Screen brightness control (best-effort)
 
+# Milestone 7 — Browser Agent
+playwright>=1.44.0      # Browser automation (Chromium/Firefox/WebKit)
+                        # After install: py -m playwright install chromium

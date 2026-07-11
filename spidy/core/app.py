@@ -256,6 +256,14 @@ class SpidyCore:
                     bus=self._bus,
                 )
 
+                # Register browser agent skills (Milestone 7)
+                from spidy.skills.browser import register_browser_skills
+                register_browser_skills(
+                    skill_registry,
+                    config=self._settings.skills,
+                    bus=self._bus,
+                )
+
                 self._brain = Brain(
                     bus=self._bus,
                     config=self._settings.reasoning,

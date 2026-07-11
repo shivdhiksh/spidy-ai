@@ -196,3 +196,29 @@ skills:
   desktop_file_search_max_results: 50   # Hard cap on search results
   desktop_file_search_root: "~"         # Default search root (home directory)
 
+  # Browser Agent skill (Milestone 7)
+  browser_skill_enabled: true
+  browser_type: "chromium"              # chromium | firefox | webkit
+  browser_headless: false               # false = user sees the browser (default)
+  browser_download_dir: "~"             # default download destination (home dir)
+  browser_connect_to_existing: true     # try CDP attach to running Chrome first
+  browser_cdp_endpoint: "http://localhost:9222"
+  browser_page_load_timeout_ms: 30000
+  browser_navigation_timeout_ms: 10000
+  browser_read_page_max_chars: 5000
+  browser_history_limit: 20
+
+# --------------------------------------------------------------------------- #
+# Browser Agent                                              (Milestone 7)    #
+# --------------------------------------------------------------------------- #
+browser:
+  browser_type: "chromium"              # chromium | firefox | webkit
+  headless: false                       # false = visible window (recommended)
+  download_dir: "~"                     # default download dir (home directory)
+  connect_to_existing: true             # attach to running Chrome via CDP first
+  cdp_endpoint: "http://localhost:9222" # Chrome --remote-debugging-port endpoint
+  page_load_timeout_ms: 30000           # ms to wait for a page to load
+  navigation_timeout_ms: 10000          # ms for back/forward/refresh
+  read_page_max_chars: 5000             # max characters from read_page action
+  history_limit: 20                     # max browser history entries
+
