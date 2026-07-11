@@ -8,12 +8,92 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-### Planned — Milestone 6: Wake Word + Voice Integration
+### Planned — Milestone 7: Wake Word + Voice Integration
 - "Hey Spidy" wake-word detection (connect to `overlay.show_for_wake_word`)
 - Real-time STT → UIWaveformDataEvent pipeline
 - Voice command loop (WAKE_READY → LISTENING → THINKING → SPEAKING → IDLE)
-- T2 permission confirmation dialogs using the overlay
 - Context-aware system state injection
+
+---
+
+## [0.6.0] — 2026-07-11 · Milestone 6: Desktop & File Agent
+
+### Added
+
+**Desktop Agent Skills** (`spidy/skills/desktop/`)
+
+**`FileSkill`** (`file_skill.py`) — Windows File & Folder Agent (T0/T1)
+- `search_files` — Recursive file search by name pattern; `fnmatch` glob support (T0)
+- `search_folders` — Recursive folder search by name (T0)
+- `open_file` — Opens file with default application via `os.startfile()` (T1)
+- `open_folder` — Opens folder in Windows Explorer via `subprocess` (T1)
+- `reveal_in_explorer` — Reveals and selects a file in Explorer (T1)
+- `list_recent_files` — Lists recently accessed files from shell recent folder (T0)
+- Configurable `search_root` and `max_results` (default: home dir, 50 results)
+- Pure `pathlib` search — no Windows API required for file enumeration
+- Publishes `FileSearchResultEvent`, `FileOpenedEvent`, `FolderOpenedEvent`, `RecentFilesResultEvent`
+
+**`AppSkill`** (`app_skill.py`) — Windows Application Agent (T0/T1/T2)
+- `detect_running_apps` — Lists running processes via `psutil` (T0)
+- `launch_app` — Launches application by name or alias via `subprocess.Popen()` (T1)
+- `bring_app_to_foreground` — Focuses running app window via `ctypes.windll.user32` (T1)
+- `close_app` — Terminates process: graceful `.terminate()` then `.kill()` fallback (T2)
+- 30+ built-in app aliases (`notepad`, `chrome`, `vscode`, `spotify`, `discord`, etc.)
+- Publishes `RunningAppsResultEvent`, `AppLaunchedEvent`, `AppForegroundedEvent`, `AppClosedEvent`
+
+**`SystemControlSkill`** (`system_control_skill.py`) — Windows System Control Agent (T1/T2/T3)
+- `set_volume` — System volume via `pycaw` COM API; graceful stub if unavailable (T1)
+- `set_brightness` — Screen brightness via `screen-brightness-control`; graceful fallback (T1)
+- `lock_workstation` — Lock session via `ctypes.windll.user32.LockWorkStation()` (T1)
+- `sleep_system` — Sleep via `ctypes.windll.powrprof.SetSuspendState()` (T2)
+- `shutdown_system` — Shutdown via `subprocess` + `shutdown.exe` with delay parameter (T3)
+- `restart_system` — Restart via `subprocess` + `shutdown.exe /r` (T3)
+- `empty_recycle_bin` — Empty recycle bin via `winshell`; graceful stub if unavailable (T2)
+- All Windows imports guarded with `try/except`; skill works (degraded) on non-Windows
+- Publishes `VolumeChangedEvent`, `BrightnessChangedEvent`, `WorkstationLockedEvent`,
+  `SystemSleepInitiatedEvent`, `SystemShutdownInitiatedEvent`, `SystemRestartInitiatedEvent`, `RecycleBinEmptiedEvent`
+
+**Desktop EventBus Events** (`spidy/skills/desktop/events.py`)
+- 15 typed event dataclasses across 3 namespaces:
+  - `desktop.file.*` — FileSearchResultEvent, FileOpenedEvent, FolderOpenedEvent, RecentFilesResultEvent
+  - `desktop.app.*` — RunningAppsResultEvent, AppLaunchedEvent, AppForegroundedEvent, AppClosedEvent
+  - `desktop.system.*` — VolumeChangedEvent, BrightnessChangedEvent, WorkstationLockedEvent,
+    SystemSleepInitiatedEvent, SystemShutdownInitiatedEvent, SystemRestartInitiatedEvent, RecycleBinEmptiedEvent
+
+**Desktop Skills Loader** (`spidy/skills/desktop/__init__.py`)
+- `register_desktop_skills(registry, config, bus)` — registers all 3 desktop skills
+- Per-skill enable flags (`file_skill_enabled`, `app_skill_enabled`, `system_control_skill_enabled`)
+- Individually guarded: one registration failure does not block others
+
+**Permission Manager Extended** (`spidy/permissions/`)
+- Added `PermissionResponseEvent` — UI publishes this to resolve pending T2 Future
+- T2 confirmation is now **interactive**: `PermissionManager` publishes `PermissionRequestedEvent`,
+  waits on an `asyncio.Future`, and resolves when the UI (or test) calls `respond_to_confirmation()`
+  or publishes `PermissionResponseEvent` on the bus
+- `t2_confirmation_timeout_seconds` config field (default 30 s); times out → deny
+- `_on_permission_response()` EventBus subscriber wires the round-trip automatically
+
+**Config Extensions** (`spidy/config/manager.py`)
+- `SkillsConfig` extended with 5 new M6 fields:
+  `file_skill_enabled`, `app_skill_enabled`, `system_control_skill_enabled`,
+  `desktop_file_search_max_results`, `desktop_file_search_root`
+- `PermissionsConfig` extended with `t2_confirmation_timeout_seconds`
+
+### Dependencies
+- Added `pycaw>=20240418` (Windows Audio Session API, volume control)
+- Added `winshell>=0.6` (Windows shell utilities, recycle bin)
+- Added `screen-brightness-control>=0.23.0` (screen brightness)
+- All M6 deps guarded — Spidy works without them (actions produce friendly errors)
+
+### Tests
+- **180 new tests** across 5 new test files (17 additions in test_permissions.py)
+  - `test_desktop_events.py`: 41 tests — all 15 event types, field defaults, EventBus roundtrip
+  - `test_file_skill.py`: 54 tests — capabilities, search, open, recent, EventBus integration
+  - `test_app_skill.py`: 44 tests — capabilities, detect, launch, foreground, close, aliases
+  - `test_system_control_skill.py`: 45 tests — all 7 actions, permission tiers, event publishing
+  - `tests/integration/test_desktop_skills_integration.py`: 17 tests — registry, executor, full pipeline
+  - `test_permissions.py`: +11 new tests for T2 confirmation workflow (interactive approval/denial via bus)
+- **Total: 765 tests passing, 0 failed**
 
 ---
 

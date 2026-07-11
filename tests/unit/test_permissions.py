@@ -115,21 +115,75 @@ class TestPermissionT1:
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# 4. T2 — Auto-Denied
+# 4. T2 — Requires Confirmation (M6+)
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestPermissionT2:
     @pytest.mark.asyncio
-    async def test_t2_auto_denied(self):
-        manager = _make_manager()
+    async def test_t2_denied_without_bus(self):
+        """T2 without a bus → instant deny (no UI can respond)."""
+        manager = _make_manager(bus=None)
         result = await manager.check("delete_file", tier="T2")
         assert not result
 
     @pytest.mark.asyncio
-    async def test_t2_denied_consistently(self):
-        manager = _make_manager()
+    async def test_t2_denied_consistently_without_bus(self):
+        """T2 without bus → always instantly denied."""
+        manager = _make_manager(bus=None)
         for _ in range(3):
             assert not await manager.check("delete_file", tier="T2")
+
+    @pytest.mark.asyncio
+    async def test_t2_approved_via_respond_to_confirmation(self):
+        """T2 with bus → approved when respond_to_confirmation(approved=True) is called."""
+        from spidy.core.event_bus import EventBus
+        bus = EventBus()
+        config = _make_config()
+        # Short timeout so test doesn't hang if something goes wrong
+        config.t2_confirmation_timeout_seconds = 2.0
+        manager = PermissionManager(config=config, bus=bus)
+
+        # Schedule the approval after a short delay (simulating user clicking OK)
+        async def _approve():
+            await asyncio.sleep(0.05)
+            manager.respond_to_confirmation("close_app", "sess-t2", approved=True)
+
+        check_task = asyncio.ensure_future(manager.check("close_app", tier="T2", session_id="sess-t2"))
+        asyncio.ensure_future(_approve())
+        result = await check_task
+        assert result
+
+    @pytest.mark.asyncio
+    async def test_t2_denied_via_respond_to_confirmation(self):
+        """T2 with bus → denied when respond_to_confirmation(approved=False) is called."""
+        from spidy.core.event_bus import EventBus
+        bus = EventBus()
+        config = _make_config()
+        config.t2_confirmation_timeout_seconds = 2.0
+        manager = PermissionManager(config=config, bus=bus)
+
+        async def _deny():
+            await asyncio.sleep(0.05)
+            manager.respond_to_confirmation("close_app", "sess-t2-deny", approved=False)
+
+        check_task = asyncio.ensure_future(
+            manager.check("close_app", tier="T2", session_id="sess-t2-deny")
+        )
+        asyncio.ensure_future(_deny())
+        result = await check_task
+        assert not result
+
+    @pytest.mark.asyncio
+    async def test_t2_times_out_and_denies(self):
+        """T2 with bus but no response → denied after timeout."""
+        from spidy.core.event_bus import EventBus
+        bus = EventBus()
+        config = _make_config()
+        config.t2_confirmation_timeout_seconds = 0.1  # Very short timeout
+        manager = PermissionManager(config=config, bus=bus)
+
+        result = await manager.check("risky_action", tier="T2", session_id="sess-timeout")
+        assert not result
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -164,20 +218,21 @@ class TestPermissionPolicyOverride:
     @pytest.mark.asyncio
     async def test_t0_action_overridden_to_t2(self):
         # Action declared T0 but in require_confirmation_for → treated as T2
-        manager = _make_manager(require=["some_action"])
+        # Without bus → instant deny
+        manager = _make_manager(require=["some_action"], bus=None)
         result = await manager.check("some_action", tier="T0")
-        assert not result  # T2 = auto-deny in M4
+        assert not result
 
     @pytest.mark.asyncio
     async def test_t1_action_overridden_to_t2(self):
-        manager = _make_manager(require=["take_note"])
+        manager = _make_manager(require=["take_note"], bus=None)
         result = await manager.check("take_note", tier="T1")
         assert not result
 
     @pytest.mark.asyncio
     async def test_t2_action_not_downgraded(self):
-        # T2 action not in require list stays T2
-        manager = _make_manager(require=[])
+        # T2 action not in require list stays T2 → instant deny (no bus)
+        manager = _make_manager(require=[], bus=None)
         result = await manager.check("delete_all", tier="T2")
         assert not result
 
@@ -204,18 +259,22 @@ class TestPermissionEvents:
 
     @pytest.mark.asyncio
     async def test_denied_event_published(self):
+        """T2 with bus: a PermissionRequestedEvent is emitted; result is denied if no response."""
         from spidy.core.event_bus import EventBus
-        from spidy.permissions.events import PermissionDeniedEvent
+        from spidy.permissions.events import PermissionRequestedEvent
 
         bus = EventBus()
         events = []
-        bus.subscribe("permission.denied", lambda e: events.append(e))
+        bus.subscribe("permission.requested", lambda e: events.append(e))
 
-        manager = _make_manager(bus=bus)
-        await manager.check("delete_file", tier="T2", session_id="s2")
+        config = _make_config()
+        config.t2_confirmation_timeout_seconds = 0.1  # Fast timeout
+        manager = PermissionManager(config=config, bus=bus)
+        result = await manager.check("delete_file", tier="T2", session_id="s2")
 
         await asyncio.sleep(0)
-        assert any(isinstance(e, PermissionDeniedEvent) for e in events)
+        assert not result  # Timed out → denied
+        assert any(isinstance(e, PermissionRequestedEvent) for e in events)
 
     @pytest.mark.asyncio
     async def test_no_event_bus_does_not_crash(self):
@@ -229,7 +288,67 @@ class TestPermissionEvents:
             PermissionDeniedEvent,
             PermissionGrantedEvent,
             PermissionRequestedEvent,
+            PermissionResponseEvent,
         )
         assert PermissionGrantedEvent.topic == "permission.granted"
         assert PermissionDeniedEvent.topic == "permission.denied"
         assert PermissionRequestedEvent.topic == "permission.requested"
+        assert PermissionResponseEvent.topic == "permission.response"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. T2 via EventBus PermissionResponseEvent (M6)
+# ──────────────────────────────────────────────────────────────────────────────
+
+class TestPermissionT2ViaBus:
+    @pytest.mark.asyncio
+    async def test_t2_resolved_via_event_bus(self):
+        """Simulates the UI publishing a PermissionResponseEvent to approve a T2 action."""
+        from spidy.core.event_bus import EventBus
+        from spidy.permissions.events import PermissionResponseEvent
+
+        bus = EventBus()
+        config = _make_config()
+        config.t2_confirmation_timeout_seconds = 2.0
+        manager = PermissionManager(config=config, bus=bus)
+
+        async def _ui_approve():
+            await asyncio.sleep(0.05)
+            await bus.publish(PermissionResponseEvent(
+                action="empty_recycle_bin",
+                session_id="ui-session",
+                approved=True,
+            ))
+
+        check_task = asyncio.ensure_future(
+            manager.check("empty_recycle_bin", tier="T2", session_id="ui-session")
+        )
+        asyncio.ensure_future(_ui_approve())
+        result = await check_task
+        assert result
+
+    @pytest.mark.asyncio
+    async def test_t2_rejected_via_event_bus(self):
+        """UI publishes PermissionResponseEvent with approved=False."""
+        from spidy.core.event_bus import EventBus
+        from spidy.permissions.events import PermissionResponseEvent
+
+        bus = EventBus()
+        config = _make_config()
+        config.t2_confirmation_timeout_seconds = 2.0
+        manager = PermissionManager(config=config, bus=bus)
+
+        async def _ui_reject():
+            await asyncio.sleep(0.05)
+            await bus.publish(PermissionResponseEvent(
+                action="sleep_system",
+                session_id="ui-session-deny",
+                approved=False,
+            ))
+
+        check_task = asyncio.ensure_future(
+            manager.check("sleep_system", tier="T2", session_id="ui-session-deny")
+        )
+        asyncio.ensure_future(_ui_reject())
+        result = await check_task
+        assert not result

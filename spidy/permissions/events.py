@@ -33,7 +33,7 @@ class PermissionDeniedEvent(Event):
 @dataclass
 class PermissionRequestedEvent(Event):
     """
-    Emitted when a T1/T2 action needs user confirmation.
+    Emitted when a T2 action needs user confirmation.
 
     The UI subscribes to this to show a confirmation dialog.
     The response is sent back via a PermissionResponseEvent.
@@ -43,3 +43,26 @@ class PermissionRequestedEvent(Event):
     tier: str = ""
     description: str = ""
     session_id: str = ""
+
+
+@dataclass
+class PermissionResponseEvent(Event):
+    """
+    Emitted by the UI after the user responds to a permission dialog.
+
+    The PermissionManager subscribes to this to resolve the pending
+    Future for the T2 action.
+
+    Fields
+    ------
+    action:
+        The action that was being confirmed.
+    session_id:
+        The session the confirmation belongs to.
+    approved:
+        True if the user approved, False if denied.
+    """
+    topic = "permission.response"
+    action: str = ""
+    session_id: str = ""
+    approved: bool = False

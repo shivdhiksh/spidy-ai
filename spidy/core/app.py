@@ -235,9 +235,26 @@ class SpidyCore:
                 from spidy.brain.brain import Brain
                 from spidy.llm.client import LLMClientFactory
                 from spidy.skills.registry import SkillRegistry
+                from spidy.skills.builtin import register_builtin_skills
+                from spidy.skills.desktop import register_desktop_skills
 
                 skill_registry = SkillRegistry()
                 llm_client = LLMClientFactory.build(self._settings.reasoning)
+
+                # Register built-in skills
+                register_builtin_skills(
+                    skill_registry,
+                    config=self._settings.skills,
+                    bus=self._bus,
+                    notes_file=getattr(self._settings.skills, "notes_file", "notes.jsonl"),
+                )
+
+                # Register desktop & file agent skills (Milestone 6)
+                register_desktop_skills(
+                    skill_registry,
+                    config=self._settings.skills,
+                    bus=self._bus,
+                )
 
                 self._brain = Brain(
                     bus=self._bus,

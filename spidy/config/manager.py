@@ -273,6 +273,9 @@ class PermissionsConfig(BaseModel):
     default_tier: str = "T0"
     audit_log_enabled: bool = True
     audit_log_file: str = "spidy_audit.log"
+    # How long to wait (seconds) for the user to respond to a T2 confirmation.
+    # When no bus is set (e.g. in unit tests), this is always 0 → instant deny.
+    t2_confirmation_timeout_seconds: float = 30.0
 
 
 class LLMProviderConfig(BaseModel):
@@ -326,6 +329,15 @@ class SkillsConfig(BaseModel):
 
     # Notes storage location (relative to app data dir)
     notes_file: str = "notes.jsonl"
+
+    # ── Milestone 6 — Desktop & File Agent Skills ─────────────────────────
+    file_skill_enabled: bool = True
+    app_skill_enabled: bool = True
+    system_control_skill_enabled: bool = True
+
+    # File search defaults
+    desktop_file_search_max_results: int = 50
+    desktop_file_search_root: str = "~"   # Expanded to home directory at runtime
 
 
 class ExecutorConfig(BaseModel):

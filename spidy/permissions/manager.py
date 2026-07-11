@@ -94,6 +94,12 @@ class PermissionManager:
         self._t1_confirmed: set[tuple[str, str]] = set()
         # T3 unlocked actions this session
         self._t3_unlocked: set[str] = set()
+        # Pending T2 confirmations: key=(action, session_id) → Future[bool]
+        self._pending_confirmations: dict[tuple[str, str], asyncio.Future] = {}
+
+        # Subscribe to permission response events if bus is available
+        if self._bus is not None:
+            self._bus.subscribe("permission.response", self._on_permission_response)
 
     # ── Primary API ───────────────────────────────────────────────────────
 
@@ -147,6 +153,39 @@ class PermissionManager:
             (a, sid) for (a, sid) in self._t1_confirmed if sid != session_id
         }
 
+    def respond_to_confirmation(
+        self, action: str, session_id: str, approved: bool
+    ) -> None:
+        """
+        Resolve a pending T2 permission confirmation.
+
+        Called by the UI overlay after the user approves or denies a
+        permission dialog. This resolves the asyncio.Future that the
+        PermissionManager is awaiting in ``_evaluate()``.
+
+        Parameters
+        ----------
+        action:
+            The action that was being confirmed.
+        session_id:
+            The session ID for the pending confirmation.
+        approved:
+            True if the user approved, False if denied.
+        """
+        key = (action, session_id)
+        fut = self._pending_confirmations.get(key)
+        if fut is not None and not fut.done():
+            fut.set_result(approved)
+            log.info(
+                "Permission {'approved' if approved else 'denied'} for '{a}' (session={s})",
+                a=action, s=session_id,
+            )
+        else:
+            log.warning(
+                "respond_to_confirmation: no pending confirmation for '{a}' (session={s})",
+                a=action, s=session_id,
+            )
+
     # ── Internal ──────────────────────────────────────────────────────────
 
     def _resolve_tier(
@@ -190,14 +229,55 @@ class PermissionManager:
             return True
 
         if tier == PermissionTier.T2:
-            # Require confirmation — M5 will show a UI dialog.
-            # In M4: auto-deny T2 unless explicitly allowed in config.
-            log.warning(
-                "T2 action '{a}' requires confirmation. Auto-denying in M4 "
-                "(confirmation UI is Milestone 5+).",
-                a=action,
+            # When no bus is available, no UI can respond to the confirmation dialog.
+            # Immediately deny to avoid hanging (common in unit tests and CLI mode).
+            if self._bus is None:
+                log.warning(
+                    "T2 action '{a}' denied instantly: no EventBus available "
+                    "(no UI can respond to the confirmation request).",
+                    a=action,
+                )
+                return False
+
+            # M6: Publish a PermissionRequestedEvent and await user confirmation.
+            # The UI overlay subscribes to this event and resolves the Future
+            # via respond_to_confirmation() after user input.
+            loop = asyncio.get_running_loop()
+            key = (action, session_id)
+            fut: asyncio.Future[bool] = loop.create_future()
+            self._pending_confirmations[key] = fut
+
+
+            # Emit the dedicated PermissionRequestedEvent so the UI shows a dialog
+            from spidy.permissions.events import PermissionRequestedEvent
+            await self._bus.publish(PermissionRequestedEvent(
+                action=action,
+                tier=tier.value,
+                description=description or f"Allow '{action}'?",
+                session_id=session_id,
+            ))
+
+            # Also emit the generic denied event (UI can update state)
+            await self._emit_event(
+                action, tier, granted=False, session_id=session_id,
+                description=description or f"Allow '{action}'?",
             )
-            return False
+
+            timeout = getattr(self._config, "t2_confirmation_timeout_seconds", 30.0)
+            try:
+                # Wait for the user to respond via respond_to_confirmation()
+                confirmed = await asyncio.wait_for(asyncio.shield(fut), timeout=timeout)
+            except asyncio.TimeoutError:
+                log.warning(
+                    "T2 permission request for '{a}' timed out after {t}s — denying.",
+                    a=action, t=timeout,
+                )
+                confirmed = False
+            finally:
+                self._pending_confirmations.pop(key, None)
+
+            return confirmed
+
 
         if tier == PermissionTier.T3:
             if action in self._t3_unlocked:
@@ -236,13 +316,24 @@ class PermissionManager:
         except Exception:  # noqa: BLE001
             pass  # Audit failures must never crash the app
 
+    async def _on_permission_response(self, event: object) -> None:
+        """EventBus subscriber: resolves pending T2 Future from the UI."""
+        from spidy.permissions.events import PermissionResponseEvent
+        if not isinstance(event, PermissionResponseEvent):
+            return
+        self.respond_to_confirmation(
+            action=event.action,
+            session_id=event.session_id,
+            approved=event.approved,
+        )
+
     async def _emit_event(
         self,
         action: str,
         tier: PermissionTier,
         granted: bool,
         session_id: str,
-        description: str,
+        description: str = "",
     ) -> None:
         """Publish permission event to the EventBus."""
         if self._bus is None:
@@ -256,6 +347,6 @@ class PermissionManager:
             await self._bus.publish(PermissionDeniedEvent(
                 action=action,
                 tier=tier.value,
-                reason=f"Tier {tier.value} requires confirmation (M5+).",
+                reason=f"Tier {tier.value} requires user confirmation.",
                 session_id=session_id,
             ))

@@ -173,3 +173,26 @@ system:
   cpu_alert_threshold: 90         # Alert when CPU > N%
   ram_alert_threshold: 85         # Alert when RAM > N%
   battery_alert_threshold: 20     # Alert when battery < N%
+
+# --------------------------------------------------------------------------- #
+# Skills                                                       (Milestone 6)  #
+# --------------------------------------------------------------------------- #
+skills:
+  # Built-in skills
+  help_skill_enabled: true
+  time_skill_enabled: true
+  greet_skill_enabled: true
+  note_skill_enabled: true
+  timer_skill_enabled: true
+  system_skill_enabled: true
+  notes_file: "notes.jsonl"
+
+  # Desktop & File Agent skills (Milestone 6)
+  file_skill_enabled: true
+  app_skill_enabled: true
+  system_control_skill_enabled: true
+
+  # File search behaviour
+  desktop_file_search_max_results: 50   # Hard cap on search results
+  desktop_file_search_root: "~"         # Default search root (home directory)
+
