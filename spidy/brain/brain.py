@@ -63,7 +63,7 @@ from spidy.brain.types import TurnRole
 from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
-    from spidy.brain.interfaces import KnowledgeInterface, LearningInterface, MemoryInterface
+    from spidy.brain.interfaces import KnowledgeInterface, LearningInterface, MemoryInterface, VisionInterface
     from spidy.config.manager import BrainConfig, ReasoningConfig
     from spidy.core.event_bus import EventBus
     from spidy.llm.client import BaseLLMClient
@@ -108,6 +108,7 @@ class Brain:
         memory: "MemoryInterface | None" = None,
         knowledge: "KnowledgeInterface | None" = None,
         learning: "LearningInterface | None" = None,
+        vision: "VisionInterface | None" = None,
         user_name: str = "User",
     ) -> None:
         self._bus = bus
@@ -120,6 +121,7 @@ class Brain:
         self._memory = memory
         self._knowledge = knowledge
         self._learning = learning
+        self._vision = vision
 
         # Internal components
         self._classifier = IntentClassifier()
@@ -154,11 +156,12 @@ class Brain:
         self._bus.subscribe("voice.user_spoke", self._on_user_spoke)
 
         log.info(
-            "Brain started | LLM={llm} | memory={mem} | knowledge={know} | learning={learn}",
+            "Brain started | LLM={llm} | memory={mem} | knowledge={know} | learning={learn} | vision={vis}",
             llm="enabled" if self._llm else "disabled",
             mem="enabled" if self._memory else "disabled",
             know="enabled" if self._knowledge else "disabled",
             learn="enabled" if self._learning else "disabled",
+            vis="enabled" if self._vision else "disabled",
         )
 
     async def stop(self) -> None:
@@ -337,6 +340,11 @@ class Brain:
     def learning(self) -> "LearningInterface | None":
         """The connected learning interface (None until M9+)."""
         return self._learning
+
+    @property
+    def vision(self) -> "VisionInterface | None":
+        """The connected vision interface (None until M9)."""
+        return self._vision
 
     # ── Private helpers ────────────────────────────────────────────────────
 

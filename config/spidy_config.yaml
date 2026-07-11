@@ -229,3 +229,35 @@ browser:
   read_page_max_chars: 5000             # max characters from read_page action
   history_limit: 20                     # max browser history entries
 
+
+# --------------------------------------------------------------------------- #
+# Vision Engine                                              (Milestone 9)    #
+# --------------------------------------------------------------------------- #
+vision:
+  enabled: true                   # Master switch — set false to disable all vision
+
+  # Per-engine enable flags
+  # ScreenshotEngine: fast screen capture via mss
+  #   Install: pip install mss
+  enable_screenshot: true
+
+  # OCREngine: on-screen text extraction via easyocr
+  #   Install: pip install easyocr
+  #   Note: first use downloads ~500 MB of models
+  enable_ocr: true
+
+  # ScreenAnalyzer: active app, window enumeration, UI region detection
+  #   win32gui is already installed (M6); opencv is optional
+  #   Install: pip install opencv-python
+  enable_screen_analysis: true
+
+  # ScreenshotEngine settings
+  screenshot:
+    default_monitor: 0            # 0 = primary monitor
+    capture_format: "PNG"         # PNG is lossless (recommended)
+
+  # OCREngine settings
+  ocr:
+    language: "en"                # ISO 639-1 language code
+    confidence_threshold: 0.5     # Min confidence to include a text block
+    gpu: false                    # Set true to use GPU (requires CUDA + easyocr[gpu])

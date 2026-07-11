@@ -56,6 +56,7 @@ from spidy.logging.logger import get_logger
 if TYPE_CHECKING:
     from spidy.brain.brain import Brain
     from spidy.memory.manager import MemoryManager
+    from spidy.vision.manager import VisionManager
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
 
@@ -84,6 +85,7 @@ class SpidyCore:
         self._observer_mgr: ObserverManager | None = None
         self._brain: Brain | None = None
         self._memory_mgr: MemoryManager | None = None
+        self._vision_mgr: VisionManager | None = None
         self._shutdown_event = asyncio.Event()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -192,7 +194,7 @@ class SpidyCore:
             name=self._settings.app.user_name,
         )
 
-        # ── 6. Memory Engine (Milestone 8) ────────────────────────────────────────
+        # ── 6. Memory Engine (Milestone 8) ─────────────────────────────────────────────────────
         if self._settings.memory.enabled:
             try:
                 from spidy.memory.manager import MemoryManager
@@ -212,6 +214,24 @@ class SpidyCore:
                     exc=exc,
                 )
                 self._memory_mgr = None
+
+        # ── 7. Vision Engine (Milestone 9) ───────────────────────────────────────────────────
+        if self._settings.vision.enabled:
+            try:
+                from spidy.vision.manager import VisionManager
+                self._vision_mgr = VisionManager(
+                    config=self._settings.vision,
+                    bus=self._bus,
+                )
+                await self._vision_mgr.initialize()
+                log.info("VisionManager initialised.")
+            except Exception as exc:
+                log.warning(
+                    "VisionManager failed to initialise (non-fatal): {exc}. "
+                    "Running without vision.",
+                    exc=exc,
+                )
+                self._vision_mgr = None
 
     async def _run(self) -> None:
         """Step 2: Start all services and enter the main event loop."""
@@ -293,6 +313,7 @@ class SpidyCore:
                     skill_registry=skill_registry,
                     llm_client=llm_client,
                     memory=self._memory_mgr,
+                    vision=self._vision_mgr,
                     user_name=self._settings.app.user_name,
                 )
                 await self._brain.start()
@@ -322,6 +343,10 @@ class SpidyCore:
         # Stop Brain
         if self._brain is not None:
             await self._brain.stop()
+
+        # Stop VisionManager
+        if self._vision_mgr is not None:
+            await self._vision_mgr.close()
 
         # Stop MemoryManager
         if self._memory_mgr is not None:

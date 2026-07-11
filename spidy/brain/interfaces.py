@@ -317,3 +317,87 @@ class LearningInterface(abc.ABC):
             Format: ``{"action": str, "confidence": float, "description": str}``
         """
         raise NotImplementedError
+
+
+# ─── Vision Interface ─────────────────────────────────────────────────────────
+
+
+class VisionInterface(abc.ABC):
+    """
+    Interface for Spidy's Vision & Screen Understanding system.
+
+    Implementation (Milestone 9): VisionManager in ``spidy.vision``.
+
+    Provides:
+    - Screenshot capture (full screen, active window, region, multi-monitor)
+    - OCR text extraction from screenshots
+    - Screen state analysis (active app, visible windows, UI regions)
+    - Human-readable screen description for LLM context injection
+
+    The Brain calls this interface but never knows the backing engines
+    (mss, easyocr, opencv). Passing ``None`` causes vision features to
+    degrade gracefully — all Brain core functions continue working.
+    """
+
+    @abc.abstractmethod
+    async def capture(
+        self,
+        source: str = "fullscreen",
+        **kwargs: Any,
+    ) -> Any:
+        """
+        Take a screenshot.
+
+        Parameters
+        ----------
+        source:
+            ``"fullscreen"`` | ``"window"`` | ``"region"``
+        **kwargs:
+            Engine-specific parameters (e.g. monitor_index, x, y, width, height).
+
+        Returns
+        -------
+        ScreenshotResult
+            PNG bytes and metadata. Empty result on failure.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def read_screen_text(self) -> Any:
+        """
+        Capture the screen and extract all visible text via OCR.
+
+        Returns
+        -------
+        OCRResult
+            Extracted text with confidence scores.
+            Empty result when OCR deps absent.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def analyze_screen(self) -> Any:
+        """
+        Perform a full analysis of the current screen state.
+
+        Returns
+        -------
+        ScreenAnalysis
+            Active application, visible windows, detected UI regions.
+        """
+        raise NotImplementedError
+
+    @abc.abstractmethod
+    async def describe_screen(self) -> str:
+        """
+        Return a human-readable description of the current screen state.
+
+        Combines screen analysis and OCR text into one string suitable
+        for injection into the LLM context window.
+
+        Returns
+        -------
+        str
+            Multi-line description. Non-empty even on degraded operation.
+        """
+        raise NotImplementedError

@@ -29,3 +29,9 @@ playwright>=1.44.0      # Browser automation (Chromium/Firefox/WebKit)
 aiosqlite>=0.20.0       # Async SQLite for episodic memory (EpisodicMemory)
                         # Optional (graceful fallback if absent):
                         # pip install chromadb sentence-transformers
+
+# Milestone 9 — Vision Engine
+# All three dependencies are optional — Vision degrades gracefully if absent.
+# pip install mss                  # Ultra-fast screenshot capture
+# pip install easyocr              # On-screen text extraction (OCR) — ~500 MB models
+# pip install opencv-python        # UI region detection via contour analysis

@@ -12,6 +12,62 @@ _No unreleased changes._
 
 ---
 
+## [0.9.0] — 2026-07-12 · Milestone 9: Vision Engine
+
+### Added
+
+- **`spidy.vision` package** — complete three-engine Vision system:
+  - `vision/types.py` — frozen dataclasses: `ScreenshotResult`, `OCRBlock`, `OCRResult`,
+    `ScreenAnalysis`, `UIRegion`, `MonitorInfo`, `VisionDependencyError`
+  - `vision/events.py` — 5 typed EventBus events under `vision.*` namespace:
+    `VisionCaptureStartedEvent`, `VisionCaptureCompletedEvent`, `VisionOCRCompletedEvent`,
+    `VisionAnalysisCompletedEvent`, `VisionErrorEvent`
+  - `vision/screenshot.py` — `ScreenshotEngine`: ultra-fast `mss`-based capture;
+    full-screen, active-window (`win32gui`), and region modes; multi-monitor enumeration
+  - `vision/ocr.py` — `OCREngine`: `easyocr` text extraction with lazy reader init,
+    confidence thresholding, bbox conversion, Pillow/numpy decode path
+  - `vision/screen_analyzer.py` — `ScreenAnalyzer`: active-app + window-title detection
+    (`win32gui`/`psutil`), `EnumWindows` visible-window list, OpenCV contour-based UI region detection
+  - `vision/manager.py` — `VisionManager` implementing `VisionInterface`: unified async
+    API, thread-executor wrapping for sync engines, EventBus publishing, `describe_screen()`
+    context-injection method
+
+- **Brain integration** (`spidy.brain`)
+  - `brain/interfaces.py` — `VisionInterface` ABC added as M9 companion slot
+  - `brain/brain.py` — `vision=` parameter in `Brain.__init__()`, `Brain.vision` property,
+    startup log includes vision status
+
+- **Config** (`spidy.config.manager`)
+  - `ScreenshotConfig`, `OCRConfig`, `VisionConfig` Pydantic models added
+  - `SpidyConfig.vision: VisionConfig` field added
+
+- **SpidyCore** (`spidy.core.app`)
+  - Step 7 in `_initialise()`: `VisionManager` constructed and initialized
+  - `vision=self._vision_mgr` passed to `Brain`
+  - `_vision_mgr.close()` called in `_stop()`
+
+- **Configuration** (`config/spidy_config.yaml`)
+  - `vision:` section with per-engine enable flags, screenshot and OCR sub-config
+
+- **Tests** — 180 new tests (1229 total, 0 failures):
+  - `tests/unit/test_vision_types.py` — 40 tests
+  - `tests/unit/test_vision_events.py` — 28 tests
+  - `tests/unit/test_vision_screenshot.py` — 28 tests
+  - `tests/unit/test_vision_ocr.py` — 26 tests
+  - `tests/unit/test_vision_screen_analyzer.py` — 30 tests
+  - `tests/unit/test_vision_manager.py` — 21 tests
+  - `tests/integration/test_vision_brain_integration.py` — 17 tests
+
+### Design
+
+- All three vision dependencies (`mss`, `easyocr`, `opencv-python`) are optional
+- Every engine has `is_available` and gracefully returns empty results when deps absent
+- `VisionDependencyError` is the single exception type for dep-missing conditions
+- `VisionManager._publish()` silently skips events when no bus provided (unit test friendly)
+- Thread-executor pattern used for synchronous capture/OCR to avoid blocking asyncio loop
+
+---
+
 ## [0.8.0] — 2026-07-11 · Milestone 8: Memory Engine
 
 ### Added

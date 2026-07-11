@@ -576,3 +576,51 @@ Both calls are guarded: `if self._memory is not None`. Failures are `log.warning
 ---
 
 *Last updated: 2026-07-11 — Milestone 8 complete (1049 tests passing)*
+
+---
+
+## Milestone 9 — Vision Engine ✅
+
+**Status:** Complete  
+**Tests:** 1229 passing, 0 failures (180 new tests added)
+
+### What was built
+
+- **`spidy.vision` package** — three-engine Vision system:
+  - `vision/types.py` — immutable (frozen) data types: `MonitorInfo`, `ScreenshotResult`, `OCRBlock`, `OCRResult`, `UIRegion`, `ScreenAnalysis`, `VisionDependencyError`
+  - `vision/events.py` — 5 typed EventBus events: `VisionCaptureStartedEvent`, `VisionCaptureCompletedEvent`, `VisionOCRCompletedEvent`, `VisionAnalysisCompletedEvent`, `VisionErrorEvent` under `vision.*` namespace
+  - `vision/screenshot.py` — `ScreenshotEngine`: `mss`-based ultra-fast capture; full-screen, active-window (via `win32gui`), region; multi-monitor `get_monitors()`
+  - `vision/ocr.py` — `OCREngine`: `easyocr` text extraction; lazy reader init (models download on first use); confidence thresholding; bbox → `(x,y,w,h)` conversion; Pillow + numpy decode path
+  - `vision/screen_analyzer.py` — `ScreenAnalyzer`: active-app detection (`win32gui` + `psutil` fallback); `EnumWindows` visible-window list; OpenCV Canny-edge + contour UI region detection
+  - `vision/manager.py` — `VisionManager` (implements `VisionInterface`): unified async API; thread-executor wrapping for blocking engines; EventBus publishing; `describe_screen()` for LLM context injection
+
+- **Brain integration**:
+  - `VisionInterface` ABC added to `brain/interfaces.py`
+  - `Brain.__init__(vision=)` slot; `Brain.vision` property; startup log includes vision status
+  - No changes to existing Brain pipeline (vision is passive unless explicitly called)
+
+- **Config & lifecycle**:
+  - `ScreenshotConfig`, `OCRConfig`, `VisionConfig` Pydantic models
+  - `SpidyConfig.vision` field
+  - `config/spidy_config.yaml` `vision:` section
+  - SpidyCore step 7: `VisionManager` initialized and wired to Brain
+
+### Key Engineering Decisions
+
+1. **Same pattern as M8 Memory** — separate engines, unified manager, lazy init, EventBus events, config section, graceful degrade. Zero new architectural concepts introduced.
+
+2. **All deps are optional** — `mss`, `easyocr`, `opencv-python` are `pip install` comments in `requirements.txt`, not hard requirements. Every engine has `is_available` and returns empty typed results when absent. `VisionDependencyError` is raised internally but caught by `VisionManager`.
+
+3. **Thread-executor for blocking code** — `mss` and `easyocr` are synchronous C extensions. All calls go through `asyncio.get_event_loop().run_in_executor(None, ...)` so the asyncio event loop is never blocked.
+
+4. **Passive Brain integration** — Vision is a companion slot, not embedded in the pipeline. `brain.process()` does NOT call `capture()` automatically. Vision is called explicitly when needed (e.g. a future "what's on my screen?" skill).
+
+5. **`describe_screen()` for LLM context** — The primary LLM-facing method combines screen analysis + OCR text into one string ready for injection into the system prompt or context window.
+
+6. **EventBus is optional in VisionManager** — `bus=None` silently skips all event publishing, keeping unit tests simple (exact same pattern as `MemoryManager`).
+
+7. **Contour-based UI region detection** — OpenCV Canny edges + `findContours` provides fast, lightweight region detection without ML models. Regions are sorted by area and capped at `max_regions`.
+
+---
+
+*Last updated: 2026-07-12 — Milestone 9 complete (1229 tests passing)*

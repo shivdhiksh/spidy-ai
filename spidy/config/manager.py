@@ -444,6 +444,57 @@ class BrowserConfig(BaseModel):
     history_limit: int = 20                  # max history entries returned
 
 
+# ── Milestone 9 — Vision Engine ───────────────────────────────────────────────
+
+
+class ScreenshotConfig(BaseModel):
+    """
+    Configuration for the ScreenshotEngine (mss-based capture).
+    """
+    default_monitor: int = 0          # 0 = primary monitor
+    capture_format: str = "PNG"       # always PNG (lossless)
+
+
+class OCRConfig(BaseModel):
+    """
+    Configuration for the OCREngine (easyocr-based text extraction).
+    """
+    language: str = "en"              # ISO 639-1 language code
+    confidence_threshold: float = 0.5 # minimum confidence to include a block
+    gpu: bool = False                 # use GPU for easyocr (requires CUDA)
+
+    @field_validator("confidence_threshold")
+    @classmethod
+    def validate_confidence(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("confidence_threshold must be between 0.0 and 1.0")
+        return v
+
+
+class VisionConfig(BaseModel):
+    """
+    Configuration for the Vision Engine (Milestone 9).
+
+    Master switch and per-engine enable flags.
+    Engines degrade gracefully when optional deps are absent;
+    setting a flag to False disables the engine entirely.
+    """
+    # Master switch
+    enabled: bool = True              # Set False to disable all vision
+
+    # Per-engine enable flags
+    # ScreenshotEngine: mss-based capture (pip install mss)
+    enable_screenshot: bool = True
+    # OCREngine: easyocr text extraction (pip install easyocr)
+    enable_ocr: bool = True
+    # ScreenAnalyzer: win32gui + opencv region detection
+    enable_screen_analysis: bool = True
+
+    # Engine-specific settings
+    screenshot: ScreenshotConfig = Field(default_factory=ScreenshotConfig)
+    ocr: OCRConfig = Field(default_factory=OCRConfig)
+
+
 class SpidyConfig(BaseModel):
     """
     Root configuration model.
@@ -464,6 +515,7 @@ class SpidyConfig(BaseModel):
     skills: SkillsConfig = Field(default_factory=SkillsConfig)
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)

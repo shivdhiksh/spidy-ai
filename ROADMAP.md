@@ -18,7 +18,7 @@
 | **M6** | Desktop & File Agents | ✅ Complete | 236 |
 | **M7** | Browser Agent (Playwright) | ✅ Complete | 914 |
 | **M8** | Memory Engine (Working/Episodic/Semantic) | ✅ Complete | 1049 |
-| **M9** | Vision & Screen Understanding | 🔜 Planned | — |
+| **M9** | Vision & Screen Understanding | ✅ Complete | 1229 |
 | **M10** | Knowledge Engine | 🔜 Planned | — |
 | **M11** | Learning Engine | 🔜 Planned | — |
 | **M12** | Plugin Marketplace | 🔜 Planned | — |
@@ -210,7 +210,24 @@ This milestone implements the `MemoryInterface` contract established in M3.
 
 ---
 
-### 🔜 M9 — Knowledge Engine
+### ✅ M9 — Vision & Screen Understanding
+**Complete**
+
+- `ScreenshotEngine` — `mss`-based ultra-fast capture: full-screen, active-window, region, multi-monitor
+- `OCREngine` — on-screen text extraction (`easyocr`) with confidence scoring and lazy model init
+- `ScreenAnalyzer` — active app + visible window detection (`win32gui`/`psutil`), OpenCV UI region detection
+- `VisionManager` — unified async Vision API implementing `VisionInterface`
+- `VisionInterface` ABC added to `brain/interfaces.py`
+- `Brain.vision` companion slot wired in SpidyCore step 7
+- All deps (`mss`, `easyocr`, `opencv-python`) optional — graceful degrade when absent
+- `describe_screen()` — human-readable screen state for LLM context injection
+- 5 EventBus events under `vision.*` namespace
+- `VisionConfig` + `SpidyConfig.vision` field + `config/spidy_config.yaml` `vision:` section
+- **180 new tests** (1229 total)
+
+---
+
+### 🔜 M10 — Knowledge Engine
 **Goal:** Spidy knows your documents and the web.
 
 This milestone implements the `KnowledgeInterface` contract established in M3.
