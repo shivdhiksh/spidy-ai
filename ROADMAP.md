@@ -8,19 +8,19 @@
 ## Current Status
 
 | Milestone | Title | Status | Tests |
-|-----------|-------|--------|-------|
-| **M0** | Foundation (config, logging, event bus) | ✅ Complete | 59 |
+|-----------|-------|--------|-----------|
+| **M0** | Foundation (config, logging, event bus, core) | ✅ Complete | 59 |
 | **M1** | Voice Pipeline (wake word, STT, TTS) | ✅ Complete | 43 |
 | **M2** | Context Observer Layer | ✅ Complete | 43 |
 | **M3** | Brain Core (intent, conversation, decision, planning) | ✅ Complete | 106 |
-| **M4** | Multi-LLM + Skills Runtime | 🔜 Next | — |
-| **M5** | Desktop Overlay UI | 🔜 Planned | — |
-| **M6** | Memory Engine | 🔜 Planned | — |
-| **M7** | Desktop & File Agents | 🔜 Planned | — |
-| **M8** | Vision & Screen Understanding | 🔜 Planned | — |
-| **M9** | Knowledge Engine | 🔜 Planned | — |
-| **M10** | Learning Engine | 🔜 Planned | — |
-| **M11** | Browser Agent | 🔜 Planned | — |
+| **M4** | Multi-LLM + Skills Runtime | ✅ Complete | 112 |
+| **M5** | Desktop Overlay UI | ✅ Complete | 57 |
+| **M6** | Desktop & File Agents | ✅ Complete | 236 |
+| **M7** | Browser Agent (Playwright) | ✅ Complete | 914 |
+| **M8** | Memory Engine (Working/Episodic/Semantic) | ✅ Complete | 1049 |
+| **M9** | Vision & Screen Understanding | 🔜 Planned | — |
+| **M10** | Knowledge Engine | 🔜 Planned | — |
+| **M11** | Learning Engine | 🔜 Planned | — |
 | **M12** | Plugin Marketplace | 🔜 Planned | — |
 | **M13** | Developer Mode | 🔜 Planned | — |
 | **M14** | Deployment & Distribution | 🔜 Planned | — |

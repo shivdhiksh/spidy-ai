@@ -228,14 +228,29 @@ class Brain:
         # 4. Decide
         decision = await self._decision_engine.decide(intent, session_id=sid)
 
-        # 5. Plan
+        # 5. Recall relevant memories to enrich context (Milestone 8)
+        memory_context = ""
+        if self._memory is not None:
+            try:
+                recalled = await self._memory.recall(utterance, session_id=sid, limit=3)
+                if recalled:
+                    memory_context = "\n".join(
+                        f"[Memory] {m.get('content', '')[:200]}" for m in recalled
+                    )
+            except Exception as exc:  # noqa: BLE001 — memory failure must never crash Brain
+                log.warning("Brain: memory recall failed (non-fatal): {exc}", exc=exc)
+
+        # 6. Plan
         plan = await self._planner.plan(
             decision=decision,
             session_id=sid,
-            conversation_context=self._conversation.get_summary(),
+            conversation_context=(
+                self._conversation.get_summary()
+                + (f"\n\nRelevant memories:\n{memory_context}" if memory_context else "")
+            ),
         )
 
-        # 6. Build LLM messages from conversation history
+        # 7. Build LLM messages from conversation history
         llm_messages = self._conversation.get_llm_messages(include_system=True)
         # Import here to avoid circular at module level
         from spidy.llm.client import LLMMessage
@@ -244,7 +259,7 @@ class Brain:
             for m in llm_messages
         ]
 
-        # 7. Execute plan
+        # 8. Execute plan
         results = await self._router.execute(
             plan=plan,
             session_id=sid,
@@ -252,14 +267,26 @@ class Brain:
             user_name=self._user_name,
         )
 
-        # 8. Compose response text from results
+        # 9. Compose response text from results
         response_text = self._compose_response(results)
 
-        # 9. Add assistant turn to conversation window
+        # 10. Add assistant turn to conversation window
         if response_text:
             self._conversation.add_turn(TurnRole.ASSISTANT, response_text)
 
-        # 10. Publish response event
+        # 11. Store interaction in memory (Milestone 8)
+        if self._memory is not None and response_text:
+            try:
+                await self._memory.store_interaction(
+                    utterance=utterance,
+                    response=response_text,
+                    session_id=sid,
+                    intent=intent.category.value if hasattr(intent, "category") and hasattr(intent.category, "value") else str(getattr(intent, "category", "")),
+                )
+            except Exception as exc:  # noqa: BLE001 — memory failure must never crash Brain
+                log.warning("Brain: memory store failed (non-fatal): {exc}", exc=exc)
+
+        # 12. Publish response event
         await self._bus.publish(BrainResponseReadyEvent(
             session_id=sid,
             response_text=response_text,

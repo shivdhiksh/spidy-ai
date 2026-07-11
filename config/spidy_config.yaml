@@ -119,6 +119,13 @@ reasoning:
 # Memory Engine                                                               #
 # --------------------------------------------------------------------------- #
 memory:
+  enabled: true             # Master switch — set false to disable all memory
+
+  # Per-tier enable flags
+  enable_working: true      # In-process session buffer (no external deps)
+  enable_episodic: true     # Persistent SQLite store (requires: pip install aiosqlite)
+  enable_semantic: true     # Vector search (requires: pip install chromadb sentence-transformers)
+
   short_term:
     max_messages: 20              # Rolling window for conversation context
 

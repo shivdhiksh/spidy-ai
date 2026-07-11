@@ -24,3 +24,8 @@ screen-brightness-control>=0.23.0  # Screen brightness control (best-effort)
 # Milestone 7 — Browser Agent
 playwright>=1.44.0      # Browser automation (Chromium/Firefox/WebKit)
                         # After install: py -m playwright install chromium
+
+# Milestone 8 — Memory Engine
+aiosqlite>=0.20.0       # Async SQLite for episodic memory (EpisodicMemory)
+                        # Optional (graceful fallback if absent):
+                        # pip install chromadb sentence-transformers

@@ -201,6 +201,18 @@ class SemanticMemoryConfig(BaseModel):
 
 
 class MemoryConfig(BaseModel):
+    # ── Master switch ──────────────────────────────────────────────────────
+    enabled: bool = True           # Set False to disable all memory
+
+    # ── Per-tier enable flags ──────────────────────────────────────────────
+    # Working memory: in-process rolling session buffer (zero deps)
+    enable_working: bool = True
+    # Episodic memory: persistent SQLite store (requires aiosqlite)
+    enable_episodic: bool = True
+    # Semantic memory: ChromaDB vector search (requires chromadb + sentence-transformers)
+    enable_semantic: bool = True
+
+    # ── Tier-specific settings ─────────────────────────────────────────────
     short_term: ShortTermMemoryConfig = Field(default_factory=ShortTermMemoryConfig)
     long_term: LongTermMemoryConfig = Field(default_factory=LongTermMemoryConfig)
     semantic: SemanticMemoryConfig = Field(default_factory=SemanticMemoryConfig)

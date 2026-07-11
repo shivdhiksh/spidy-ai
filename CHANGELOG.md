@@ -8,7 +8,53 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-_No unreleased changes. Milestone 8 planning in progress._
+_No unreleased changes._
+
+---
+
+## [0.8.0] — 2026-07-11 · Milestone 8: Memory Engine
+
+### Added
+
+- **`spidy.memory` package** — complete three-tier memory engine:
+  - `memory/types.py` — `MemoryEntry` (frozen dataclass), `MemoryType` (enum), `MemorySearchResult`
+  - `memory/events.py` — 6 typed EventBus events: `MemoryStoredEvent`, `MemoryRetrievedEvent`, `MemorySearchedEvent`, `MemoryDeletedEvent`, `MemoryClearedEvent`, `MemoryErrorEvent`
+  - `memory/working.py` — `WorkingMemory`: per-session rolling buffer, configurable capacity (default 20 messages), keyword find, session isolation
+  - `memory/episodic.py` — `EpisodicMemory`: async SQLite via `aiosqlite` with graceful in-process fallback, indexed schema, keyword LIKE search
+  - `memory/semantic.py` — `SemanticMemory`: ChromaDB vector store, cosine similarity, lazy init; complete no-op when optional deps absent
+  - `memory/manager.py` — `MemoryManager` implementing `MemoryInterface`: unified Brain API, three-tier coordination, EventBus publishing, `store_interaction()` + `get_working_context()` convenience methods
+
+- **Brain integration** (`spidy.brain.brain`)
+  - `Brain.process()` now recalls relevant memories before planning (step 5)
+  - `Brain.process()` stores each interaction after responding (step 11)
+  - Both calls are failure-isolated (`try/except` with `log.warning`)
+  - `Brain` constructor accepts `memory: MemoryInterface | None` (backward compatible)
+
+- **SpidyCore integration** (`spidy.core.app`)
+  - `MemoryManager` initialised in `_initialise()` step 6, before Brain
+  - Passed to `Brain` as `memory=self._memory_mgr`
+  - Gracefully closed in `_stop()`
+
+- **Config** (`spidy.config.manager`, `config/spidy_config.yaml`)
+  - `MemoryConfig.enabled` — master switch
+  - `MemoryConfig.enable_working` / `enable_episodic` / `enable_semantic` — per-tier flags
+
+- **Dependency**: `aiosqlite>=0.20.0` added to `requirements.txt`
+
+- **Tests**: 135 new tests (1049 total)
+  - `tests/unit/test_memory_types.py` (14 tests)
+  - `tests/unit/test_memory_events.py` (14 tests)
+  - `tests/unit/test_memory_working.py` (26 tests)
+  - `tests/unit/test_memory_episodic.py` (27 tests)
+  - `tests/unit/test_memory_semantic.py` (14 tests)
+  - `tests/unit/test_memory_manager.py` (32 tests)
+  - `tests/integration/test_memory_brain_integration.py` (8 tests)
+
+### Changed
+
+- `spidy/memory/__init__.py` — previously a stub; now exports full public API
+- `spidy/config/manager.py` — `MemoryConfig` gains 4 new optional boolean fields
+- `config/spidy_config.yaml` — `memory:` section gains enable/disable flags
 
 ---
 

@@ -55,6 +55,7 @@ from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
     from spidy.brain.brain import Brain
+    from spidy.memory.manager import MemoryManager
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
 
@@ -82,6 +83,7 @@ class SpidyCore:
         self._voice_engine: VoiceEngine | None = None
         self._observer_mgr: ObserverManager | None = None
         self._brain: Brain | None = None
+        self._memory_mgr: MemoryManager | None = None
         self._shutdown_event = asyncio.Event()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -190,6 +192,27 @@ class SpidyCore:
             name=self._settings.app.user_name,
         )
 
+        # ── 6. Memory Engine (Milestone 8) ────────────────────────────────────────
+        if self._settings.memory.enabled:
+            try:
+                from spidy.memory.manager import MemoryManager
+                memory_dir = self._settings.paths.resolve("memory_dir")
+                memory_dir.mkdir(parents=True, exist_ok=True)
+                self._memory_mgr = MemoryManager(
+                    config=self._settings.memory,
+                    bus=self._bus,
+                    memory_dir=memory_dir,
+                )
+                await self._memory_mgr.initialize()
+                log.info("MemoryManager initialised.")
+            except Exception as exc:
+                log.warning(
+                    "MemoryManager failed to initialise (non-fatal): {exc}. "
+                    "Running without memory.",
+                    exc=exc,
+                )
+                self._memory_mgr = None
+
     async def _run(self) -> None:
         """Step 2: Start all services and enter the main event loop."""
         self._transition(LifecycleState.RUNNING)
@@ -269,6 +292,7 @@ class SpidyCore:
                     config=self._settings.reasoning,
                     skill_registry=skill_registry,
                     llm_client=llm_client,
+                    memory=self._memory_mgr,
                     user_name=self._settings.app.user_name,
                 )
                 await self._brain.start()
@@ -298,6 +322,10 @@ class SpidyCore:
         # Stop Brain
         if self._brain is not None:
             await self._brain.stop()
+
+        # Stop MemoryManager
+        if self._memory_mgr is not None:
+            await self._memory_mgr.close()
 
         # Stop ObserverManager
         if self._observer_mgr is not None:
