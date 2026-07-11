@@ -284,7 +284,7 @@ All added to `SpidyConfig` as `llm`, `skills`, `executor` fields.
 - `WAKE_READY` state pre-wired for M6 wake-word integration (no activation logic yet)
 
 #### `spidy/ui/themes/` — Theme System
-- `ThemeColors` (55 color tokens), `ThemeFonts`, `ThemeGeometry` — all frozen dataclasses
+- `ThemeColors` (31 color tokens), `ThemeFonts`, `ThemeGeometry` — all frozen dataclasses
 - `DARK_THEME`: Deep navy + electric violet (#6C63FF) + teal — glassmorphism palette
 - `LIGHT_THEME`: Pearl white + frosted glass — adjusted accent for contrast
 - `ThemeManager`: registry, set/toggle, listener callbacks
