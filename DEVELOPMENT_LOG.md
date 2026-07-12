@@ -621,6 +621,84 @@ Both calls are guarded: `if self._memory is not None`. Failures are `log.warning
 
 7. **Contour-based UI region detection** — OpenCV Canny edges + `findContours` provides fast, lightweight region detection without ML models. Regions are sorted by area and capped at `max_regions`.
 
+
 ---
 
-*Last updated: 2026-07-12 — Milestone 9 complete (1229 tests passing)*
+## Spidy Alpha Integration ✅
+
+**Status:** Complete  
+**Tests:** 34 new integration tests (1263 total, 0 failures)  
+**Date:** 2026-07-12
+
+### Goal
+
+Transform the completed Milestones 0–9 architecture into a runnable end-to-end assistant
+without introducing new major features. Purely an integration milestone.
+
+### What was built
+
+#### `spidy.main` — Enhanced CLI entry point
+- `--text-mode` flag: skips the voice pipeline and opens an interactive stdin REPL.
+- Improved argument parsing: positional `config_path` + any number of flags.
+- Clear error messages for unknown flags and missing config files.
+
+#### `spidy.core.app` — SpidyCore integration enhancements
+
+**Text-input REPL (`_run_text_repl`)**
+- `asyncio.run_in_executor(None, input, "You: ")` keeps the asyncio event loop alive
+  while blocking on stdin — the correct cross-platform (incl. Windows) approach.
+- Commands forwarded directly to `Brain.process()`.
+- `quit` / `exit` / `bye` / `stop` all trigger graceful shutdown.
+- CTRL+D (EOF) exits cleanly.
+
+**Qt UI thread integration (`_start_ui_thread`)**
+- `SpidyApp` started in a `daemon=True` thread named `SpidyQtUI`.
+- The running asyncio `loop` is passed so `UISignalBridge` can publish events back thread-safely.
+- Full `try/except ImportError` guard: Qt deps absent → non-fatal warning, Spidy continues without overlay.
+- `SpidyApp.quit()` called from `_stop()` via the asyncio thread.
+
+**New properties**
+- `core.brain` — access the active `Brain` instance.
+- `core.memory` — access the active `MemoryManager` instance.
+- `core.vision` — access the active `VisionManager` instance.
+
+**Docstring update**
+- Module-level docstring now accurately reflects all M0–M9 subsystems in dependency order.
+- `[Future]` stubs removed; all items listed as complete.
+
+#### `tests/integration/test_alpha_integration.py` — End-to-end integration tests
+
+| Class | Tests | Coverage |
+|-------|-------|----------|
+| `TestAlphaCoreLifecycle` | 5 | SpidyCore CREATED→RUNNING→STOPPED; properties before/after start |
+| `TestAlphaTextCommandFlow` | 5 | Brain.process() for greeting / time / help / unknown / empty |
+| `TestAlphaDesktopSkillRegistration` | 2 | All 3 desktop skills register; config flags respected |
+| `TestAlphaBrowserSkillRegistration` | 2 | Browser skill registers; disabled flag respected |
+| `TestAlphaMemoryStorage` | 6 | Episodic count, recall, store failure / recall failure resilience |
+| `TestAlphaUIEvents` | 4 | show/hide/state/message events; BrainResponseReadyEvent → UI |
+| `TestAlphaErrorRecovery` | 3 | Memory init failure non-fatal; no LLM OK; shutdown idempotent |
+| `TestAlphaCompleteExecutionFlow` | 3 | Full pipeline + memory; all skills; 5-turn sequence |
+| `TestAlphaTextModeRepl` | 3 | text_mode=True init; REPL exits on quit; REPL processes command |
+
+### Integration gaps fixed
+
+| Gap | Root cause | Fix |
+|-----|-----------|-----|
+| No text-input REPL | `_run()` only blocked on `_shutdown_event` | Added `_run_text_repl()` asyncio loop with executor stdin |
+| Qt UI never started | `SpidyApp` existed but was never instantiated | `_start_ui_thread()` in `_run()` guarded by `ui.enabled` |
+| No `--text-mode` flag | `main.py` only parsed one positional arg | Full flag parser with `--text-mode` support |
+| Stale docstring | M0 era comment `[Future] Brain...` | Updated to reflect complete M0–M9 architecture |
+
+### Key decisions
+
+1. **Qt in a daemon thread** — Qt cannot share the asyncio event loop. Daemon flag ensures the Qt thread is killed when the main process exits, preventing zombie processes on Windows.
+
+2. **stdin via run_in_executor** — Windows `asyncio` does not support `loop.connect_read_pipe` on `sys.stdin`. Using `run_in_executor(None, input, prompt)` is the canonical cross-platform solution.
+
+3. **Non-fatal UI thread** — If PySide6 is not installed, the thread `ImportError` is caught and logged as a warning. All other subsystems continue normally.
+
+4. **No new skills or features** — This milestone is strictly integration. Every line added either wires existing subsystems together or tests those wires.
+
+---
+
+*Last updated: 2026-07-12 — Alpha Integration complete (1263 tests passing)*

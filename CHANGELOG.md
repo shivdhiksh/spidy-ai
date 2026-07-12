@@ -12,6 +12,54 @@ _No unreleased changes._
 
 ---
 
+## [0.10.0-alpha] — 2026-07-12 · Spidy Alpha Integration
+
+### Added
+
+- **`spidy.main`** — Enhanced production entry point:
+  - `--text-mode` CLI flag: starts an interactive stdin REPL, forwarding input
+    directly to the Brain. Useful for testing without audio hardware.
+  - Full argument parser with clear error messages for unknown flags and missing
+    config files.
+
+- **`spidy.core.app` — SpidyCore integration enhancements:**
+  - `text_mode: bool` parameter on `SpidyCore.__init__()`.
+  - `_run_text_repl()` — asyncio-safe stdin REPL using `run_in_executor(None, input)`
+    (correct Windows-compatible pattern; avoids broken `connect_read_pipe`).
+  - `_start_ui_thread()` — starts `SpidyApp` (Qt overlay) in a `daemon=True` thread
+    named `SpidyQtUI`, passing the asyncio loop for thread-safe event publishing.
+  - `core.brain` property — exposes the active `Brain` instance.
+  - `core.memory` property — exposes the active `MemoryManager` instance.
+  - `core.vision` property — exposes the active `VisionManager` instance.
+  - Module docstring updated to reflect the complete M0–M9 module dependency order.
+
+- **`tests/integration/test_alpha_integration.py`** — 34 new end-to-end integration tests:
+  - `TestAlphaCoreLifecycle` (5) — CREATED→RUNNING→STOPPED; property access guards.
+  - `TestAlphaTextCommandFlow` (5) — Brain.process() for greeting/time/help/unknown/empty.
+  - `TestAlphaDesktopSkillRegistration` (2) — All 3 desktop skills; config flag gating.
+  - `TestAlphaBrowserSkillRegistration` (2) — Browser skill; disabled flag.
+  - `TestAlphaMemoryStorage` (6) — Episodic count, recall, store/recall failure resilience.
+  - `TestAlphaUIEvents` (4) — Show/hide/state/message events; Brain→UI event chain.
+  - `TestAlphaErrorRecovery` (3) — Non-fatal memory failure; no-LLM brain; idempotent shutdown.
+  - `TestAlphaCompleteExecutionFlow` (3) — Full pipeline + memory; all skills; 5-turn sequence.
+  - `TestAlphaTextModeRepl` (3) — text_mode init; REPL exits on quit; REPL processes command.
+
+### Fixed
+
+- **Integration gap**: Qt overlay UI (`SpidyApp`) was never started despite being fully
+  implemented since Milestone 5. Now started in a daemon thread from `SpidyCore._run()`.
+- **Integration gap**: No mechanism existed to send text commands to the Brain without
+  voice hardware. Text-mode REPL fills this gap.
+- **Stale docstring** in `core/app.py`: removed `[Future] Brain, MemoryEngine, UI, Skills...`
+  comment; replaced with accurate M0–M9 dependency order.
+
+### Changed
+
+- `SpidyCore.__init__()` signature: added `text_mode: bool = False` (backward-compatible).
+- `_stop()`: now calls `SpidyApp.quit()` before stopping other subsystems.
+
+---
+
 ## [0.9.0] — 2026-07-12 · Milestone 9: Vision Engine
 
 ### Added

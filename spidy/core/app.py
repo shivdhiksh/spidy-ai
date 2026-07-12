@@ -9,7 +9,7 @@ Responsibilities
 2. Configure the logging system
 3. Instantiate the event bus
 4. Instantiate and initialise each module in dependency order
-5. Start the main run loop
+5. Start the main run loop (voice-driven or text-input REPL)
 6. Handle graceful shutdown (SIGINT, SIGTERM, Windows CTRL+C)
 
 Architecture
@@ -19,13 +19,26 @@ with different configs. In production, main.py creates exactly one and runs it.
 
 Module Dependency Order (bottom-up)
 ------------------------------------
-1. Logger          (no deps)
-2. ConfigManager   (no deps)
-3. EventBus        (no deps)
-4. DeviceManager   (CUDA detection)
-5. VoiceEngine     (wake word, STT, TTS)
-6. [Future] Brain, MemoryEngine, UI, Skills...
+ 1. Logger          (no deps)
+ 2. ConfigManager   (no deps)
+ 3. EventBus        (no deps)
+ 4. DeviceManager   (CUDA detection)
+ 5. MemoryManager   (EventBus, config)       Milestone 8
+ 6. VisionManager   (EventBus, config)       Milestone 9
+ 7. VoiceEngine     (wake word, STT, TTS)    Milestone 1
+ 8. ObserverManager (desktop context)        Milestone 2
+ 9. Brain           (all of the above)       Milestone 3
+10. SpidyApp / Qt   (EventBus, asyncio loop) Milestone 5
 
+Run modes
+---------
+production (default):
+    Brain listens for ``voice.user_spoke`` events from VoiceEngine.
+    Qt overlay is shown if ``ui.enabled`` is True.
+
+text mode (--text-mode):
+    An asyncio stdin REPL loop sends input directly to ``Brain.process()``.
+    Voice pipeline is not started. Useful for testing without audio hardware.
 
 Example
 -------
@@ -43,6 +56,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+import threading
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -59,6 +73,7 @@ if TYPE_CHECKING:
     from spidy.vision.manager import VisionManager
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
+    from spidy.ui.app import SpidyApp
 
 log = get_logger(__name__)
 
@@ -72,11 +87,20 @@ class SpidyCore:
     config_path:
         Path to the YAML config file. Defaults to ``config/spidy_config.yaml``
         relative to the current working directory.
+    text_mode:
+        When True, skip the voice pipeline and open an interactive text REPL
+        that feeds input directly into the Brain. Useful for testing without
+        audio hardware.
     """
 
-    def __init__(self, config_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        config_path: Path | None = None,
+        text_mode: bool = False,
+    ) -> None:
         self._state = LifecycleState.CREATED
         self._config_path = config_path
+        self._text_mode = text_mode
         self._config_mgr: ConfigManager | None = None
         self._settings: SpidyConfig | None = None
         self._bus: EventBus | None = None
@@ -86,6 +110,8 @@ class SpidyCore:
         self._brain: Brain | None = None
         self._memory_mgr: MemoryManager | None = None
         self._vision_mgr: VisionManager | None = None
+        self._ui_app: SpidyApp | None = None
+        self._ui_thread: threading.Thread | None = None
         self._shutdown_event = asyncio.Event()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -105,6 +131,21 @@ class SpidyCore:
         if self._bus is None:
             raise RuntimeError("SpidyCore not initialised. Call start() first.")
         return self._bus
+
+    @property
+    def brain(self) -> "Brain | None":
+        """The active Brain instance (None until _run() completes startup)."""
+        return self._brain
+
+    @property
+    def memory(self) -> "MemoryManager | None":
+        """The active MemoryManager (None if disabled or failed to start)."""
+        return self._memory_mgr
+
+    @property
+    def vision(self) -> "VisionManager | None":
+        """The active VisionManager (None if disabled or failed to start)."""
+        return self._vision_mgr
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -157,6 +198,8 @@ class SpidyCore:
         self._transition(LifecycleState.INITIALISING)
         log.info("=" * 60)
         log.info("  Spidy is starting up...")
+        if self._text_mode:
+            log.info("  Mode: TEXT REPL (voice pipeline disabled)")
         log.info("=" * 60)
 
         # ── 1. Configuration ──────────────────────────────────────────────
@@ -194,7 +237,7 @@ class SpidyCore:
             name=self._settings.app.user_name,
         )
 
-        # ── 6. Memory Engine (Milestone 8) ─────────────────────────────────────────────────────
+        # ── 6. Memory Engine (Milestone 8) ────────────────────────────────
         if self._settings.memory.enabled:
             try:
                 from spidy.memory.manager import MemoryManager
@@ -215,7 +258,7 @@ class SpidyCore:
                 )
                 self._memory_mgr = None
 
-        # ── 7. Vision Engine (Milestone 9) ───────────────────────────────────────────────────
+        # ── 7. Vision Engine (Milestone 9) ───────────────────────────────
         if self._settings.vision.enabled:
             try:
                 from spidy.vision.manager import VisionManager
@@ -236,9 +279,10 @@ class SpidyCore:
     async def _run(self) -> None:
         """Step 2: Start all services and enter the main event loop."""
         self._transition(LifecycleState.RUNNING)
+        loop = asyncio.get_running_loop()
 
-        # ── Start VoiceEngine (if configured) ────────────────────────────
-        if self._settings and self._settings.voice.wake_word.enabled:
+        # ── Start VoiceEngine (skipped in text mode) ──────────────────────
+        if not self._text_mode and self._settings and self._settings.voice.wake_word.enabled:
             try:
                 from spidy.perception.voice.factory import VoiceEngineFactory
                 self._voice_engine = VoiceEngineFactory.build(
@@ -325,12 +369,117 @@ class SpidyCore:
                 )
                 self._brain = None
 
+        # ── Start Qt Overlay UI (Milestone 5) ─────────────────────────────
+        if self._settings and self._settings.ui.enabled:
+            self._start_ui_thread(loop)
+
         # Announce to all modules that we are live
         await self._bus.publish(SpidyStartedEvent())
 
-        log.info("Spidy is running. Waiting for shutdown signal...")
-        # Block until shutdown is requested
-        await self._shutdown_event.wait()
+        if self._text_mode:
+            log.info(
+                "Spidy is running in TEXT MODE. "
+                "Type a command and press Enter. Type 'quit' or 'exit' to stop."
+            )
+            await self._run_text_repl()
+        else:
+            log.info("Spidy is running. Waiting for shutdown signal...")
+            # Block until shutdown is requested
+            await self._shutdown_event.wait()
+
+    async def _run_text_repl(self) -> None:
+        """
+        Interactive text REPL for testing without voice hardware.
+
+        Reads lines from stdin asynchronously and forwards them to
+        Brain.process(). Exits on 'quit', 'exit', or CTRL+C / CTRL+D.
+        """
+        loop = asyncio.get_running_loop()
+        print("\n" + "=" * 60)
+        print("  Spidy Text REPL — type a command, press Enter")
+        print("  Type 'quit' or 'exit' to stop.")
+        print("=" * 60)
+
+        while not self._shutdown_event.is_set():
+            try:
+                # run_in_executor keeps the asyncio loop alive while blocking on input
+                line: str = await loop.run_in_executor(None, self._prompt_user)
+            except EOFError:
+                # CTRL+D
+                break
+
+            line = line.strip()
+            if not line:
+                continue
+
+            if line.lower() in {"quit", "exit", "bye", "stop"}:
+                break
+
+            if self._brain is not None:
+                try:
+                    response = await self._brain.process(line)
+                    if response:
+                        print(f"\n  Spidy: {response}\n")
+                    else:
+                        print("  [Spidy: (no response)]\n")
+                except Exception as exc:
+                    log.error("Text REPL: brain error: {exc}", exc=exc)
+                    print(f"  [Error: {exc}]\n")
+            else:
+                print("  [Brain is not running — cannot process input]\n")
+
+        await self.request_shutdown()
+
+    @staticmethod
+    def _prompt_user() -> str:
+        """Blocking stdin read — called from thread executor."""
+        try:
+            return input("You: ")
+        except EOFError:
+            raise
+
+    def _start_ui_thread(self, loop: asyncio.AbstractEventLoop) -> None:
+        """
+        Start the Qt overlay UI in a dedicated daemon thread.
+
+        Qt requires its own event loop, which cannot share the asyncio loop.
+        We pass the asyncio loop to SpidyApp so it can publish events back
+        into asyncio thread-safely.
+        """
+        assert self._settings is not None
+        assert self._bus is not None
+
+        def _run_qt() -> None:
+            try:
+                from spidy.ui.app import SpidyApp
+                self._ui_app = SpidyApp(
+                    bus=self._bus,
+                    config=self._settings,
+                    loop=loop,
+                )
+                self._ui_app.start()
+                exit_code = self._ui_app.run()
+                log.info("Qt UI exited with code {code}.", code=exit_code)
+            except ImportError as exc:
+                log.warning(
+                    "Qt UI not available (missing deps): {exc}. "
+                    "Running without overlay.",
+                    exc=exc,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Qt UI failed to start (non-fatal): {exc}. "
+                    "Running without overlay.",
+                    exc=exc,
+                )
+
+        self._ui_thread = threading.Thread(
+            target=_run_qt,
+            name="SpidyQtUI",
+            daemon=True,  # Dies automatically when the main process exits
+        )
+        self._ui_thread.start()
+        log.info("Qt overlay UI thread started.")
 
     async def _stop(self) -> None:
         """Step 3: Graceful shutdown sequence."""
@@ -339,6 +488,13 @@ class SpidyCore:
 
         self._transition(LifecycleState.STOPPING)
         log.info("Stopping Spidy...")
+
+        # Stop Qt UI (signal quit from asyncio side)
+        if self._ui_app is not None:
+            try:
+                self._ui_app.quit()
+            except Exception as exc:
+                log.debug("UI quit error (non-fatal): {exc}", exc=exc)
 
         # Stop Brain
         if self._brain is not None:
@@ -356,7 +512,7 @@ class SpidyCore:
         if self._observer_mgr is not None:
             await self._observer_mgr.stop()
 
-        # Stop VoiceEngine first (releases audio resources)
+        # Stop VoiceEngine last (releases audio resources)
         if self._voice_engine is not None:
             await self._voice_engine.stop()
 
@@ -364,9 +520,10 @@ class SpidyCore:
             log.debug("Event bus stats: {stats}", stats=self._bus.stats)
 
         self._transition(LifecycleState.STOPPED)
-        log.info("Spidy stopped cleanly. Goodbye, {name}.",
-                 name=self._settings.app.user_name if self._settings else "")
-
+        log.info(
+            "Spidy stopped cleanly. Goodbye, {name}.",
+            name=self._settings.app.user_name if self._settings else "",
+        )
 
     def _register_signal_handlers(self) -> None:
         """Register OS signal handlers for graceful shutdown on Windows."""

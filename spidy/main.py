@@ -5,6 +5,22 @@ Run with:
     python -m spidy.main
 or (after pip install -e .):
     spidy
+
+Flags
+-----
+    --text-mode     Skip voice pipeline; open an interactive text REPL.
+                    Useful for testing without audio hardware.
+
+    <config_path>   Optional first positional argument: path to a custom
+                    YAML config file (overrides the default
+                    config/spidy_config.yaml).
+
+Examples
+--------
+    spidy                                    # production, voice enabled
+    spidy --text-mode                        # REPL, no voice required
+    spidy config/dev_config.yaml             # custom config, production
+    spidy config/dev_config.yaml --text-mode # custom config + REPL
 """
 
 from __future__ import annotations
@@ -18,21 +34,36 @@ def main() -> None:
     """
     Production entry point.
 
-    Determines the config path, creates SpidyCore, and runs it.
+    Parses CLI arguments, creates SpidyCore, and runs it.
     Handles top-level exceptions with a clear error message.
     """
     # Delayed import so logging is not configured at import time
     from spidy.core.app import SpidyCore
 
-    # Allow overriding config path via first CLI argument
+    # ── Parse CLI arguments ────────────────────────────────────────────────
+    args = sys.argv[1:]
+    text_mode = False
     config_path: Path | None = None
-    if len(sys.argv) > 1:
-        config_path = Path(sys.argv[1])
-        if not config_path.exists():
-            print(f"[Spidy] Error: Config file not found: {config_path}", file=sys.stderr)
-            sys.exit(1)
 
-    core = SpidyCore(config_path=config_path)
+    for arg in args:
+        if arg == "--text-mode":
+            text_mode = True
+        elif arg.startswith("--"):
+            print(f"[Spidy] Unknown flag: {arg}", file=sys.stderr)
+            print("Usage: spidy [config_path] [--text-mode]", file=sys.stderr)
+            sys.exit(1)
+        else:
+            # First non-flag argument is treated as config path
+            if config_path is None:
+                config_path = Path(arg)
+                if not config_path.exists():
+                    print(
+                        f"[Spidy] Error: Config file not found: {config_path}",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
+
+    core = SpidyCore(config_path=config_path, text_mode=text_mode)
 
     try:
         asyncio.run(core.start())
