@@ -73,6 +73,7 @@ if TYPE_CHECKING:
     from spidy.memory.manager import MemoryManager
     from spidy.vision.manager import VisionManager
     from spidy.knowledge.manager import KnowledgeManager
+    from spidy.learning.manager import LearningManager
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
     from spidy.ui.app import SpidyApp
@@ -113,6 +114,7 @@ class SpidyCore:
         self._memory_mgr: MemoryManager | None = None
         self._vision_mgr: VisionManager | None = None
         self._knowledge_mgr: KnowledgeManager | None = None
+        self._learning_mgr: LearningManager | None = None
         self._ui_app: SpidyApp | None = None
         self._ui_thread: threading.Thread | None = None
         self._shutdown_event = asyncio.Event()
@@ -154,6 +156,11 @@ class SpidyCore:
     def knowledge(self) -> "KnowledgeManager | None":
         """The active KnowledgeManager (None if disabled or failed to start)."""
         return self._knowledge_mgr
+
+    @property
+    def learning(self) -> "LearningManager | None":
+        """The active LearningManager (None if disabled or failed to start)."""
+        return self._learning_mgr
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -308,6 +315,27 @@ class SpidyCore:
                 )
                 self._knowledge_mgr = None
 
+        # ── 9. Learning Engine (Milestone 11) ────────────────────────
+        if getattr(self._settings.learning, "enabled", True):
+            try:
+                from spidy.learning.manager import LearningManager
+                memory_dir = self._settings.paths.resolve("memory_dir")
+                memory_dir.mkdir(parents=True, exist_ok=True)
+                self._learning_mgr = LearningManager(
+                    config=self._settings.learning,
+                    bus=self._bus,
+                    learning_dir=memory_dir,
+                )
+                await self._learning_mgr.initialize()
+                log.info("LearningManager initialised.")
+            except Exception as exc:
+                log.warning(
+                    "LearningManager failed to initialise (non-fatal): {exc}. "
+                    "Running without learning engine.",
+                    exc=exc,
+                )
+                self._learning_mgr = None
+
     async def _run_ollama_health_check(self) -> None:
         """
         Run the Ollama startup health check and print a diagnostic banner.
@@ -454,6 +482,7 @@ class SpidyCore:
                     memory=self._memory_mgr,
                     vision=self._vision_mgr,
                     knowledge=self._knowledge_mgr,
+                    learning=self._learning_mgr,
                     user_name=self._settings.app.user_name,
                 )
                 await self._brain.start()
@@ -599,6 +628,10 @@ class SpidyCore:
         # Stop KnowledgeManager
         if self._knowledge_mgr is not None:
             await self._knowledge_mgr.close()
+
+        # Stop LearningManager
+        if self._learning_mgr is not None:
+            await self._learning_mgr.close()
 
         # Stop VisionManager
         if self._vision_mgr is not None:

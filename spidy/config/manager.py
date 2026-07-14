@@ -553,6 +553,50 @@ class KnowledgeConfig(BaseModel):
         return v
 
 
+class LearningConfig(BaseModel):
+    """
+    Configuration for the Learning Engine (Milestone 11).
+
+    Controls preference learning, habit detection, workflow detection,
+    and feedback processing. All learning happens locally — no telemetry,
+    no cloud calls.
+    """
+
+    enabled: bool = True
+
+    # Persistence
+    db_filename: str = "spidy_learning.db"   # stored in paths.memory_dir
+
+    # Habit detection
+    min_observations_for_habit: int = 3       # Observations before promoting to habit
+    habit_window_days: int = 30               # Only consider observations within N days
+
+    # Workflow detection
+    min_observations_for_workflow: int = 3    # Repetitions before storing as workflow
+    max_workflow_steps: int = 10              # Max steps to track per sequence
+
+    # Feedback confidence adjustment
+    feedback_decay: float = 0.10              # Confidence delta for negative feedback
+    feedback_boost: float = 0.15             # Confidence delta for positive feedback
+
+    # Privacy / retention
+    data_retention_days: int = 365            # Prune signals older than N days
+
+    @field_validator("min_observations_for_habit", "min_observations_for_workflow")
+    @classmethod
+    def validate_min_observations(cls, v: int) -> int:
+        if v < 1:
+            raise ValueError("min_observations must be >= 1")
+        return v
+
+    @field_validator("feedback_decay", "feedback_boost")
+    @classmethod
+    def validate_feedback_deltas(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("feedback_decay / feedback_boost must be between 0.0 and 1.0")
+        return v
+
+
 class SpidyConfig(BaseModel):
     """
     Root configuration model.
@@ -575,6 +619,7 @@ class SpidyConfig(BaseModel):
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
     knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
+    learning: LearningConfig = Field(default_factory=LearningConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)

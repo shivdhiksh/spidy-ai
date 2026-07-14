@@ -20,7 +20,7 @@
 | **M8** | Memory Engine (Working/Episodic/Semantic) | ✅ Complete | 1049 |
 | **M9** | Vision & Screen Understanding | ✅ Complete | 1229 |
 | **M10** | Knowledge Engine | ✅ Complete | 1531 |
-| **M11** | Learning Engine | 🔜 Planned | — |
+| **M11** | Learning Engine | ✅ Complete | 141 |
 | **M12** | Plugin Marketplace | 🔜 Planned | — |
 | **M13** | Developer Mode | 🔜 Planned | — |
 | **M14** | Deployment & Distribution | 🔜 Planned | — |
@@ -259,34 +259,53 @@ This milestone implements the `KnowledgeInterface` contract established in M3.
 
 ---
 
-### 🔜 M10 — Learning Engine
-**Goal:** Spidy learns who you are and what you like.
+### ✅ M11 — Learning Engine
+**Complete** · Spidy learns who you are and what you like.
 
 This milestone implements the `LearningInterface` contract established in M3.
 
 **Preference Learning**
-- Implicit signals: response ratings, corrections, repeats
-- Explicit feedback: thumbs up/down, "that's wrong", "I prefer..."
-- Preference model per category (response style, TTS speed, app preferences, etc.)
-- Preferences stored locally — never leaves the device
+- Implicit signals: app-usage patterns automatically decoded to preference keys
+- Explicit feedback: confidence boosted/decayed via FeedbackProcessor
+- Preference model per category (browser, IDE, media, etc.)
+- Preferences stored locally in SQLite (`spidy_learning.db`) or in-memory fallback
+- Privacy-preserving: never leaves the device
 
-**Habit Learning**
-- Time-of-day patterns (morning briefing, evening wind-down)
-- Day-of-week routines (Monday standup prep, Friday review)
-- App usage patterns (always opens Spotify after VS Code)
-- Workflow detection (file → edit → commit cycle)
-- Proactive suggestions based on detected habits
+**Habit Detection**
+- `HabitDetector` — trigger/action pair counting with configurable threshold
+- Time-of-day and app-context-aware habit keys
+- Promoted to stable `Habit` objects once `min_observations` is reached
+- Persistent via SQLite with in-memory fallback
+- EventBus events: `learning.habit_detected`, `learning.habit_suggested`
 
 **Workflow Learning**
-- Multi-step workflow recording ("teach Spidy a workflow")
-- Replay on trigger
-- Workflow library management
+- `WorkflowLearner` — multi-step action sequence learning with sliding window
+- `_extract_subsequences()` — enumerates all (min_len..max_steps) subsequences
+- Sequences promoted to stable `Workflow` objects after `min_observations`
+- `suggest_next_step()` — proactively suggests the next action in a known workflow
+- EventBus events: `learning.workflow_detected`, `learning.workflow_suggested`
 
-**Continuous Learning Loop**
-- Every Brain response rated (implicit + explicit)
-- Preference model updated after each session
-- Habit model refined daily
-- Learning is privacy-preserving — models stored locally only
+**Feedback Processing**
+- `FeedbackProcessor` — explicit and implicit signal ingestion
+- Positive feedback → boosts confidence on tagged preferences
+- Negative feedback → decays confidence on tagged preferences
+- `sentiment_by_tag()` — aggregate sentiment query for any tag
+- EventBus event: `learning.feedback_recorded`
+
+**Data Types (all immutable dataclasses)**
+- `Preference` — key/value with confidence, source, and metadata
+- `Habit` — trigger+action with observed_count and stable hash ID
+- `Workflow` — step sequence with trigger_count and stable hash ID
+- `FeedbackSignal` — utterance/response/rating with tag classification
+- `LearningContext` — ambient context snapshot with `time_bucket` property
+
+**Configuration & Integration**
+- `LearningConfig` — full Pydantic config model in `SpidyConfig.learning`
+- `LearningManager` — unified async API implementing `LearningInterface`
+- Wired as **step 9** in `SpidyCore._initialise()`, after KnowledgeManager
+- Passed to `Brain` as `learning=` companion slot
+- Graceful degradation: disabled at runtime if initialization fails
+- **141 new tests** (1672 total)
 
 ---
 
