@@ -214,6 +214,9 @@ class SpidyCore:
         self._config_mgr = ConfigManager(config_path=self._config_path)
         self._settings = self._config_mgr.load()
 
+        # ── 1a. Ollama health check (onboarding diagnostics) ──────────────
+        await self._run_ollama_health_check()
+
         # ── 2. Logging (reconfigure with values from config) ──────────────
         log_dir = self._settings.paths.resolve("log_dir")
         configure_logging(
@@ -304,6 +307,69 @@ class SpidyCore:
                     exc=exc,
                 )
                 self._knowledge_mgr = None
+
+    async def _run_ollama_health_check(self) -> None:
+        """
+        Run the Ollama startup health check and print a diagnostic banner.
+
+        Called immediately after configuration is loaded so the user sees
+        the report before any other module starts.
+
+        Behaviour
+        ---------
+        - Always prints the report banner (never silent).
+        - In text mode: if the model is missing, offers an interactive pull.
+        - In voice/UI mode: logs a warning if issues are detected (no stdin).
+        - Never blocks startup — issues are advisory, not fatal.
+        """
+        assert self._settings is not None
+        provider = getattr(self._settings.reasoning, "provider", "ollama").lower()
+        if provider != "ollama":
+            # Skip Ollama-specific checks for cloud providers
+            return
+
+        try:
+            from spidy.llm.health import (
+                run_health_check_async,
+                print_health_report,
+                maybe_pull_model,
+            )
+        except ImportError:
+            # Should never happen — health.py is stdlib-only
+            log.warning("Could not import health check module.")
+            return
+
+        report = await run_health_check_async(self._settings.reasoning)
+        print_health_report(report)
+
+        if report.all_ok:
+            return
+
+        if not report.server_running:
+            log.warning(
+                "Ollama server is not running. "
+                "Brain will be unavailable until 'ollama serve' is started."
+            )
+            return
+
+        if not report.model_available:
+            if self._text_mode:
+                # Text mode: terminal is available — offer auto-pull
+                pulled = maybe_pull_model(
+                    model=self._settings.reasoning.model,
+                    base_url=self._settings.reasoning.base_url,
+                )
+                if pulled:
+                    log.info(
+                        "Model '{m}' pulled successfully.",
+                        m=self._settings.reasoning.model,
+                    )
+            else:
+                log.warning(
+                    "Model '{m}' is not installed. "
+                    "Run 'ollama pull {m}' then restart Spidy.",
+                    m=self._settings.reasoning.model,
+                )
 
     async def _run(self) -> None:
         """Step 2: Start all services and enter the main event loop."""

@@ -4,6 +4,50 @@
 
 ---
 
+## Onboarding Improvement — Ollama Startup Health Check (2026-07-14)
+
+**Status:** Complete — non-milestone robustness & DX fix  
+**Tests:** 50 new unit tests passing (`tests/unit/test_llm_health.py`)
+
+### Problem
+
+Fresh Spidy installations fail silently when Ollama is running but has no
+models installed. The Brain starts, the REPL is shown, but every query returns
+an empty/failure response with no explanation. Users are left guessing.
+
+### Solution
+
+A new `spidy/llm/health.py` module runs a four-stage check at startup:
+
+| Stage | Check | Method |
+|-------|-------|--------|
+| 1 | Ollama binary installed | `shutil.which("ollama")` |
+| 2 | Ollama server reachable | `GET /api/tags` (urllib) |
+| 3 | Configured model listed | Scan tags response |
+| 4 | LLM round-trip success | `POST /api/chat` ping |
+
+### Design decisions
+
+- **Zero new dependencies** — stdlib only (`shutil`, `urllib`, `json`, `subprocess`)
+- **Never raises** — all errors are caught and returned in `OllamaHealthReport`
+- **Advisory, not fatal** — startup continues even when checks fail; Brain handles
+  the degraded state gracefully as before
+- **Auto-pull only in `--text-mode`** — voice/UI mode has no guarantee of a
+  terminal, so only a `log.warning` with the pull command is emitted
+- **`confirm` callable in `maybe_pull_model`** — makes the pull helper fully
+  testable without stdin mocking
+- **Skips for non-Ollama providers** — cloud providers (OpenAI, Claude, Gemini)
+  return a pass-through report; no Ollama binary check is attempted
+
+### Files changed
+
+- `spidy/llm/health.py` — new module (350 LOC)
+- `spidy/llm/__init__.py` — exports 5 new symbols
+- `spidy/core/app.py` — adds `_run_ollama_health_check()` (called step 1a)
+- `tests/unit/test_llm_health.py` — 50 unit tests
+
+---
+
 ## Milestone 0 — Foundation ✅
 
 **Status:** Complete  

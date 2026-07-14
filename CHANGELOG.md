@@ -12,6 +12,39 @@ _No unreleased changes._
 
 ---
 
+## [0.11.1] — 2026-07-14 · Onboarding: Ollama Startup Health Check
+
+### Added
+
+- **`spidy/llm/health.py`** — `OllamaHealthReport` dataclass + four-stage startup
+  diagnostic: binary installed → server reachable → model available → LLM round-trip.
+  Zero extra dependencies (stdlib `shutil`, `urllib`, `json`, `subprocess`).
+- **`run_health_check(config)`** — synchronous entry point; never raises.
+- **`run_health_check_async(config)`** — async wrapper via `asyncio.to_thread`.
+- **`print_health_report(report)`** — colour-coded console banner (ANSI; falls back
+  gracefully when stdout is not a TTY).
+- **`maybe_pull_model(model, base_url, confirm)`** — interactive model pull with
+  streaming progress; `confirm` callable allows injection in tests.
+- **`OllamaHealthReport.all_ok`** / **`.usable`** — structured boolean properties.
+- Health check wired into `SpidyCore._initialise()` immediately after config load
+  so the banner appears before any other module output.
+- In `--text-mode`, auto-pull offer is presented when the configured model is absent.
+- In voice/UI mode, a `log.warning` with the `ollama pull <model>` command is emitted.
+- Platform-specific installation instructions printed when binary is absent (Windows,
+  macOS, Linux).
+- **`tests/unit/test_llm_health.py`** — 50 unit tests covering all four checks,
+  `run_health_check` end-to-end matrix, async wrapper, pull helper, and
+  `print_health_report` smoke tests.
+
+### Changed
+
+- `spidy/llm/__init__.py` — exports `OllamaHealthReport`, `run_health_check`,
+  `run_health_check_async`, `print_health_report`, `maybe_pull_model`.
+- `spidy/core/app.py` — adds `_run_ollama_health_check()` private method called
+  at startup; skips check for non-Ollama providers.
+
+---
+
 ## [0.11.0] — 2026-07-12 · Milestone 10: Knowledge Engine
 
 ### Added
