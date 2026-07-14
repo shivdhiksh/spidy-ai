@@ -702,3 +702,137 @@ without introducing new major features. Purely an integration milestone.
 ---
 
 *Last updated: 2026-07-12 — Alpha Integration complete (1263 tests passing)*
+
+---
+
+## Milestone 10 — Knowledge Engine ✅
+
+**Status:** Complete  
+**Tests:** 268 new unit tests (1531 total, 0 failures, 3 skipped for absent optional deps)  
+**Date:** 2026-07-12
+
+### Goal
+
+Build the Knowledge Engine — a local document RAG (Retrieval-Augmented Generation) system
+that lets Brain answer questions from user-provided documents and optionally from web search.
+
+### What was built
+
+#### `spidy.knowledge` — 8-module Knowledge Engine package
+
+**`types.py`** — Core data structures
+- `KnowledgeChunk` (frozen dataclass): scored, tagged text chunk with source attribution,
+  chunk position, metadata dict, `content_preview`, `to_dict()`, `create()` factory
+- `KnowledgeResult` (frozen dataclass): query + ordered list of `KnowledgeChunk`s,
+  `is_empty`, `best_score`, `as_rag_context(include_sources, max_chunks)` for LLM injection
+- `SourceType` — string literal alias: `pdf | docx | markdown | text | url | web_search | unknown`
+
+**`events.py`** — 6 EventBus events under `knowledge.*`
+| Event | Topic | Purpose |
+|-------|-------|---------|
+| `KnowledgeDocumentIngestedEvent` | `knowledge.document_ingested` | File → chunks added |
+| `KnowledgeChunkStoredEvent` | `knowledge.chunk_stored` | Single chunk persisted |
+| `KnowledgeQueriedEvent` | `knowledge.queried` | Query completed |
+| `KnowledgeWebSearchPerformedEvent` | `knowledge.web_search_performed` | Web fallback used |
+| `KnowledgeSourceDeletedEvent` | `knowledge.source_deleted` | Source removed |
+| `KnowledgeErrorEvent` | `knowledge.error` | Non-fatal error occurred |
+
+**`chunker.py`** — `Chunker`
+- Fixed-size + overlap text splitting: configurable `chunk_size` (50–8000) and `chunk_overlap`
+- Deterministic chunk IDs: `SHA-256(source)[:12]_{index}` — stable across re-ingestion
+- `chunk(text, source, source_type, metadata, tags)` — returns `list[KnowledgeChunk]`
+- `chunk_pages(pages, source, ...)` — multi-page (PDF page) aware variant
+- `_split(text)` / `_hash_source(source)` internal helpers
+
+**`embedding.py`** — `EmbeddingEngine`
+- Lazy model loading: `sentence-transformers/all-MiniLM-L6-v2` loaded only on first use
+- Thread executor for async: `run_in_executor(None, embed_sync)` keeps asyncio loop live
+- `embed_sync(texts)` → `list[list[float]]` | `embed_one(text)` → `list[float]`
+- `is_available` property: returns `False` if sentence-transformers not installed
+- `embedding_dim` property: returns model dimension after first load
+
+**`ingestor.py`** — `DocumentIngestor` + 4 format-specific ingestors
+- `PlainTextIngestor` — stdlib only; strips BOM, returns single-page list
+- `MarkdownIngestor` — stdlib regex-based `_strip_markdown()`:
+  strips headings, bold/italic, inline code, fenced code, links, images, HR, bullet markers
+- `PDFIngestor` — pypdf (optional); returns list of page strings; graceful on corrupt/absent
+- `DocxIngestor` — python-docx (optional); concatenates all paragraph text
+- `DocumentIngestor` — dispatches by file extension; `get_source_type()`, `get_metadata()`,
+  `is_supported()`, `supported_extensions` properties
+
+**`store.py`** — `VectorStore` (ChromaDB)
+- Collection: `spidy_knowledge` (configurable)
+- Ephemeral (in-memory) mode for tests; persistent mode with `persist_dir`
+- `add_sync(chunks, embeddings)` → `int` (n stored); upsert by `chunk_id`
+- `query_sync(embedding, limit, min_score)` → `list[KnowledgeChunk]`; score = 1 − distance
+- `delete_source_sync(source)` → `int` (n deleted); metadata filter query
+- `count_sync()` → `int`; `list_sources_sync()` → sorted deduped `list[str]`
+- All sync methods have async wrappers via `run_in_executor`
+- `is_available` — False if chromadb not installed
+
+**`web_search.py`** — `WebSearchEngine` + `DuckDuckGoProvider`
+- `BaseSearchProvider` abstract base (fallback returns `[]`)
+- `DuckDuckGoProvider` — DDGS sync search; rank-decay scores; no API key required
+- `WebSearchEngine` — feature-flagged wrapper (disabled by default);
+  `_result_to_chunk()` converts raw dicts to `KnowledgeChunk` with `web_search` tag
+- `search_sync(query, max_results)` / `search(query, max_results)` async wrapper
+
+**`manager.py`** — `KnowledgeManager` (implements `KnowledgeInterface`)
+- `ingest(content, source, ...)` — chunks + embeds + stores raw text; returns first chunk_id
+- `ingest_file(path, ...)` — reads via `DocumentIngestor`; pages chunked separately
+- `query(text, limit)` → `list[dict]` with content/source/score/source_type/metadata/chunk_id
+- `search_rag(query, limit, include_sources)` → formatted string for LLM context injection
+- `_retrieve(query, limit)` → `KnowledgeResult`; triggers web search if vector results < limit
+- `delete_source(source)` → `int`; publishes `KnowledgeSourceDeletedEvent`
+- `count()` / `list_sources()` management methods
+- All operations publish typed events; bus errors are swallowed (non-fatal)
+- `initialize()` / `close()` lifecycle (idempotent)
+
+#### `spidy.core.app` — SpidyCore Knowledge Engine integration
+
+- `_knowledge_mgr: KnowledgeManager | None` — new instance variable
+- `knowledge` property — exposes the active `KnowledgeManager` to external callers
+- Step 8 in `_initialise()` — `KnowledgeManager` started after `VisionManager`;
+  stores chunks in `<data_dir>/knowledge/`; non-fatal on any error
+- `_stop()` — `KnowledgeManager.close()` called before Vision/Memory stop
+- `Brain()` constructor — `knowledge=self._knowledge_mgr` now passed in
+- Module docstring updated (step 7 = KnowledgeManager, steps renumbered)
+
+### Test summary
+
+| File | Tests | Coverage |
+|------|-------|---------|
+| `test_knowledge_types.py` | 36 | `KnowledgeChunk`, `KnowledgeResult`, `as_rag_context()` |
+| `test_knowledge_events.py` | 28 | All 6 event types, topics, defaults, construction |
+| `test_knowledge_chunker.py` | 34 | Constructor validation, `chunk()`, `chunk_pages()`, helpers |
+| `test_knowledge_ingestor.py` | 42 | All 4 ingestors + `DocumentIngestor` dispatch/metadata |
+| `test_knowledge_embedding.py` | 22 | Availability, sync/async embed, mocked model |
+| `test_knowledge_store.py` | 34 | add/query/delete/count/list_sources with mocked ChromaDB |
+| `test_knowledge_web_search.py` | 30 | Provider, engine, result-to-chunk, async wrappers |
+| `test_knowledge_manager.py` | 38 | Full manager API, retrieve pipeline, EventBus |
+| **Total new** | **264** | |
+
+### Key design decisions
+
+1. **No deps in core path** — Plain text + Markdown ingest with zero new pip installs.
+   `pypdf`, `python-docx`, `chromadb`, `sentence-transformers`, `duckduckgo-search`
+   are all optional. Spidy core never crashes on their absence.
+
+2. **Deterministic chunk IDs** — SHA-256(source)[:12]_{index} means re-ingesting the
+   same file produces the same IDs → ChromaDB upsert is idempotent.
+
+3. **Score = 1 − cosine distance** — ChromaDB returns L2/cosine distance; inverting
+   gives an intuitive 0–1 relevance score (1.0 = exact match).
+
+4. **Web search as fallback** — Web search is only triggered when the vector store
+   returns fewer results than the requested limit. Documents always take precedence.
+
+5. **EventBus isolation** — All publish calls wrapped in try/except so a broken bus
+   never aborts an ingest or query.
+
+6. **Sync+Async dual API** — Every store/embedding method has a `*_sync()` and an
+   async wrapper (via `run_in_executor`). Callers choose; no asyncio blocking.
+
+---
+
+*Last updated: 2026-07-12 — Knowledge Engine complete (1531 tests passing)*

@@ -12,6 +12,102 @@ _No unreleased changes._
 
 ---
 
+## [0.11.0] — 2026-07-12 · Milestone 10: Knowledge Engine
+
+### Added
+
+- **`spidy.knowledge` package** — complete five-component Knowledge Engine:
+  - `knowledge/types.py` — frozen dataclasses: `KnowledgeChunk`, `KnowledgeResult`;
+    `SourceType` literal alias (pdf / docx / markdown / text / url / web_search / unknown)
+  - `knowledge/events.py` — 6 typed EventBus events under `knowledge.*` namespace:
+    `KnowledgeDocumentIngestedEvent`, `KnowledgeChunkStoredEvent`, `KnowledgeQueriedEvent`,
+    `KnowledgeWebSearchPerformedEvent`, `KnowledgeSourceDeletedEvent`, `KnowledgeErrorEvent`
+  - `knowledge/chunker.py` — `Chunker`: fixed-size + overlap text splitting;
+    deterministic chunk IDs (`SHA-256[:12]_index`); `chunk()` and `chunk_pages()` APIs
+  - `knowledge/embedding.py` — `EmbeddingEngine`: lazy `sentence-transformers` model init;
+    `embed_sync()` + `embed()` (async) + `embed_one()`; graceful degrade when dep absent
+  - `knowledge/ingestor.py` — `DocumentIngestor` unified dispatch +
+    `PDFIngestor` (pypdf), `DocxIngestor` (python-docx), `MarkdownIngestor` (stdlib),
+    `PlainTextIngestor` (stdlib); all format deps are optional and gracefully absent
+  - `knowledge/store.py` — `VectorStore`: ChromaDB `spidy_knowledge` collection;
+    `add_sync/add`, `query_sync/query`, `delete_source_sync/delete_source`,
+    `count_sync/count`, `list_sources_sync/list_sources`; ephemeral (tests) and persistent modes
+  - `knowledge/web_search.py` — `WebSearchEngine` + `DuckDuckGoProvider`:
+    feature-flagged DuckDuckGo search (disabled by default, no API key required);
+    results as `KnowledgeChunk` objects with rank-decay scores
+  - `knowledge/manager.py` — `KnowledgeManager` implementing `KnowledgeInterface`:
+    orchestrates all sub-components; `query()`, `ingest()`, `search_rag()`,
+    `ingest_file()`, `delete_source()`, `count()`, `list_sources()`
+  - `knowledge/__init__.py` — clean public API re-exports
+
+- **`spidy.config.manager`** — Two new Pydantic models:
+  - `KnowledgeConfig` — chunk_size, chunk_overlap, embedding_model, collection_name,
+    min_relevance_score, max_results, web_search nested config
+  - `WebSearchConfig` — enabled flag, provider, max_results, safe_search
+  - Both added to `SpidyConfig` root model as `knowledge: KnowledgeConfig`
+
+- **`spidy.core.app` — SpidyCore Knowledge Engine integration:**
+  - `_knowledge_mgr: KnowledgeManager | None` instance variable
+  - `knowledge` property — exposes the active `KnowledgeManager`
+  - Step 8 in `_initialise()` — initialises `KnowledgeManager` (non-fatal; running
+    without knowledge engine if deps are absent)
+  - `_stop()` — closes `KnowledgeManager` before stopping other subsystems
+  - `Brain()` constructor call updated to pass `knowledge=self._knowledge_mgr`
+  - Module docstring updated to list `KnowledgeManager` as dependency step 7
+
+- **`tests/unit/test_knowledge_types.py`** — 36 tests:
+  `KnowledgeChunk` construction, immutability, score clamping, `to_dict()`, `create()`;
+  `KnowledgeResult` construction, `is_empty`, `best_score`, `as_rag_context()`
+
+- **`tests/unit/test_knowledge_events.py`** — 28 tests:
+  All 6 event types; topic strings, Event inheritance, field defaults, construction
+
+- **`tests/unit/test_knowledge_chunker.py`** — 34 tests:
+  Constructor validation, `chunk()`, `chunk_pages()`, `_split()`, `_hash_source()`
+
+- **`tests/unit/test_knowledge_ingestor.py`** — 42 tests:
+  `PlainTextIngestor`, `MarkdownIngestor` (Markdown stripping), `PDFIngestor` (graceful degrade),
+  `DocxIngestor` (graceful degrade), `DocumentIngestor` (dispatch, source_type, metadata)
+
+- **`tests/unit/test_knowledge_embedding.py`** — 22 tests:
+  Construction, availability, `embed_sync()` unavailable/mocked, async wrappers,
+  `embedding_dim` property; no real sentence-transformers required
+
+- **`tests/unit/test_knowledge_store.py`** — 34 tests:
+  Construction, availability, `add_sync()`, `query_sync()` (score computation, min_score
+  filtering), `delete_source_sync()`, `count_sync()`, `list_sources_sync()`;
+  all with mocked ChromaDB — no real ChromaDB required
+
+- **`tests/unit/test_knowledge_web_search.py`** — 30 tests:
+  `BaseSearchProvider`, `DuckDuckGoProvider` availability + search,
+  `WebSearchEngine` availability gate, `search_sync()`, `_result_to_chunk()`, async wrappers
+
+- **`tests/unit/test_knowledge_manager.py`** — 38 tests:
+  Construction, lifecycle, `ingest()`, `ingest_file()`, `query()`, `search_rag()`,
+  `delete_source()`, `count()`, `list_sources()`, `_retrieve()` pipeline,
+  EventBus integration (silent on missing bus, swallows publish errors)
+
+### Architecture
+
+```
+KnowledgeManager  (KnowledgeInterface)
+    ├── DocumentIngestor   PDF / DOCX / Markdown / plain-text (all optional deps)
+    ├── Chunker            fixed-size + overlap splitting (zero deps)
+    ├── EmbeddingEngine    sentence-transformers (lazy init, graceful degrade)
+    ├── VectorStore        ChromaDB "spidy_knowledge" collection (graceful degrade)
+    └── WebSearchEngine    DuckDuckGo (disabled by default, no API key required)
+```
+
+### Graceful Degradation
+
+- `sentence-transformers` absent → embeddings return `[]`; ingest still chunks and stores;
+  retrieval returns empty results
+- `chromadb` absent → store operations are no-ops; retrieval returns empty
+- `duckduckgo-search` absent OR `web_search.enabled: false` → web search silently disabled
+- All deps absent → `KnowledgeManager` still initialises; Brain continues normally
+
+---
+
 ## [0.10.0-alpha] — 2026-07-12 · Spidy Alpha Integration
 
 ### Added

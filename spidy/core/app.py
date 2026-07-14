@@ -19,16 +19,17 @@ with different configs. In production, main.py creates exactly one and runs it.
 
 Module Dependency Order (bottom-up)
 ------------------------------------
- 1. Logger          (no deps)
- 2. ConfigManager   (no deps)
- 3. EventBus        (no deps)
- 4. DeviceManager   (CUDA detection)
- 5. MemoryManager   (EventBus, config)       Milestone 8
- 6. VisionManager   (EventBus, config)       Milestone 9
- 7. VoiceEngine     (wake word, STT, TTS)    Milestone 1
- 8. ObserverManager (desktop context)        Milestone 2
- 9. Brain           (all of the above)       Milestone 3
-10. SpidyApp / Qt   (EventBus, asyncio loop) Milestone 5
+ 1. Logger           (no deps)
+ 2. ConfigManager    (no deps)
+ 3. EventBus         (no deps)
+ 4. DeviceManager    (CUDA detection)
+ 5. MemoryManager    (EventBus, config)       Milestone 8
+ 6. VisionManager    (EventBus, config)       Milestone 9
+ 7. KnowledgeManager (EventBus, config)       Milestone 10
+ 8. VoiceEngine      (wake word, STT, TTS)    Milestone 1
+ 9. ObserverManager  (desktop context)        Milestone 2
+10. Brain            (all of the above)       Milestone 3
+11. SpidyApp / Qt    (EventBus, asyncio loop) Milestone 5
 
 Run modes
 ---------
@@ -71,6 +72,7 @@ if TYPE_CHECKING:
     from spidy.brain.brain import Brain
     from spidy.memory.manager import MemoryManager
     from spidy.vision.manager import VisionManager
+    from spidy.knowledge.manager import KnowledgeManager
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
     from spidy.ui.app import SpidyApp
@@ -110,6 +112,7 @@ class SpidyCore:
         self._brain: Brain | None = None
         self._memory_mgr: MemoryManager | None = None
         self._vision_mgr: VisionManager | None = None
+        self._knowledge_mgr: KnowledgeManager | None = None
         self._ui_app: SpidyApp | None = None
         self._ui_thread: threading.Thread | None = None
         self._shutdown_event = asyncio.Event()
@@ -146,6 +149,11 @@ class SpidyCore:
     def vision(self) -> "VisionManager | None":
         """The active VisionManager (None if disabled or failed to start)."""
         return self._vision_mgr
+
+    @property
+    def knowledge(self) -> "KnowledgeManager | None":
+        """The active KnowledgeManager (None if disabled or failed to start)."""
+        return self._knowledge_mgr
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -276,6 +284,27 @@ class SpidyCore:
                 )
                 self._vision_mgr = None
 
+        # ── 8. Knowledge Engine (Milestone 10) ───────────────────────
+        if getattr(self._settings.knowledge, "enabled", True):
+            try:
+                from spidy.knowledge.manager import KnowledgeManager
+                knowledge_dir = self._settings.paths.resolve("data_dir") / "knowledge"
+                knowledge_dir.mkdir(parents=True, exist_ok=True)
+                self._knowledge_mgr = KnowledgeManager(
+                    config=self._settings.knowledge,
+                    bus=self._bus,
+                    knowledge_dir=knowledge_dir,
+                )
+                await self._knowledge_mgr.initialize()
+                log.info("KnowledgeManager initialised.")
+            except Exception as exc:
+                log.warning(
+                    "KnowledgeManager failed to initialise (non-fatal): {exc}. "
+                    "Running without knowledge engine.",
+                    exc=exc,
+                )
+                self._knowledge_mgr = None
+
     async def _run(self) -> None:
         """Step 2: Start all services and enter the main event loop."""
         self._transition(LifecycleState.RUNNING)
@@ -358,6 +387,7 @@ class SpidyCore:
                     llm_client=llm_client,
                     memory=self._memory_mgr,
                     vision=self._vision_mgr,
+                    knowledge=self._knowledge_mgr,
                     user_name=self._settings.app.user_name,
                 )
                 await self._brain.start()
@@ -499,6 +529,10 @@ class SpidyCore:
         # Stop Brain
         if self._brain is not None:
             await self._brain.stop()
+
+        # Stop KnowledgeManager
+        if self._knowledge_mgr is not None:
+            await self._knowledge_mgr.close()
 
         # Stop VisionManager
         if self._vision_mgr is not None:

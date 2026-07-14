@@ -40,3 +40,7 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Large model binaries (exceed GitHub 100MB limit)
+*.onnx
+assets/models/

@@ -19,7 +19,7 @@
 | **M7** | Browser Agent (Playwright) | ✅ Complete | 914 |
 | **M8** | Memory Engine (Working/Episodic/Semantic) | ✅ Complete | 1049 |
 | **M9** | Vision & Screen Understanding | ✅ Complete | 1229 |
-| **M10** | Knowledge Engine | 🔜 Planned | — |
+| **M10** | Knowledge Engine | ✅ Complete | 1531 |
 | **M11** | Learning Engine | 🔜 Planned | — |
 | **M12** | Plugin Marketplace | 🔜 Planned | — |
 | **M13** | Developer Mode | 🔜 Planned | — |

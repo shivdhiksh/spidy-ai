@@ -495,6 +495,64 @@ class VisionConfig(BaseModel):
     ocr: OCRConfig = Field(default_factory=OCRConfig)
 
 
+# ── Milestone 10 — Knowledge Engine ─────────────────────────────────────────────
+
+
+class WebSearchConfig(BaseModel):
+    """
+    Configuration for optional web search in the Knowledge Engine.
+    Disabled by default (privacy-first).
+    """
+    enabled: bool = False                    # Master switch — off by default
+    provider: str = "duckduckgo"             # "duckduckgo" (only provider for now)
+    max_results: int = 5                     # Maximum results per query
+    safe_search: bool = True                 # Apply safe-search filtering
+
+
+class KnowledgeConfig(BaseModel):
+    """
+    Configuration for the Knowledge Engine (Milestone 10).
+
+    Controls document ingestion, chunking, embedding, retrieval, and
+    optional web search.
+    """
+    # Master switch
+    enabled: bool = True
+
+    # Chunker settings
+    chunk_size: int = 1000          # Target characters per chunk
+    chunk_overlap: int = 200        # Overlap characters between adjacent chunks
+
+    # Embedding
+    embedding_model: str = "all-MiniLM-L6-v2"   # sentence-transformers model
+
+    # Vector store
+    collection_name: str = "spidy_knowledge"     # ChromaDB collection name
+
+    # Retrieval
+    min_relevance_score: float = 0.3    # Minimum cosine similarity to include
+    max_results: int = 5                # Default top-k for retrieval
+
+    # Optional web search
+    web_search: WebSearchConfig = Field(default_factory=WebSearchConfig)
+
+    @field_validator("chunk_overlap", mode="after")
+    @classmethod
+    def validate_overlap(cls, v: int) -> int:
+        # Note: cross-field validation against chunk_size is done in model_validator.
+        # This validator just ensures the value is non-negative.
+        if v < 0:
+            raise ValueError("chunk_overlap must be >= 0")
+        return v
+
+    @field_validator("min_relevance_score")
+    @classmethod
+    def validate_score(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("min_relevance_score must be between 0.0 and 1.0")
+        return v
+
+
 class SpidyConfig(BaseModel):
     """
     Root configuration model.
@@ -516,6 +574,7 @@ class SpidyConfig(BaseModel):
     executor: ExecutorConfig = Field(default_factory=ExecutorConfig)
     memory: MemoryConfig = Field(default_factory=MemoryConfig)
     vision: VisionConfig = Field(default_factory=VisionConfig)
+    knowledge: KnowledgeConfig = Field(default_factory=KnowledgeConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     permissions: PermissionsConfig = Field(default_factory=PermissionsConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)

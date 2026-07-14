@@ -261,3 +261,36 @@ vision:
     language: "en"                # ISO 639-1 language code
     confidence_threshold: 0.5     # Min confidence to include a text block
     gpu: false                    # Set true to use GPU (requires CUDA + easyocr[gpu])
+
+# --------------------------------------------------------------------------- #
+# Knowledge Engine                                           (Milestone 10)   #
+# --------------------------------------------------------------------------- #
+knowledge:
+  enabled: true                   # Master switch — set false to disable all knowledge
+
+  # Document chunking
+  chunk_size: 1000                # Target characters per chunk
+  chunk_overlap: 200              # Overlap between adjacent chunks (prevents context loss)
+
+  # Embedding
+  #   Uses sentence-transformers (same dep as M8 Memory Engine)
+  #   Install: pip install sentence-transformers
+  embedding_model: "all-MiniLM-L6-v2"  # 384-dim, lightweight and fast
+
+  # Vector store
+  #   Uses ChromaDB (same dep as M8 Memory Engine)
+  #   Collection is separate from memory: "spidy_knowledge" vs "spidy_memories"
+  #   Install: pip install chromadb
+  collection_name: "spidy_knowledge"
+
+  # Retrieval
+  min_relevance_score: 0.3        # Minimum cosine similarity to include a chunk (0.0–1.0)
+  max_results: 5                  # Default top-k chunks returned per query
+
+  # Optional web search (disabled by default — privacy first)
+  #   Install: pip install duckduckgo-search
+  web_search:
+    enabled: false                # Set true to allow web search augmentation
+    provider: "duckduckgo"        # duckduckgo (no API key required)
+    max_results: 5                # Max web results to augment per query
+    safe_search: true             # Apply safe-search filtering
