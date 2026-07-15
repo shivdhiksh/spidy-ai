@@ -127,9 +127,38 @@ class TestIntentClassifier:
         assert intent.action == "chat"
 
     async def test_open_app_intent(self, classifier):
+        # 'open_app' was renamed to 'launch_app' to match AppSkill.capabilities()
         intent = await classifier.classify("Open Chrome")
-        assert intent.action == "open_app"
+        assert intent.action == "launch_app"
         assert intent.confidence >= 0.6
+
+    # ── launch_app routing tests (stabilisation fix) ───────────────────────
+
+    @pytest.mark.parametrize("utterance,expected_app", [
+        ("open notepad",    "notepad"),
+        ("launch notepad",  "notepad"),
+        ("start notepad",   "notepad"),
+        ("open calculator", "calculator"),
+        ("open chrome",     "chrome"),
+        ("launch chrome",   "chrome"),
+        ("start spotify",   "spotify"),
+        ("open cmd",        "cmd"),
+        ("launch vscode",   "vscode"),
+    ])
+    async def test_launch_app_intent(self, classifier, utterance, expected_app):
+        """Classifier must emit launch_app (not open_app or chat) for app launch phrases."""
+        intent = await classifier.classify(utterance)
+        assert intent.action == "launch_app", (
+            f"Expected 'launch_app' for {utterance!r}, got {intent.action!r}"
+        )
+        assert intent.confidence >= 0.6
+        # The app name entity (key "name") must be extracted correctly
+        app_entities = [e for e in intent.entities if e.name == "name"]
+        assert app_entities, f"No 'name' entity extracted for {utterance!r}"
+        assert app_entities[0].value == expected_app, (
+            f"Expected name={expected_app!r} for {utterance!r}, "
+            f"got {app_entities[0].value!r}"
+        )
 
     async def test_search_web_intent(self, classifier):
         intent = await classifier.classify("Search the web for Python tutorials")
@@ -448,7 +477,7 @@ class TestPlanner:
         assert plan.session_id == "test-session"
 
     async def test_plan_carries_decision(self, planner):
-        decision = self.make_decision(DecisionMode.SKILL, "open_app", "app_skill")
+        decision = self.make_decision(DecisionMode.SKILL, "launch_app", "app_skill")
         plan = await planner.plan(decision)
         assert plan.decision is decision
 

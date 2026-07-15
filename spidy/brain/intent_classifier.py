@@ -16,7 +16,7 @@ implementation, only on the return type ``Intent``.
 Recognised action categories
 -----------------------------
   file_*       : open_file, search_files, read_file, delete_file
-  app_*        : open_app, close_app, switch_app
+  app_*        : launch_app, close_app, bring_app_to_foreground, detect_running_apps
   web_*        : search_web, open_url, navigate
   system_*     : set_volume, set_brightness, sleep, lock
   note_*       : take_note, read_notes, find_note
@@ -75,11 +75,15 @@ def _extract_query(text: str) -> list[Entity]:
 def _extract_app_name(text: str) -> list[Entity]:
     """Extract an app name from the utterance."""
     match = re.search(
-        r"(?:open|launch|start|close|quit|exit|switch to|focus)\s+(.+?)(?:\s+(?:app|application))?$",
+        r"(?:open|launch|start|run|close|quit|exit|switch to|focus)\s+(.+?)(?:\s+(?:app|application))?$",
         text.lower().strip()
     )
     if match:
-        return [Entity(name="app_name", value=match.group(1).strip())]
+        name = match.group(1).strip()
+        # Strip leading article "the" (e.g. "open the notepad" → "notepad")
+        name = re.sub(r"^the\s+", "", name).strip()
+        if name:
+            return [Entity(name="name", value=name)]
     return []
 
 
@@ -159,24 +163,41 @@ _RULES: list[_Rule] = [
                   "search for file", "where is the file"),
         entity_extractor=_extract_filename,
     ),
-    # App operations
+    # App operations — action names MUST match AppSkill.capabilities() exactly
     _Rule(
-        action="open_app",
-        patterns=("open app", "launch", "start app", "open application",
-                  "open chrome", "open firefox", "open code",
-                  "open notepad", "open calculator", "open spotify",
-                  "open vscode", "open visual studio"),
+        action="launch_app",
+        patterns=(
+            # Generic verb + "app"
+            "open app", "start app", "launch app", "run app",
+            "open application", "launch application", "start application",
+            # Specific apps — bare-name variants
+            "open notepad", "launch notepad", "start notepad", "run notepad",
+            "open calculator", "launch calculator", "start calculator",
+            "open chrome", "launch chrome", "start chrome",
+            "open firefox", "launch firefox", "start firefox",
+            "open edge", "launch edge",
+            "open spotify", "launch spotify", "start spotify",
+            "open code", "open vscode", "open visual studio",
+            "launch vscode", "launch code",
+            "open word", "open excel", "open powerpoint",
+            "open terminal", "open cmd", "open powershell",
+            "open explorer", "open task manager",
+            # Bare "launch" verb with anything following
+            "launch",
+        ),
         entity_extractor=_extract_app_name,
     ),
     _Rule(
         action="close_app",
         patterns=("close app", "quit app", "exit app", "close application",
-                  "kill app", "close window"),
+                  "kill app", "close window", "close notepad", "close chrome",
+                  "close firefox", "close spotify"),
         entity_extractor=_extract_app_name,
     ),
     _Rule(
-        action="switch_app",
-        patterns=("switch to", "go to", "bring up", "focus on"),
+        action="bring_app_to_foreground",
+        patterns=("switch to", "go to", "bring up", "focus on",
+                  "bring to front", "show window", "focus window"),
         entity_extractor=_extract_app_name,
         confidence=_MED_CONFIDENCE,
     ),
