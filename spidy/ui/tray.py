@@ -29,7 +29,7 @@ from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QSize, Qt, Signal
 from PySide6.QtGui import (
-    QAction, QColor, QIcon, QImage, QPainter, QPainterPath, QBrush
+    QAction, QColor, QIcon, QImage, QPainter, QPainterPath, QBrush, QPixmap
 )
 from PySide6.QtWidgets import QMenu, QSystemTrayIcon, QApplication
 
@@ -63,7 +63,7 @@ def _make_spidy_icon(size: int = 32, color: str = "#6C63FF") -> QIcon:
     painter.drawText(img.rect(), Qt.AlignmentFlag.AlignCenter, "S")
     painter.end()
 
-    return QIcon(img)
+    return QIcon(QPixmap.fromImage(img))
 
 
 class SystemTrayManager(QObject):

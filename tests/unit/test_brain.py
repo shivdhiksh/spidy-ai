@@ -181,6 +181,42 @@ class TestIntentClassifier:
         intent = await classifier.classify("help")
         assert intent.action == "help"
 
+    # ── Greeting / identity rules (stabilisation fix) ──────────────────────
+
+    @pytest.mark.parametrize("utterance", [
+        "hi", "hello", "hey",
+        "Hey Spidy", "hi spidy", "hello spidy",
+        "hi there", "hey there",
+        "good morning", "good afternoon", "good evening",
+        "howdy", "greetings",
+    ])
+    async def test_greet_intent(self, classifier, utterance):
+        intent = await classifier.classify(utterance)
+        assert intent.action == "greet", (
+            f"Expected 'greet' for {utterance!r}, got {intent.action!r}"
+        )
+        assert intent.confidence >= 0.9
+
+    @pytest.mark.parametrize("utterance", [
+        "goodbye", "bye", "see you", "farewell", "bye spidy",
+    ])
+    async def test_farewell_intent(self, classifier, utterance):
+        intent = await classifier.classify(utterance)
+        assert intent.action == "farewell", (
+            f"Expected 'farewell' for {utterance!r}, got {intent.action!r}"
+        )
+
+    @pytest.mark.parametrize("utterance", [
+        "who are you", "what are you", "introduce yourself",
+        "tell me about yourself",
+    ])
+    async def test_introduce_intent(self, classifier, utterance):
+        intent = await classifier.classify(utterance)
+        assert intent.action == "introduce", (
+            f"Expected 'introduce' for {utterance!r}, got {intent.action!r}"
+        )
+        assert intent.confidence >= 0.9
+
 
 # ─── TestConversationManager ──────────────────────────────────────────────────
 

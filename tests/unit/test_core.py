@@ -31,7 +31,10 @@ class TestSpidyCoreLifecycle:
     async def test_core_reaches_running_state(self, tmp_path: Path):
         """SpidyCore.start() should reach RUNNING, then shutdown cleanly."""
         cfg_file = tmp_path / "cfg.yaml"
-        cfg_file.write_text("", encoding="utf-8")
+        # Explicitly disable the Qt overlay so this test doesn't create a
+        # QApplication in a background thread, which would contaminate the
+        # Qt timer tests in test_ui_overlay.py that run later in the suite.
+        cfg_file.write_text("ui:\n  enabled: false\n", encoding="utf-8")
         core = SpidyCore(config_path=cfg_file)
 
         async def shutdown_after_start(event):

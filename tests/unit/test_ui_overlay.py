@@ -9,11 +9,7 @@ The offscreen Qt platform is used so tests run in CI without a display.
 
 from __future__ import annotations
 
-import os
 import sys
-
-# Force offscreen platform before any Qt import
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest
 
@@ -24,12 +20,24 @@ from PySide6.QtWidgets import QApplication
 
 # ── Shared QApplication fixture (one per test session) ────────────────────────
 
-@pytest.fixture(scope="module")
+@pytest.fixture(scope="session")
 def qapp():
-    """Return the shared QApplication instance."""
+    """Return a functional QApplication for the test session.
+
+    Ensures:
+    1. Exactly one QApplication exists (creates one if absent).
+    2. The Qt event loop is pumped via processEvents() so that QTimer
+       registrations work correctly even when earlier tests in the full
+       suite have exercised Qt code paths (e.g. via SpidyCore start/stop
+       tests that create/destroy Qt objects).
+    """
     app = QApplication.instance()
     if app is None:
-        app = QApplication([])
+        app = QApplication(sys.argv[:1])
+    # Pump the event loop once to flush any pending Qt state left by
+    # earlier tests.  Without this, QTimer.isActive() can return False
+    # even after .start() when the full suite runs non-interactively.
+    app.processEvents()
     return app
 
 

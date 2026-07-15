@@ -178,7 +178,8 @@ class HabitDetector:
         except ImportError:
             log.warning(
                 "HabitDetector: 'aiosqlite' not installed — "
-                "habits will not persist across restarts."
+                "habits will not persist across restarts. "
+                "Install with: pip install aiosqlite"
             )
             self._fallback = _InMemoryHabitFallback()
             self._initialized = True

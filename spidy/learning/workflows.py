@@ -182,7 +182,8 @@ class WorkflowLearner:
         except ImportError:
             log.warning(
                 "WorkflowLearner: 'aiosqlite' not installed — "
-                "workflows will not persist across restarts."
+                "workflows will not persist across restarts. "
+                "Install with: pip install aiosqlite"
             )
             self._fallback = _InMemoryWorkflowFallback()
             self._initialized = True

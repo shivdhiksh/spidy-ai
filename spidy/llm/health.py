@@ -180,7 +180,7 @@ def _check_model_available(configured_model: str, available_models: list[str]) -
     return any(m.startswith(prefix) for m in available_models)
 
 
-def _check_llm_connection(base_url: str, model: str, timeout: int = 10) -> tuple[bool, str]:
+def _check_llm_connection(base_url: str, model: str, timeout: int = 30) -> tuple[bool, str]:
     """
     Check 4: Can we get a real response from the LLM?
 
@@ -282,7 +282,13 @@ def run_health_check(config: "ReasoningConfig") -> OllamaHealthReport:
 
     # Check 4: LLM round-trip (only if model is available)
     if model_ok:
-        llm_ok, llm_err = _check_llm_connection(config.base_url, config.model)
+        try:
+            configured_timeout = int(getattr(config, "timeout_seconds", 30))
+        except (TypeError, ValueError):
+            configured_timeout = 30
+        llm_ok, llm_err = _check_llm_connection(
+            config.base_url, config.model, timeout=max(configured_timeout, 30)
+        )
         report.llm_connected = llm_ok
         if not llm_ok:
             report.errors.append(f"LLM round-trip failed: {llm_err}")

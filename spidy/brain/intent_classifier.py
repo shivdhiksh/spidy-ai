@@ -116,6 +116,37 @@ def _extract_timer_duration(text: str) -> list[Entity]:
 # ─── Rule Definitions ─────────────────────────────────────────────────────────
 
 _RULES: list[_Rule] = [
+    # Greetings / identity  — HIGH priority so they beat generic search_web rules
+    _Rule(
+        action="greet",
+        patterns=(
+            "hey spidy", "hi spidy", "hello spidy",
+            "hi there", "hey there",
+            "good morning", "good afternoon", "good evening", "good night",
+            "howdy", "greetings",
+            # bare single-word greetings — matched via exact contain
+            "hi", "hey", "hello",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="farewell",
+        patterns=(
+            "goodbye", "bye", "bye bye", "see you", "see ya",
+            "farewell", "talk to you later", "good night spidy",
+            "bye spidy", "goodbye spidy",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="introduce",
+        patterns=(
+            "who are you", "what are you", "introduce yourself",
+            "tell me about yourself", "what can you do for me",
+            "are you an ai", "are you a bot",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
     # File operations
     _Rule(
         action="open_file",

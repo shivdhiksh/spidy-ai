@@ -5,10 +5,17 @@ Pytest shared fixtures and configuration.
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
 import yaml
+
+# ─── Qt offscreen platform ────────────────────────────────────────────────────
+# Must be set before ANY PySide6 / Qt import anywhere in the test process.
+# Placing it here (conftest.py at the tests/ root) guarantees it is set
+# before any test module is collected or imported.
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 # ─── Async test support ───────────────────────────────────────────────────────
 

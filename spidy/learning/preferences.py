@@ -120,7 +120,8 @@ class PreferenceLearner:
         except ImportError:
             log.warning(
                 "PreferenceLearner: 'aiosqlite' not installed — "
-                "preferences will not persist across restarts."
+                "preferences will not persist across restarts. "
+                "Install with: pip install aiosqlite"
             )
             self._fallback = _InMemoryPrefFallback()
             self._initialized = True

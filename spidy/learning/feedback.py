@@ -145,7 +145,8 @@ class FeedbackProcessor:
         except ImportError:
             log.warning(
                 "FeedbackProcessor: 'aiosqlite' not installed — "
-                "feedback will not persist across restarts."
+                "feedback will not persist across restarts. "
+                "Install with: pip install aiosqlite"
             )
             self._fallback = _InMemoryFeedbackFallback()
             self._initialized = True
