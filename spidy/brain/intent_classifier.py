@@ -62,9 +62,32 @@ class _Rule:
 
 def _extract_query(text: str) -> list[Entity]:
     """Extract the search query from the utterance."""
-    # Remove leading action words and return the rest as query
+    # Remove leading action words and return the rest as query.
+    # Longer alternatives must come FIRST so the regex engine does not
+    # greedily consume "search" before it can match "search for".
     cleaned = re.sub(
-        r"^(search|find|look up|google|look for|search for|search web for)\s+",
+        r"^(search web for|search the web for|search for|look for|look up|"
+        r"find out about|find|google|search)\s+",
+        "", text.lower().strip()
+    )
+    if cleaned:
+        return [Entity(name="query", value=cleaned)]
+    return []
+
+
+
+def _extract_youtube_query(text: str) -> list[Entity]:
+    """Extract the search query from a YouTube search utterance.
+
+    Examples
+    --------
+    "search youtube for python" → "python"
+    "youtube python tutorial"   → "python tutorial"
+    """
+    cleaned = re.sub(
+        r"^(search\s+youtube\s+for|search\s+on\s+youtube\s+for"
+        r"|search\s+youtube|youtube\s+search\s+for|youtube\s+for"
+        r"|youtube)\s+",
         "", text.lower().strip()
     )
     if cleaned:
@@ -201,7 +224,18 @@ _RULES: list[_Rule] = [
         entity_extractor=_extract_app_name,
         confidence=_MED_CONFIDENCE,
     ),
-    # Web operations
+    _Rule(
+        action="search_youtube",
+        patterns=(
+            "search youtube for", "search youtube", "youtube search for",
+            "search on youtube for", "search on youtube",
+            "youtube for", "find on youtube", "look up on youtube",
+        ),
+        entity_extractor=_extract_youtube_query,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    # Generic web search — must come AFTER search_youtube so "search youtube"
+    # doesn't accidentally match "search for" pattern here
     _Rule(
         action="search_web",
         patterns=("search the web", "search web for", "search for",

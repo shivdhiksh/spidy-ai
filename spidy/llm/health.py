@@ -343,10 +343,21 @@ def print_health_report(report: OllamaHealthReport) -> None:
     Designed to appear at the very top of the startup sequence so users
     immediately see the Ollama status without digging through logs.
     """
+    # On Windows the default stdout encoding is often cp1252 (charmap), which
+    # cannot encode the Unicode glyphs used below (─, —, ✓, ✗, →, …).
+    # Reconfigure to UTF-8 so the banner prints correctly.  errors='replace'
+    # substitutes '?' for any still-unencodable character on legacy consoles.
+    if hasattr(sys.stdout, "reconfigure"):
+        try:
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001 — non-fatal; proceed with current encoding
+            pass
+
     divider = _coloured("─" * 56, _CYAN)
     print(f"\n{divider}")
     print(_coloured("  Spidy — Startup Health Check", _BOLD))
     print(divider)
+
 
     # Check 1: Binary
     if report.binary_installed:

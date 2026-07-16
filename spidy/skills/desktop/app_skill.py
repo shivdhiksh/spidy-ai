@@ -221,12 +221,11 @@ class AppSkill(BaseSkill):
                 subprocess.Popen,
                 cmd,
                 shell=False,
-                creationflags=0x00000008,  # DETACHED_PROCESS on Windows
             )
             pid = proc.pid
             log.info("AppSkill: launched '{name}' as PID {pid}", name=resolved, pid=pid)
         except FileNotFoundError:
-            # Try shell=True as fallback for system commands
+            # Try shell=True as fallback for system commands and UWP app launchers
             try:
                 proc = await asyncio.to_thread(subprocess.Popen, " ".join(cmd), shell=True)
                 pid = proc.pid
