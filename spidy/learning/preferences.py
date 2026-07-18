@@ -107,15 +107,20 @@ class PreferenceLearner:
         self._aiosqlite_available = False
         self._fallback: _InMemoryPrefFallback | None = None
         self._initialized = False
+        self._db: Any = None  # persistent aiosqlite.Connection
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
 
     async def initialize(self) -> None:
-        """Create the preferences table. Must be called before any other op."""
+        """Open a persistent DB connection and create the preferences table.
+
+        A single connection is kept open for the lifetime of this object so
+        that SQLite ``:memory:`` databases retain schema/data across calls.
+        """
         if self._initialized:
             return
         try:
-            import aiosqlite  # noqa: F401
+            import aiosqlite
             self._aiosqlite_available = True
         except ImportError:
             log.warning(
@@ -130,13 +135,19 @@ class PreferenceLearner:
         if self._db_path != ":memory:":
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(_CREATE_TABLE_SQL)
-            await db.commit()
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.execute(_CREATE_TABLE_SQL)
+        await self._db.commit()
 
         self._initialized = True
         log.debug("PreferenceLearner: ready at '{path}'", path=self._db_path)
+
+    async def close(self) -> None:
+        """Close the persistent DB connection.  Safe to call multiple times."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
+            self._initialized = False
 
     # ── Core API ───────────────────────────────────────────────────────────
 
@@ -179,26 +190,24 @@ class PreferenceLearner:
             self._fallback.set(pref)
             return pref
 
-        import aiosqlite
         value_json = json.dumps(value)
         meta_json = json.dumps(pref.metadata)
         ts = pref.last_updated.timestamp()
 
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO preferences (key, value, confidence, source, last_updated, metadata)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT(key) DO UPDATE SET
-                    value=excluded.value,
-                    confidence=excluded.confidence,
-                    source=excluded.source,
-                    last_updated=excluded.last_updated,
-                    metadata=excluded.metadata
-                """,
-                (key, value_json, confidence, source, ts, meta_json),
-            )
-            await db.commit()
+        await self._db.execute(
+            """
+            INSERT INTO preferences (key, value, confidence, source, last_updated, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                confidence=excluded.confidence,
+                source=excluded.source,
+                last_updated=excluded.last_updated,
+                metadata=excluded.metadata
+            """,
+            (key, value_json, confidence, source, ts, meta_json),
+        )
+        await self._db.commit()
 
         return pref
 
@@ -221,14 +230,12 @@ class PreferenceLearner:
         if self._fallback is not None:
             return self._fallback.get(key)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT key, value, confidence, source, last_updated, metadata "
-                "FROM preferences WHERE key = ?",
-                (key,),
-            ) as cursor:
-                row = await cursor.fetchone()
+        async with self._db.execute(
+            "SELECT key, value, confidence, source, last_updated, metadata "
+            "FROM preferences WHERE key = ?",
+            (key,),
+        ) as cursor:
+            row = await cursor.fetchone()
 
         if row is None:
             return None
@@ -240,13 +247,11 @@ class PreferenceLearner:
             prefs = self._fallback.all()
             return sorted(prefs, key=lambda p: p.confidence, reverse=True)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT key, value, confidence, source, last_updated, metadata "
-                "FROM preferences ORDER BY confidence DESC"
-            ) as cursor:
-                rows = await cursor.fetchall()
+        async with self._db.execute(
+            "SELECT key, value, confidence, source, last_updated, metadata "
+            "FROM preferences ORDER BY confidence DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
 
         return [_row_to_preference(r) for r in rows]
 
@@ -274,21 +279,17 @@ class PreferenceLearner:
         if self._fallback is not None:
             return self._fallback.delete(key)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute("DELETE FROM preferences WHERE key = ?", (key,))
-            await db.commit()
-            return cursor.rowcount > 0
+        cursor = await self._db.execute("DELETE FROM preferences WHERE key = ?", (key,))
+        await self._db.commit()
+        return cursor.rowcount > 0
 
     async def count(self) -> int:
         """Return the total number of stored preferences."""
         if self._fallback is not None:
             return self._fallback.count()
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute("SELECT COUNT(*) FROM preferences") as cursor:
-                row = await cursor.fetchone()
+        async with self._db.execute("SELECT COUNT(*) FROM preferences") as cursor:
+            row = await cursor.fetchone()
         return row[0] if row else 0
 
     # ── Implicit learning helpers ──────────────────────────────────────────

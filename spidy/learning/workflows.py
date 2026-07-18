@@ -47,6 +47,7 @@ Persistence
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -169,15 +170,20 @@ class WorkflowLearner:
         self._aiosqlite_available = False
         self._fallback: _InMemoryWorkflowFallback | None = None
         self._initialized = False
+        self._db: Any = None  # persistent aiosqlite.Connection
         # Per-session step buffer: session_id → list of step names
         self._session_steps: dict[str, list[str]] = {}
 
     async def initialize(self) -> None:
-        """Create schema. Must be called before any other method."""
+        """Open a persistent DB connection and create schema.
+
+        A single connection is kept open for the lifetime of this object so
+        that SQLite ``:memory:`` databases retain schema/data across calls.
+        """
         if self._initialized:
             return
         try:
-            import aiosqlite  # noqa: F401
+            import aiosqlite
             self._aiosqlite_available = True
         except ImportError:
             log.warning(
@@ -192,14 +198,20 @@ class WorkflowLearner:
         if self._db_path != ":memory:":
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(_CREATE_OBSERVATIONS_SQL)
-            await db.execute(_CREATE_WORKFLOWS_SQL)
-            await db.commit()
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.execute(_CREATE_OBSERVATIONS_SQL)
+        await self._db.execute(_CREATE_WORKFLOWS_SQL)
+        await self._db.commit()
 
         self._initialized = True
         log.debug("WorkflowLearner: ready at '{path}'", path=self._db_path)
+
+    async def close(self) -> None:
+        """Close the persistent DB connection.  Safe to call multiple times."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
+            self._initialized = False
 
     # ── Core API ───────────────────────────────────────────────────────────
 
@@ -283,13 +295,11 @@ class WorkflowLearner:
             wfs = self._fallback.list()
             return sorted(wfs, key=lambda w: w.confidence, reverse=True)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT id, name, steps_json, trigger_count, confidence, last_seen, suggested "
-                "FROM workflows ORDER BY confidence DESC"
-            ) as cursor:
-                rows = await cursor.fetchall()
+        async with self._db.execute(
+            "SELECT id, name, steps_json, trigger_count, confidence, last_seen, suggested "
+            "FROM workflows ORDER BY confidence DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
 
         return [_row_to_workflow(r) for r in rows]
 
@@ -298,14 +308,12 @@ class WorkflowLearner:
         if self._fallback is not None:
             return self._fallback.get(workflow_id)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT id, name, steps_json, trigger_count, confidence, last_seen, suggested "
-                "FROM workflows WHERE id=?",
-                (workflow_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
+        async with self._db.execute(
+            "SELECT id, name, steps_json, trigger_count, confidence, last_seen, suggested "
+            "FROM workflows WHERE id=?",
+            (workflow_id,),
+        ) as cursor:
+            row = await cursor.fetchone()
 
         if row is None:
             return None
@@ -316,10 +324,8 @@ class WorkflowLearner:
         if self._fallback is not None:
             return self._fallback.count()
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute("SELECT COUNT(*) FROM workflows") as cursor:
-                row = await cursor.fetchone()
+        async with self._db.execute("SELECT COUNT(*) FROM workflows") as cursor:
+            row = await cursor.fetchone()
         return row[0] if row else 0
 
     # ── Private helpers ────────────────────────────────────────────────────
@@ -335,23 +341,21 @@ class WorkflowLearner:
         now_ts = time.time()
         steps_json = json.dumps(steps)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO workflow_observations (steps_key, steps_json, count, last_seen)
-                VALUES (?, ?, 1, ?)
-                ON CONFLICT(steps_key) DO UPDATE SET
-                    count = count + 1,
-                    last_seen = excluded.last_seen
-                """,
-                (key, steps_json, now_ts),
-            )
-            await db.commit()
-            async with db.execute(
-                "SELECT count FROM workflow_observations WHERE steps_key=?", (key,)
-            ) as cursor:
-                row = await cursor.fetchone()
+        await self._db.execute(
+            """
+            INSERT INTO workflow_observations (steps_key, steps_json, count, last_seen)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(steps_key) DO UPDATE SET
+                count = count + 1,
+                last_seen = excluded.last_seen
+            """,
+            (key, steps_json, now_ts),
+        )
+        await self._db.commit()
+        async with self._db.execute(
+            "SELECT count FROM workflow_observations WHERE steps_key=?", (key,)
+        ) as cursor:
+            row = await cursor.fetchone()
 
         return row[0] if row else 1
 
@@ -368,29 +372,27 @@ class WorkflowLearner:
             self._fallback.store(workflow)
             return workflow
 
-        import aiosqlite
         now_ts = time.time()
         steps_json = json.dumps(steps)
 
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT id FROM workflows WHERE id=?", (workflow.id,)
-            ) as cur:
-                already_existed = await cur.fetchone() is not None
+        async with self._db.execute(
+            "SELECT id FROM workflows WHERE id=?", (workflow.id,)
+        ) as cur:
+            already_existed = await cur.fetchone() is not None
 
-            await db.execute(
-                """
-                INSERT INTO workflows
-                    (id, name, steps_json, trigger_count, confidence, last_seen, suggested)
-                VALUES (?, ?, ?, ?, ?, ?, 0)
-                ON CONFLICT(id) DO UPDATE SET
-                    trigger_count=excluded.trigger_count,
-                    confidence=excluded.confidence,
-                    last_seen=excluded.last_seen
-                """,
-                (workflow.id, workflow.name, steps_json, count, workflow.confidence, now_ts),
-            )
-            await db.commit()
+        await self._db.execute(
+            """
+            INSERT INTO workflows
+                (id, name, steps_json, trigger_count, confidence, last_seen, suggested)
+            VALUES (?, ?, ?, ?, ?, ?, 0)
+            ON CONFLICT(id) DO UPDATE SET
+                trigger_count=excluded.trigger_count,
+                confidence=excluded.confidence,
+                last_seen=excluded.last_seen
+            """,
+            (workflow.id, workflow.name, steps_json, count, workflow.confidence, now_ts),
+        )
+        await self._db.commit()
 
         if already_existed:
             return None

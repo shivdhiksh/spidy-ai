@@ -52,6 +52,7 @@ Schema
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
@@ -167,13 +168,18 @@ class HabitDetector:
         self._aiosqlite_available = False
         self._fallback: _InMemoryHabitFallback | None = None
         self._initialized = False
+        self._db: Any = None  # persistent aiosqlite.Connection
 
     async def initialize(self) -> None:
-        """Create schema tables. Must be called before any other method."""
+        """Open a persistent DB connection and create schema tables.
+
+        A single connection is kept open for the lifetime of this object so
+        that SQLite ``:memory:`` databases retain schema/data across calls.
+        """
         if self._initialized:
             return
         try:
-            import aiosqlite  # noqa: F401
+            import aiosqlite
             self._aiosqlite_available = True
         except ImportError:
             log.warning(
@@ -188,14 +194,20 @@ class HabitDetector:
         if self._db_path != ":memory:":
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(_CREATE_OBSERVATIONS_SQL)
-            await db.execute(_CREATE_HABITS_SQL)
-            await db.commit()
+        self._db = await aiosqlite.connect(self._db_path)
+        await self._db.execute(_CREATE_OBSERVATIONS_SQL)
+        await self._db.execute(_CREATE_HABITS_SQL)
+        await self._db.commit()
 
         self._initialized = True
         log.debug("HabitDetector: ready at '{path}'", path=self._db_path)
+
+    async def close(self) -> None:
+        """Close the persistent DB connection.  Safe to call multiple times."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
+            self._initialized = False
 
     # ── Core API ───────────────────────────────────────────────────────────
 
@@ -285,13 +297,11 @@ class HabitDetector:
             habits = self._fallback.list_habits()
             return sorted(habits, key=lambda h: h.confidence, reverse=True)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                "SELECT id, description, trigger_json, action, confidence, "
-                "observed_count, last_seen FROM habits ORDER BY confidence DESC"
-            ) as cursor:
-                rows = await cursor.fetchall()
+        async with self._db.execute(
+            "SELECT id, description, trigger_json, action, confidence, "
+            "observed_count, last_seen FROM habits ORDER BY confidence DESC"
+        ) as cursor:
+            rows = await cursor.fetchall()
 
         return [_row_to_habit(r) for r in rows]
 
@@ -300,10 +310,8 @@ class HabitDetector:
         if self._fallback is not None:
             return self._fallback.count_habits()
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute("SELECT COUNT(*) FROM habits") as cursor:
-                row = await cursor.fetchone()
+        async with self._db.execute("SELECT COUNT(*) FROM habits") as cursor:
+            row = await cursor.fetchone()
         return row[0] if row else 0
 
     # ── Private helpers ────────────────────────────────────────────────────
@@ -315,25 +323,23 @@ class HabitDetector:
         if self._fallback is not None:
             return self._fallback.increment_observation(trigger_key, action)
 
-        import aiosqlite
         now_ts = time.time()
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                """
-                INSERT INTO habit_observations (trigger_key, action, count, last_seen)
-                VALUES (?, ?, 1, ?)
-                ON CONFLICT(trigger_key, action) DO UPDATE SET
-                    count = count + 1,
-                    last_seen = excluded.last_seen
-                """,
-                (trigger_key, action, now_ts),
-            )
-            await db.commit()
-            async with db.execute(
-                "SELECT count FROM habit_observations WHERE trigger_key=? AND action=?",
-                (trigger_key, action),
-            ) as cursor:
-                row = await cursor.fetchone()
+        await self._db.execute(
+            """
+            INSERT INTO habit_observations (trigger_key, action, count, last_seen)
+            VALUES (?, ?, 1, ?)
+            ON CONFLICT(trigger_key, action) DO UPDATE SET
+                count = count + 1,
+                last_seen = excluded.last_seen
+            """,
+            (trigger_key, action, now_ts),
+        )
+        await self._db.commit()
+        async with self._db.execute(
+            "SELECT count FROM habit_observations WHERE trigger_key=? AND action=?",
+            (trigger_key, action),
+        ) as cursor:
+            row = await cursor.fetchone()
         return row[0] if row else 1
 
     async def _promote_habit(
@@ -350,32 +356,30 @@ class HabitDetector:
             if existing is not None:
                 habit = existing.observed()
             self._fallback.store_habit(habit)
-            return habit if count == self._min_observations else None  # only return on first crossing
+            return habit if count == self._min_observations else None
 
-        import aiosqlite
         now_ts = time.time()
         trigger_json = json.dumps(trigger)
-        async with aiosqlite.connect(self._db_path) as db:
-            # Check if already stored (returning None avoids duplicate events)
-            async with db.execute("SELECT id FROM habits WHERE id=?", (habit.id,)) as cur:
-                already_existed = await cur.fetchone() is not None
+        # Check if already stored (returning None avoids duplicate events)
+        async with self._db.execute("SELECT id FROM habits WHERE id=?", (habit.id,)) as cur:
+            already_existed = await cur.fetchone() is not None
 
-            await db.execute(
-                """
-                INSERT INTO habits
-                    (id, description, trigger_json, action, confidence, observed_count, last_seen)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    confidence=excluded.confidence,
-                    observed_count=excluded.observed_count,
-                    last_seen=excluded.last_seen
-                """,
-                (
-                    habit.id, description, trigger_json, action,
-                    habit.confidence, count, now_ts,
-                ),
-            )
-            await db.commit()
+        await self._db.execute(
+            """
+            INSERT INTO habits
+                (id, description, trigger_json, action, confidence, observed_count, last_seen)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                confidence=excluded.confidence,
+                observed_count=excluded.observed_count,
+                last_seen=excluded.last_seen
+            """,
+            (
+                habit.id, description, trigger_json, action,
+                habit.confidence, count, now_ts,
+            ),
+        )
+        await self._db.commit()
 
         # Only return on first crossing (so caller only publishes event once)
         if already_existed:

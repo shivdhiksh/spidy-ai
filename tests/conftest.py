@@ -17,6 +17,14 @@ import yaml
 # before any test module is collected or imported.
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+# ─── ChromaDB / PostHog telemetry ────────────────────────────────────────────
+# ChromaDB initiates a PostHog telemetry network call on first client
+# construction. In CI / automated tests this causes the test to hang until the
+# connection times out (~30 s) and may interfere with event-loop teardown.
+# Setting ANONYMIZED_TELEMETRY=false disables it before any import.
+os.environ.setdefault("ANONYMIZED_TELEMETRY", "false")
+os.environ.setdefault("CHROMA_TELEMETRY", "false")
+
 # ─── Async test support ───────────────────────────────────────────────────────
 
 # pytest-asyncio is configured via pyproject.toml (asyncio_mode = "auto")

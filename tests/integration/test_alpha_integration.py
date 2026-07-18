@@ -84,6 +84,10 @@ memory:
   enable_semantic: false
 vision:
   enabled: false
+knowledge:
+  enabled: false
+learning:
+  enabled: false
 ui:
   enabled: false
 """,

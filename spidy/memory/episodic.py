@@ -156,14 +156,21 @@ class EpisodicMemory:
         self._aiosqlite_available = False
         self._fallback: _InMemoryFallback | None = None
         self._initialized = False
+        self._db: Any = None  # persistent aiosqlite.Connection (kept open)
 
     async def initialize(self) -> None:
-        """Create the DB schema. Must be called before any other operation."""
+        """Open a persistent DB connection and create the schema.
+
+        Must be called before any other operation.  A single connection is
+        kept open for the lifetime of this object so that SQLite ``:memory:``
+        databases (used in tests) retain their schema and data across calls.
+        Call :meth:`close` when done to release the connection.
+        """
         if self._initialized:
             return
 
         try:
-            import aiosqlite  # noqa: F401  (import probe only)
+            import aiosqlite
             self._aiosqlite_available = True
         except ImportError:
             log.warning(
@@ -175,10 +182,14 @@ class EpisodicMemory:
             self._initialized = True
             return
 
-        # Create parent directory if needed
+        # Create parent directory if needed (skip for in-memory)
         if self._db_path != ":memory:":
             Path(self._db_path).parent.mkdir(parents=True, exist_ok=True)
 
+        # Open one persistent connection and keep it for all operations.
+        # This is essential for :memory: (each new connection = empty DB)
+        # and avoids repeated open/close overhead for file-backed DBs.
+        self._db = await aiosqlite.connect(self._db_path)
         await self._create_schema()
         self._initialized = True
         log.info(
@@ -187,12 +198,18 @@ class EpisodicMemory:
         )
 
     async def _create_schema(self) -> None:
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(_CREATE_TABLE_SQL)
-            await db.execute(_INDEX_SESSION_SQL)
-            await db.execute(_INDEX_TIMESTAMP_SQL)
-            await db.commit()
+        db = self._db
+        await db.execute(_CREATE_TABLE_SQL)
+        await db.execute(_INDEX_SESSION_SQL)
+        await db.execute(_INDEX_TIMESTAMP_SQL)
+        await db.commit()
+
+    async def close(self) -> None:
+        """Close the persistent DB connection.  Safe to call multiple times."""
+        if self._db is not None:
+            await self._db.close()
+            self._db = None
+            self._initialized = False
 
     # ── Public API ──────────────────────────────────────────────────────────
 
@@ -216,25 +233,23 @@ class EpisodicMemory:
             self._fallback.store(entry)
             return entry.id
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            await db.execute(
-                """
-                INSERT OR REPLACE INTO memories
-                    (id, content, session_id, tags, metadata, timestamp, memory_type)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    entry.id,
-                    entry.content,
-                    entry.session_id,
-                    json.dumps(list(entry.tags)),
-                    json.dumps(entry.metadata),
-                    entry.timestamp.timestamp(),
-                    entry.memory_type.value,
-                ),
-            )
-            await db.commit()
+        await self._db.execute(
+            """
+            INSERT OR REPLACE INTO memories
+                (id, content, session_id, tags, metadata, timestamp, memory_type)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                entry.id,
+                entry.content,
+                entry.session_id,
+                json.dumps(list(entry.tags)),
+                json.dumps(entry.metadata),
+                entry.timestamp.timestamp(),
+                entry.memory_type.value,
+            ),
+        )
+        await self._db.commit()
 
         log.debug("EpisodicMemory: stored {id}", id=entry.id[:8])
         return entry.id
@@ -270,7 +285,6 @@ class EpisodicMemory:
         if self._fallback is not None:
             return self._fallback.recall(query, session_id, limit)
 
-        import aiosqlite
         like_query = f"%{query}%"
         if session_id:
             sql = """
@@ -291,9 +305,8 @@ class EpisodicMemory:
             """
             params = (like_query, limit)
 
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(sql, params) as cursor:
-                rows = await cursor.fetchall()
+        async with self._db.execute(sql, params) as cursor:
+            rows = await cursor.fetchall()
 
         return [_row_to_entry(row) for row in rows]
 
@@ -325,21 +338,19 @@ class EpisodicMemory:
         if self._fallback is not None:
             return self._fallback.search(query, limit, tags)
 
-        import aiosqlite
         like_query = f"%{query}%"
 
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(
-                """
-                SELECT id, content, session_id, tags, metadata, timestamp, memory_type
-                FROM memories
-                WHERE content LIKE ?
-                ORDER BY timestamp DESC
-                LIMIT ?
-                """,
-                (like_query, limit * 3 if tags else limit),  # over-fetch if filtering
-            ) as cursor:
-                rows = await cursor.fetchall()
+        async with self._db.execute(
+            """
+            SELECT id, content, session_id, tags, metadata, timestamp, memory_type
+            FROM memories
+            WHERE content LIKE ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (like_query, limit * 3 if tags else limit),  # over-fetch if filtering
+        ) as cursor:
+            rows = await cursor.fetchall()
 
         entries = [_row_to_entry(row) for row in rows]
 
@@ -364,13 +375,11 @@ class EpisodicMemory:
         if self._fallback is not None:
             return self._fallback.delete(memory_id)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            cursor = await db.execute(
-                "DELETE FROM memories WHERE id = ?", (memory_id,)
-            )
-            await db.commit()
-            deleted = cursor.rowcount > 0
+        cursor = await self._db.execute(
+            "DELETE FROM memories WHERE id = ?", (memory_id,)
+        )
+        await self._db.commit()
+        deleted = cursor.rowcount > 0
 
         log.debug(
             "EpisodicMemory: delete {id} → {result}",
@@ -393,16 +402,14 @@ class EpisodicMemory:
         if self._fallback is not None:
             return self._fallback.clear(session_id)
 
-        import aiosqlite
-        async with aiosqlite.connect(self._db_path) as db:
-            if session_id:
-                cursor = await db.execute(
-                    "DELETE FROM memories WHERE session_id = ?", (session_id,)
-                )
-            else:
-                cursor = await db.execute("DELETE FROM memories")
-            await db.commit()
-            count = cursor.rowcount
+        if session_id:
+            cursor = await self._db.execute(
+                "DELETE FROM memories WHERE session_id = ?", (session_id,)
+            )
+        else:
+            cursor = await self._db.execute("DELETE FROM memories")
+        await self._db.commit()
+        count = cursor.rowcount
 
         log.info(
             "EpisodicMemory: cleared {n} entries (session='{sid}')",
@@ -418,7 +425,6 @@ class EpisodicMemory:
         if self._fallback is not None:
             return self._fallback.count(session_id)
 
-        import aiosqlite
         if session_id:
             sql = "SELECT COUNT(*) FROM memories WHERE session_id = ?"
             params: tuple = (session_id,)
@@ -426,9 +432,8 @@ class EpisodicMemory:
             sql = "SELECT COUNT(*) FROM memories"
             params = ()
 
-        async with aiosqlite.connect(self._db_path) as db:
-            async with db.execute(sql, params) as cursor:
-                row = await cursor.fetchone()
+        async with self._db.execute(sql, params) as cursor:
+            row = await cursor.fetchone()
         return row[0] if row else 0
 
     @property
