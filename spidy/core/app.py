@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     from spidy.perception.context.observer_manager import ObserverManager
     from spidy.plugins.manager import PluginManager
     from spidy.ui.app import SpidyApp
+    from spidy.ui.brain_bridge import BrainUIBridge
 
 log = get_logger(__name__)
 
@@ -119,6 +120,7 @@ class SpidyCore:
         self._plugin_mgr: "PluginManager | None" = None
         self._ui_app: SpidyApp | None = None
         self._ui_thread: threading.Thread | None = None
+        self._brain_ui_bridge: "BrainUIBridge | None" = None
         self._shutdown_event = asyncio.Event()
 
     # ── Properties ────────────────────────────────────────────────────────
@@ -490,6 +492,14 @@ class SpidyCore:
                 await self._brain.start()
                 log.info("Brain running. Ready to process utterances.")
 
+                # ── Start Brain↔UI bridge ─────────────────────────────────
+                # Translates brain.* events → ui.* events so the overlay
+                # chat view receives conversation turns. Active in all modes.
+                from spidy.ui.brain_bridge import BrainUIBridge
+                self._brain_ui_bridge = BrainUIBridge(bus=self._bus)
+                self._brain_ui_bridge.start()
+                log.info("BrainUIBridge started. Overlay will now display chat.")
+
                 # ── Start Plugin Manager (Milestone 12) ───────────────────
                 if self._settings.plugins.enabled:
                     try:
@@ -654,6 +664,10 @@ class SpidyCore:
                 self._ui_app.quit()
             except Exception as exc:
                 log.debug("UI quit error (non-fatal): {exc}", exc=exc)
+
+        # Stop Brain↔UI bridge first (it holds brain.* subscriptions)
+        if self._brain_ui_bridge is not None:
+            self._brain_ui_bridge.stop()
 
         # Stop Brain
         if self._brain is not None:
