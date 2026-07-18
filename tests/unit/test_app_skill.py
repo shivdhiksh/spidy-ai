@@ -160,6 +160,7 @@ class TestLaunchApp:
     async def test_launch_by_alias(self):
         mock_proc = MagicMock()
         mock_proc.pid = 9999
+        mock_proc.poll.return_value = None  # Still running after 350ms settle
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
             skill = _make_skill()
             ctx = _ctx("launch_app", {"name": "notepad"})
@@ -175,6 +176,7 @@ class TestLaunchApp:
     async def test_launch_with_args(self):
         mock_proc = MagicMock()
         mock_proc.pid = 1234
+        mock_proc.poll.return_value = None  # Still running
         with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
             skill = _make_skill()
             ctx = _ctx("launch_app", {"name": "notepad", "args": "C:/test.txt"})
@@ -186,13 +188,10 @@ class TestLaunchApp:
 
     @pytest.mark.asyncio
     async def test_launch_app_not_found(self):
-        import subprocess
         with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
-            with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
-                skill = _make_skill()
-                ctx = _ctx("launch_app", {"name": "nonexistent_app_xyz"})
-                # The second Popen (shell=True fallback) also fails
-                result = await skill.execute("launch_app", ctx)
+            skill = _make_skill()
+            ctx = _ctx("launch_app", {"name": "nonexistent_app_xyz"})
+            result = await skill.execute("launch_app", ctx)
         assert not result.success
 
     @pytest.mark.asyncio
@@ -209,6 +208,7 @@ class TestLaunchApp:
         skill = _make_skill(bus=bus)
         mock_proc = MagicMock()
         mock_proc.pid = 5555
+        mock_proc.poll.return_value = None  # Still running
         with patch("subprocess.Popen", return_value=mock_proc):
             ctx = _ctx("launch_app", {"name": "notepad"})
             await skill.execute("launch_app", ctx)

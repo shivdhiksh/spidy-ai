@@ -80,6 +80,30 @@ _APP_ALIASES: dict[str, str] = {
     "snipping tool": "SnippingTool.exe",
 }
 
+# Fallback full paths for apps not in PATH (e.g. Chrome installed to Program Files)
+_KNOWN_PATHS: dict[str, list[str]] = {
+    "chrome.exe": [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe",
+    ],
+    "msedge.exe": [
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+    ],
+    "firefox.exe": [
+        r"C:\Program Files\Mozilla Firefox\firefox.exe",
+        r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+    ],
+    "code.exe": [
+        r"%LOCALAPPDATA%\Programs\Microsoft VS Code\Code.exe",
+        r"C:\Program Files\Microsoft VS Code\Code.exe",
+    ],
+    "spotify.exe": [
+        r"%APPDATA%\Spotify\Spotify.exe",
+    ],
+}
+
 
 class AppSkill(BaseSkill):
     """
@@ -214,31 +238,42 @@ class AppSkill(BaseSkill):
 
         # Resolve alias
         resolved = _APP_ALIASES.get(name.lower(), name)
-        cmd = [resolved] + args
 
+        # Expand known install paths for apps not on PATH
+        exe_path = self._resolve_exe_path(resolved)
+        cmd = [exe_path] + args
+
+        proc: subprocess.Popen | None = None
         try:
             proc = await asyncio.to_thread(
                 subprocess.Popen,
                 cmd,
                 shell=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-            pid = proc.pid
-            log.info("AppSkill: launched '{name}' as PID {pid}", name=resolved, pid=pid)
         except FileNotFoundError:
-            # Try shell=True as fallback for system commands and UWP app launchers
-            try:
-                proc = await asyncio.to_thread(subprocess.Popen, " ".join(cmd), shell=True)
-                pid = proc.pid
-            except Exception as exc:  # noqa: BLE001
-                return SkillResult.fail(
-                    f"AppSkill: could not launch '{name}'. App not found or not installed.",
-                    error=exc,
-                )
+            return SkillResult.fail(
+                f"AppSkill: could not launch '{name}' — not found in PATH or known install locations.",
+            )
         except Exception as exc:  # noqa: BLE001
             return SkillResult.fail(
                 f"AppSkill: failed to launch '{name}': {exc}", error=exc
             )
 
+        # Verify the process is still alive after a short settle period.
+        # Without this, shell-spawned wrappers report success even when the
+        # real executable was never found (e.g. chrome.exe not in PATH).
+        await asyncio.sleep(0.35)
+        exit_code = proc.poll()
+        if exit_code is not None:
+            return SkillResult.fail(
+                f"AppSkill: '{name}' exited immediately with code {exit_code}. "
+                "Check that the application is installed correctly."
+            )
+
+        pid = proc.pid
+        log.info("AppSkill: launched '{name}' as PID {pid}", name=resolved, pid=pid)
         await self._emit_app_launched(name, pid, context.session_id)
         return SkillResult.ok(
             f"Launched '{name}' (PID {pid}).",
@@ -327,6 +362,31 @@ class AppSkill(BaseSkill):
         )
 
     # ── Internal helpers ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _resolve_exe_path(exe_name: str) -> str:
+        """
+        Resolve an executable name to a full path.
+
+        Tries (in order):
+        1. The name as-is (works when it is already a full path or is on PATH).
+        2. Known install paths from _KNOWN_PATHS (with env-var expansion).
+
+        Returns the first path that exists on disk, or the original name if
+        nothing is found (Popen will raise FileNotFoundError as normal).
+        """
+        import os, shutil
+        # Already a full path or on PATH
+        if os.path.isabs(exe_name) or shutil.which(exe_name):
+            return exe_name
+        # Check known locations
+        key = exe_name.lower()
+        for candidate in _KNOWN_PATHS.get(key, []):
+            expanded = os.path.expandvars(candidate)
+            if os.path.isfile(expanded):
+                return expanded
+        # Return original — Popen will raise FileNotFoundError if not found
+        return exe_name
 
     @staticmethod
     def _get_running_processes(name_filter: str, limit: int) -> list[dict]:

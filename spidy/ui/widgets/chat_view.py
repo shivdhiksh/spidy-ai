@@ -14,12 +14,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Literal
 
-from PySide6.QtCore import QPropertyAnimation, Qt, QTimer, QEasingCurve
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QPainter, QPainterPath, QPen
+    QBrush, QColor, QFont, QPainter, QPainterPath
 )
 from PySide6.QtWidgets import (
-    QFrame, QGraphicsOpacityEffect, QLabel, QScrollArea,
+    QFrame, QLabel, QScrollArea,
     QSizePolicy, QVBoxLayout, QWidget,
 )
 
@@ -109,19 +109,10 @@ class ChatBubble(QFrame):
         # Creating an orphan wrapper here caused the ChatBubble to be GC'd by Qt
         # since the orphan became the de-facto owner and was deleted on scope exit.
 
-        # Fade-in via QGraphicsOpacityEffect.
-        # WA_TranslucentBackground is intentionally absent on this widget, so
-        # the effect renders cleanly into its offscreen pixmap without
-        # conflicting with our custom paintEvent.
-        self._opacity_effect = QGraphicsOpacityEffect(self)
-        self._opacity_effect.setOpacity(0.0)
-        self.setGraphicsEffect(self._opacity_effect)
-        self._fade_in = QPropertyAnimation(self._opacity_effect, b"opacity", self)
-        self._fade_in.setDuration(250)
-        self._fade_in.setStartValue(0.0)
-        self._fade_in.setEndValue(1.0)
-        self._fade_in.setEasingCurve(QEasingCurve.Type.OutCubic)
-        QTimer.singleShot(50, self._fade_in.start)
+        # No fade-in delay: the bubble is visible immediately when added to the
+        # layout. A delayed opacity=0 start caused messages to appear "late" —
+        # the widget existed in the layout but was invisible until the timer
+        # fired 50ms later and the 250ms animation completed.
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)

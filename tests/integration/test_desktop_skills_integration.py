@@ -279,6 +279,7 @@ class TestDesktopSkillsEventFlow:
         skill = registry.find_skill_for_action("launch_app")
         mock_proc = MagicMock()
         mock_proc.pid = 12345
+        mock_proc.poll.return_value = None  # Simulate process still running
 
         from spidy.skills.base import SkillContext
         ctx = SkillContext(action="launch_app",
