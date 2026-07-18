@@ -313,6 +313,14 @@ class OverlayWindow(QWidget):
         if self._animate:
             self._fade_anim.setStartValue(1.0)
             self._fade_anim.setEndValue(0.0)
+            # Disconnect any previous finished→hide connection before adding a
+            # new one.  Without this, rapid repeated calls to hide_animated()
+            # stack up connections and call hide() multiple times, producing
+            # "Painter not active" warnings on the second (no-op) call.
+            try:
+                self._fade_anim.finished.disconnect(self.hide)
+            except RuntimeError:
+                pass  # Not connected — that's fine
             self._fade_anim.finished.connect(self.hide)
             self._fade_anim.start()
         else:
@@ -494,6 +502,8 @@ class OverlayWindow(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w, h = self.width(), self.height()
@@ -519,6 +529,8 @@ class OverlayWindow(QWidget):
             glow_pen = QPen(glow_color, 3)
             painter.setPen(glow_pen)
             painter.drawPath(path)
+
+        painter.end()
 
     # ── Positioning ───────────────────────────────────────────────────────
 

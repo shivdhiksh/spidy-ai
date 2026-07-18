@@ -69,7 +69,12 @@ class ChatBubble(QFrame):
         self._align_right = align_right
 
         self.setObjectName("ChatBubble")
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        # Do NOT set WA_TranslucentBackground here: combining it with
+        # QGraphicsOpacityEffect causes "QPainter::begin" / "Painter not
+        # active" / "Unbalanced save/restore" Qt warnings because the effect
+        # renders into an offscreen pixmap and then begins a second painter
+        # on top of the translucent device. The custom paintEvent fills the
+        # rounded rect background directly, so transparency is not needed.
 
         # Role label
         role_text = "You" if message.role == "user" else "Spidy"
@@ -104,7 +109,10 @@ class ChatBubble(QFrame):
         # Creating an orphan wrapper here caused the ChatBubble to be GC'd by Qt
         # since the orphan became the de-facto owner and was deleted on scope exit.
 
-        # Fade-in effect
+        # Fade-in via QGraphicsOpacityEffect.
+        # WA_TranslucentBackground is intentionally absent on this widget, so
+        # the effect renders cleanly into its offscreen pixmap without
+        # conflicting with our custom paintEvent.
         self._opacity_effect = QGraphicsOpacityEffect(self)
         self._opacity_effect.setOpacity(0.0)
         self.setGraphicsEffect(self._opacity_effect)
@@ -117,6 +125,8 @@ class ChatBubble(QFrame):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        if not painter.isActive():
+            return  # Guard: skip if painter failed to initialise
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         path = QPainterPath()
         path.addRoundedRect(
@@ -124,6 +134,7 @@ class ChatBubble(QFrame):
             self._radius, self._radius
         )
         painter.fillPath(path, QBrush(self._bg))
+        painter.end()  # Explicit end prevents Unbalanced save/restore warnings
 
 
 # ─── ChatView ─────────────────────────────────────────────────────────────────

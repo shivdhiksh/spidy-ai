@@ -162,6 +162,8 @@ class ToastWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w, h = self.width(), self.height()
@@ -179,6 +181,8 @@ class ToastWidget(QWidget):
         border_color.setAlphaF(0.3)
         painter.setPen(border_color)
         painter.drawPath(path)
+
+        painter.end()
 
     def _on_fade_out_done(self) -> None:
         self.hide()

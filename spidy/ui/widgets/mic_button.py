@@ -102,6 +102,8 @@ class MicrophoneButton(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w, h = self.width(), self.height()
@@ -141,6 +143,8 @@ class MicrophoneButton(QWidget):
             self._draw_spinner(painter, cx, cy, r)
         elif self._state == "speaking":
             self._draw_speaker(painter, cx, cy)
+
+        painter.end()
 
     def mousePressEvent(self, event) -> None:
         if self._state in ("idle", "wake_ready"):

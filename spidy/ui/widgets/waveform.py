@@ -103,6 +103,8 @@ class WaveformWidget(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w = self.width()
@@ -126,6 +128,8 @@ class WaveformWidget(QWidget):
             painter.drawRoundedRect(
                 QRectF(x, y, bar_w, bar_h), r, r
             )
+
+        painter.end()
 
     # ── Animation ─────────────────────────────────────────────────────────
 

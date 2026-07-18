@@ -66,6 +66,8 @@ class SpeakingIndicator(QWidget):
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
+        if not painter.isActive():
+            return
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setPen(Qt.PenStyle.NoPen)
 
@@ -93,6 +95,8 @@ class SpeakingIndicator(QWidget):
 
             x = start_x + i * _DOT_SPACING
             painter.drawEllipse(QPointF(x, cy + vert), dot_r, dot_r)
+
+        painter.end()
 
     # ── Animation ─────────────────────────────────────────────────────────
 
