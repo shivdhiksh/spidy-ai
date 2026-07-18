@@ -76,6 +76,7 @@ if TYPE_CHECKING:
     from spidy.learning.manager import LearningManager
     from spidy.perception.voice.engine import VoiceEngine
     from spidy.perception.context.observer_manager import ObserverManager
+    from spidy.plugins.manager import PluginManager
     from spidy.ui.app import SpidyApp
 
 log = get_logger(__name__)
@@ -115,6 +116,7 @@ class SpidyCore:
         self._vision_mgr: VisionManager | None = None
         self._knowledge_mgr: KnowledgeManager | None = None
         self._learning_mgr: LearningManager | None = None
+        self._plugin_mgr: "PluginManager | None" = None
         self._ui_app: SpidyApp | None = None
         self._ui_thread: threading.Thread | None = None
         self._shutdown_event = asyncio.Event()
@@ -487,6 +489,31 @@ class SpidyCore:
                 )
                 await self._brain.start()
                 log.info("Brain running. Ready to process utterances.")
+
+                # ── Start Plugin Manager (Milestone 12) ───────────────────
+                if self._settings.plugins.enabled:
+                    try:
+                        from spidy.plugins.manager import PluginManager
+                        plugins_dir = Path(
+                            getattr(self._settings.paths, "plugins_dir", "plugins")
+                        ).resolve()
+                        plugins_dir.mkdir(parents=True, exist_ok=True)
+                        self._plugin_mgr = PluginManager(
+                            config=self._settings.plugins,
+                            bus=self._bus,
+                            skill_registry=skill_registry,
+                            plugins_dir=plugins_dir,
+                        )
+                        await self._plugin_mgr.initialize()
+                        log.info("PluginManager running.")
+                    except Exception as exc:
+                        log.warning(
+                            "PluginManager failed to start (non-fatal): {exc}. "
+                            "Running without plugins.",
+                            exc=exc,
+                        )
+                        self._plugin_mgr = None
+
             except Exception as exc:
                 log.warning(
                     "Brain failed to start (non-fatal): {exc}. Running without Brain.",
@@ -610,6 +637,13 @@ class SpidyCore:
         """Step 3: Graceful shutdown sequence."""
         if self._state in (LifecycleState.STOPPED, LifecycleState.STOPPING):
             return  # Already shutting down
+
+        # Tear down plugins FIRST so their skills are unregistered cleanly
+        if self._plugin_mgr is not None:
+            try:
+                await self._plugin_mgr.teardown()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("PluginManager teardown error (non-fatal): {exc}", exc=exc)
 
         self._transition(LifecycleState.STOPPING)
         log.info("Stopping Spidy...")

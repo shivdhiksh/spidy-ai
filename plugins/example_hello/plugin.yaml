@@ -1,0 +1,19 @@
+# Example Hello Plugin — Manifest
+# =================================
+# This is the reference plugin for the Spidy Plugin Marketplace.
+# Copy this directory as a starting point for your own plugins.
+
+name: example_hello
+version: "1.0.0"
+description: "Reference plugin that adds a 'say hello' skill to Spidy."
+author: "Spidy Team"
+entry_point: plugin.py
+class_name: HelloPlugin
+enabled: true
+permissions: []
+tags:
+  - example
+  - demo
+min_spidy_version: "0.1.0"
+config:
+  greeting: "Hello from the Example Plugin!"

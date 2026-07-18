@@ -21,7 +21,7 @@
 | **M9** | Vision & Screen Understanding | ✅ Complete | 1229 |
 | **M10** | Knowledge Engine | ✅ Complete | 1531 |
 | **M11** | Learning Engine | ✅ Complete | 141 |
-| **M12** | Plugin Marketplace | 🔜 Planned | — |
+| **M12** | Plugin Marketplace | ✅ Complete | 111 |
 | **M13** | Developer Mode | 🔜 Planned | — |
 | **M14** | Deployment & Distribution | 🔜 Planned | — |
 | **v1.0** | Spidy v1.0 — Public Release | 🎯 Target | — |
@@ -322,32 +322,32 @@ This milestone implements the `LearningInterface` contract established in M3.
 
 ---
 
-### 🔜 M12 — Plugin Marketplace
-**Goal:** Anyone can extend Spidy.
+### ✅ M12 — Plugin Marketplace
+**Complete** · Community-extensible plugin architecture
 
 **Plugin Architecture**
-- Plugin discovery via `pluggy` or custom entry-points
-- Sandboxed execution (restricted imports, timeouts)
-- Plugin manifest (`plugin.yaml`) — name, version, author, permissions required
-- Hot-load/unload without restart
+- `BasePlugin` ABC — `setup(ctx)` / `teardown()` contract
+- `PluginContext` — only interaction surface; tracks all registrations for clean reversal
+- `PluginManifest` — frozen dataclass validated from `plugin.yaml`
+- `PluginLoader` — `importlib`-based module isolation; no `sys.modules` pollution
+- `PluginSandbox` — `asyncio.wait_for` + broad exception catch; plugins cannot crash Spidy
+- `PluginRegistry` — thread-safe state machine: DISCOVERED → INSTALLED → ENABLED ↔ DISABLED
+- `PluginManager` — orchestrator wired into SpidyCore after Brain starts
 
-**Built-in Plugin Types**
-- `SkillPlugin` — adds new actions to the SkillRegistry
-- `ObserverPlugin` — adds new context observers
-- `LLMPlugin` — adds new LLM backends
-- `UIPlugin` — adds panels or widgets to the overlay
+**Plugin Registration Points**
+- `context.register_skill(skill)` — adds to SkillRegistry; Brain sees plugin skills immediately
+- `context.subscribe(topic, handler)` — EventBus subscription; removed on disable
+- `context.register_command(cmd)` — text command registry
 
-**Marketplace**
-- Plugin registry (GitHub-based, curated)
-- One-command install: `spidy plugin install <name>`
-- Version pinning and update notifications
-- Community ratings and reviews (roadmap)
+**Plugin Lifecycle**
+- `install` → `enable` → `disable` → `uninstall` — all reversible
+- `reload()` — hot-reload without restart
+- Per-lifecycle typed EventBus events (`plugin.discovered`, `plugin.installed`, etc.)
 
-**Developer SDK**
-- `spidy-sdk` Python package
-- Scaffold generator: `spidy plugin new <name>`
-- Local plugin testing harness
-- Plugin documentation generator
+**Reference Plugin**
+- `plugins/example_hello/` — `HelloPlugin` + `HelloPluginSkill` with full documentation
+
+**111 new tests** across 6 files (types, events, loader, registry, sandbox, manager)
 
 ---
 

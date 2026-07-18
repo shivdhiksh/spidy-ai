@@ -4,7 +4,104 @@
 
 ---
 
-## Onboarding Improvement — Ollama Startup Health Check (2026-07-14)
+## Milestone 12 — Plugin Marketplace (2026-07-16)
+
+**Status:** Complete  
+**Tests:** 111 new unit and integration tests passing (all green)  
+**Commit:** `spidy/plugins/` — full plugin architecture
+
+### Goal
+
+Allow third-party developers (and power users) to extend Spidy with custom
+skills, event handlers, and commands without modifying core internals.
+
+### Architecture
+
+The plugin system is designed around a single principle: **plugins may only
+interact with Spidy through a controlled surface (`PluginContext`)**, and
+**no exception from a plugin may propagate to SpidyCore**.
+
+```
+SpidyCore._run()
+  └─ PluginManager.initialize()
+       ├─ PluginLoader.discover_plugin_dirs()
+       ├─ PluginLoader.load_manifest()     → PluginManifest
+       ├─ PluginRegistry.install(manifest)
+       └─ PluginManager.enable(name)
+            ├─ PluginLoader.instantiate()  → BasePlugin instance
+            ├─ PluginContext built (wraps SkillRegistry + EventBus)
+            └─ PluginSandbox.safe_setup(plugin, context)
+                 └─ plugin.setup(context)
+                      ├─ context.register_skill(skill)
+                      ├─ context.subscribe(topic, handler)
+                      └─ context.register_command(cmd)
+```
+
+### Key design decisions
+
+1. **`BasePlugin` ABC** — minimal contract: `setup(ctx)` + `teardown()`.
+   Optional `name`, `version`, `description` class attributes used as
+   documentation and fallback identifiers.
+
+2. **`PluginContext`** — the only object a plugin can use. Provides:
+   - `register_skill()` — registers with `SkillRegistry` (Brain-visible immediately)
+   - `subscribe()` — subscribes to `EventBus`
+   - `register_command()` — registers a text command (tracked for cleanup)
+   - `config` — plugin-specific config from `plugin.yaml`
+   - `logger` — scoped logger
+   Context tracks **every** registration so cleanup on `disable()` is automatic.
+
+3. **`PluginSandbox`** — wraps all plugin calls in `asyncio.wait_for` + broad
+   `except Exception`. Errors become strings, never exceptions. SpidyCore is
+   never at risk from a misbehaving plugin.
+
+4. **`PluginRegistry`** — pure state, no I/O. Drives the lifecycle state machine
+   `DISCOVERED → INSTALLED → ENABLED ↔ DISABLED → UNINSTALLED` with thread-safe
+   mutations via `threading.RLock`.
+
+5. **`PluginLoader`** — stateless helpers. Uses `importlib.util.spec_from_file_location`
+   to import plugin modules without polluting `sys.modules`. The module name
+   `_spidy_plugin_{name}` is registered temporarily and removed after instantiation.
+
+6. **`PluginManifest`** — frozen dataclass parsed from `plugin.yaml`. Validates
+   `name` as snake_case on construction. `from_dict()` factory provides clean
+   error messages for missing required fields.
+
+7. **SpidyCore integration** — `PluginManager.initialize()` is called immediately
+   after Brain starts (so plugins can register skills the Brain sees immediately).
+   `PluginManager.teardown()` is called at shutdown before Brain stops.
+
+### Files added
+
+| File | Description |
+|------|-------------|
+| `spidy/plugins/types.py` | `PluginManifest`, `PluginState`, `PluginInfo`, `PluginError`, `CommandRegistration` |
+| `spidy/plugins/interfaces.py` | `BasePlugin` ABC, `PluginContext` |
+| `spidy/plugins/events.py` | 6 typed EventBus events |
+| `spidy/plugins/loader.py` | `PluginLoader` (manifest + instantiation + discovery) |
+| `spidy/plugins/sandbox.py` | `PluginSandbox` (exception + timeout isolation) |
+| `spidy/plugins/registry.py` | `PluginRegistry` (state machine + catalog) |
+| `spidy/plugins/manager.py` | `PluginManager` (orchestrator) |
+| `spidy/plugins/__init__.py` | Public package exports |
+| `plugins/example_hello/plugin.yaml` | Reference plugin manifest |
+| `plugins/example_hello/plugin.py` | `HelloPlugin` + `HelloPluginSkill` reference implementation |
+| `tests/unit/test_plugin_types.py` | 30 tests |
+| `tests/unit/test_plugin_events.py` | 8 tests |
+| `tests/unit/test_plugin_loader.py` | 18 tests |
+| `tests/unit/test_plugin_registry.py` | 24 tests |
+| `tests/unit/test_plugin_sandbox.py` | 11 tests |
+| `tests/unit/test_plugin_manager.py` | 20 tests |
+
+### Files modified
+
+| File | Change |
+|------|--------|
+| `spidy/core/app.py` | `PluginManager` init after Brain; teardown in `_stop()` |
+| `spidy/plugins/__init__.py` | Expanded from stub to full exports |
+
+---
+
+
 
 **Status:** Complete — non-milestone robustness & DX fix  
 **Tests:** 50 new unit tests passing (`tests/unit/test_llm_health.py`)

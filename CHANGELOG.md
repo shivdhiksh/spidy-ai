@@ -12,6 +12,68 @@ _No unreleased changes._
 
 ---
 
+## [0.12.0] — 2026-07-16 · Milestone 12: Plugin Marketplace
+
+### Added
+
+- **`spidy/plugins/` — Plugin Marketplace** — complete plugin architecture for M12:
+  - `plugins/types.py` — `PluginManifest` (frozen dataclass, validated from YAML),
+    `PluginState` (enum: DISCOVERED → INSTALLED → ENABLED ↔ DISABLED → UNINSTALLED / ERROR),
+    `PluginInfo` (mutable runtime tracking record), `PluginError`, `CommandRegistration`
+  - `plugins/interfaces.py` — `BasePlugin` ABC (`setup` / `teardown` contract);
+    `PluginContext` (the **only** surface a plugin can touch: register_skill, subscribe,
+    register_command, logger, config). Context tracks all registrations and reverses
+    them on disable.
+  - `plugins/events.py` — 6 typed EventBus events under `plugin.*` namespace:
+    `PluginDiscoveredEvent`, `PluginInstalledEvent`, `PluginEnabledEvent`,
+    `PluginDisabledEvent`, `PluginUninstalledEvent`, `PluginErrorEvent`
+  - `plugins/loader.py` — `PluginLoader` (static): `load_manifest()` parses `plugin.yaml`;
+    `instantiate()` dynamically imports plugin module via `importlib.util.spec_from_file_location`;
+    `discover_plugin_dirs()` scans the plugins root directory
+  - `plugins/sandbox.py` — `PluginSandbox`: `safe_setup()` / `safe_teardown()` /
+    `safe_call()` — every plugin call wrapped in `asyncio.wait_for` + broad exception
+    catch; errors become strings, never propagate to SpidyCore
+  - `plugins/registry.py` — `PluginRegistry`: thread-safe catalog with full lifecycle
+    state machine; `install`, `uninstall`, `set_state`, `set_error` mutations;
+    `get`, `all_plugins`, `list_by_state`, `is_enabled`, `is_installed` queries
+  - `plugins/manager.py` — `PluginManager`: top-level orchestrator; `initialize()`,
+    `enable()`, `disable()`, `uninstall()`, `reload()`, `teardown()`; all plugin calls
+    go through `PluginSandbox`; publishes typed events on the EventBus
+  - `plugins/__init__.py` — public package exports
+
+- **`plugins/example_hello/`** — reference plugin:
+  - `plugin.yaml` — complete manifest with all fields documented
+  - `plugin.py` — `HelloPlugin(BasePlugin)` + `HelloPluginSkill(BaseSkill)`;
+    demonstrates skill registration, EventBus subscription, and config reading
+
+- **SpidyCore integration** (`spidy/core/app.py`):
+  - `PluginManager` initialized after Brain starts, before `SpidyStartedEvent`
+  - `PluginManager.teardown()` called at shutdown before Brain stops
+  - `_plugin_mgr` property exposed; gracefully degrades if plugins fail to start
+
+- **111 new unit and integration tests** across 6 test files:
+  - `tests/unit/test_plugin_types.py` — 30 tests (manifest validation, state enum,
+    PluginInfo, PluginError, CommandRegistration)
+  - `tests/unit/test_plugin_events.py` — 8 tests (all 6 event topics, field defaults,
+    Event subclass compliance)
+  - `tests/unit/test_plugin_loader.py` — 18 tests (manifest parsing, instantiation,
+    discovery, error paths)
+  - `tests/unit/test_plugin_registry.py` — 24 tests (full state machine, all query
+    methods, thread safety)
+  - `tests/unit/test_plugin_sandbox.py` — 11 tests (safe_setup, safe_teardown,
+    safe_call — exceptions, timeouts, non-awaitables)
+  - `tests/unit/test_plugin_manager.py` — 20 tests (full lifecycle, skill
+    registration/unregistration, crash isolation, EventBus events)
+
+### Changed
+
+- `spidy/core/app.py` — `_run()` initialises `PluginManager` after Brain; `_stop()`
+  calls `PluginManager.teardown()` before Brain stops; `PluginManager` TYPE_CHECKING
+  import and `_plugin_mgr` instance variable added
+- `spidy/plugins/__init__.py` — expanded from stub to full public exports
+
+---
+
 ## [0.11.1] — 2026-07-14 · Onboarding: Ollama Startup Health Check
 
 ### Added
