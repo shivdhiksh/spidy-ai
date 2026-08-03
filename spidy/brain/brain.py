@@ -5,20 +5,25 @@ The Brain is the top-level orchestrator of Spidy's intelligence layer.
 
 It coordinates the full pipeline:
     utterance
+      → ContextResolver.resolve()        [V2: pronoun/reference resolution]
       → IntentClassifier.classify()
       → DecisionEngine.decide()
       → Planner.plan()
-      → ToolRouter.execute()
+      → ToolRouter.execute()             [V2: retry, proactive, progress]
+      → ResponseComposer.compose()       [V2: natural language responses]
       → response_text
 
-Architecture (Milestone 3)
---------------------------
+Architecture (V2.0 — JARVIS Experience)
+-----------------------------------------
     Brain
-    ├── IntentClassifier      classify raw utterance → Intent
+    ├── ContextResolver       resolve "it"/"that" → concrete entity [NEW V2]
+    ├── IntentClassifier      classify raw utterance → Intent (compound-aware)
     ├── ConversationManager   rolling context window + session lifecycle
     ├── DecisionEngine        Intent + context → Decision (SKILL / LLM / CLARIFY)
-    ├── Planner               Decision → Plan (ordered PlanSteps)
-    └── ToolRouter            Plan → ToolResult(s) via Skill or LLM
+    ├── Planner               Decision → Plan (multi-step capable) [UPGRADED V2]
+    ├── ToolRouter            Plan → ToolResult(s) with retry + proactive [UPGRADED V2]
+    ├── ResponseComposer      ToolResult(s) → natural language text [NEW V2]
+    └── AutonomousAgent       Goal → Tasks → Execution loop [NEW M13]
 
 Lifelong Companion extension points
 ------------------------------------
@@ -27,10 +32,6 @@ The Brain accepts three optional interface slots for future milestones:
     memory   (MemoryInterface)    — long-term episodic recall, M6
     knowledge (KnowledgeInterface) — document RAG, knowledge graph, M8+
     learning  (LearningInterface)  — preferences, habits, feedback, M9+
-
-When these are None (the default), the Brain works purely from the
-rolling conversation window. No features are broken — companion
-capabilities simply don't activate.
 
 Event subscription
 ------------------
@@ -54,15 +55,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+from spidy.brain.context_resolver import ContextResolver
 from spidy.brain.conversation_manager import ConversationManager
 from spidy.brain.decision_engine import DecisionEngine
 from spidy.brain.intent_classifier import IntentClassifier
 from spidy.brain.planner import Planner
+from spidy.brain.response_composer import ResponseComposer
 from spidy.brain.tool_router import ToolRouter
 from spidy.brain.types import TurnRole
 from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
+    from spidy.agent.agent import AutonomousAgent
     from spidy.brain.interfaces import KnowledgeInterface, LearningInterface, MemoryInterface, VisionInterface
     from spidy.config.manager import BrainConfig, ReasoningConfig
     from spidy.core.event_bus import EventBus
@@ -138,6 +142,13 @@ class Brain:
             learning=learning,
         )
 
+        # V2.0 new components
+        self._context_resolver = ContextResolver()
+        self._response_composer = ResponseComposer()
+
+        # M13: Autonomous agent (lazily injected via attach_agent)
+        self._agent: "AutonomousAgent | None" = None
+
         self._running = False
 
     # ── Lifecycle ──────────────────────────────────────────────────────────
@@ -184,8 +195,15 @@ class Brain:
         """
         Process a user utterance through the full Brain pipeline.
 
-        Can be called directly (e.g. from tests or API) or triggered
-        via the EventBus subscription on "voice.user_spoke".
+        V2.0 pipeline:
+        1. Context resolution ("it" → "VS Code")
+        2. Intent classification (compound-aware)
+        3. Decision engine
+        4. Multi-step planning
+        5. Memory recall
+        6. Tool execution (with retry + proactive checks + progress events)
+        7. Natural language response composition
+        8. Memory storage
 
         Parameters
         ----------
@@ -201,6 +219,7 @@ class Brain:
             Empty string if there is nothing to say (e.g. noop).
         """
         from spidy.brain.events import (
+            BrainContextResolvedEvent,
             BrainProcessingStartedEvent,
             BrainResponseReadyEvent,
         )
@@ -218,20 +237,47 @@ class Brain:
             utterance=utterance,
         ))
 
-        # 1. Add user turn to conversation window
-        self._conversation.add_turn(TurnRole.USER, utterance)
+        # ── Step 1: Context resolution ──────────────────────────────────────
+        #
+        # Resolve pronouns and references ("it", "that", "the file") against
+        # the conversation history before anything else.
+        entity_turns = self._conversation.get_entity_history(max_turns=10)
+        resolution = self._context_resolver.resolve(utterance, entity_turns)
+        resolved_utterance = resolution.utterance
 
-        # 2. Classify intent
-        intent = await self._classifier.classify(utterance)
+        if resolution.was_resolved:
+            log.debug(
+                "ContextResolver: '{orig}' → '{res}'",
+                orig=utterance[:60],
+                res=resolved_utterance[:60],
+            )
+            await self._bus.publish(BrainContextResolvedEvent(
+                session_id=sid,
+                context_data={
+                    "original": utterance,
+                    "resolved": resolved_utterance,
+                    "refs": [
+                        {"original": r.original, "resolved": r.resolved}
+                        for r in resolution.resolved_refs
+                    ],
+                },
+            ))
 
-        # 3. Record intent on the user turn (for memory indexing later)
-        # Note: ConversationTurn is frozen — the intent was passed at add_turn.
-        # For M3 we re-add the turn with intent; for M6 memory stores the turn.
+        # ── Step 2: Classify intent first ───────────────────────────────────
+        #
+        # We classify on the RESOLVED utterance but store the ORIGINAL as the
+        # conversation text (so conversation history reads naturally).
+        intent = await self._classifier.classify(resolved_utterance)
 
-        # 4. Decide
+        # ── Step 3: Add user turn with intent attached ───────────────────────
+        #
+        # Add once with intent so ContextResolver can see entities in future turns.
+        self._conversation.add_turn(TurnRole.USER, utterance, intent=intent)
+
+        # ── Step 4: Decide ──────────────────────────────────────────────────
         decision = await self._decision_engine.decide(intent, session_id=sid)
 
-        # 5. Recall relevant memories to enrich context (Milestone 8)
+        # ── Step 6: Recall relevant memories ───────────────────────────────
         memory_context = ""
         if self._memory is not None:
             try:
@@ -240,10 +286,10 @@ class Brain:
                     memory_context = "\n".join(
                         f"[Memory] {m.get('content', '')[:200]}" for m in recalled
                     )
-            except Exception as exc:  # noqa: BLE001 — memory failure must never crash Brain
+            except Exception as exc:  # noqa: BLE001
                 log.warning("Brain: memory recall failed (non-fatal): {exc}", exc=exc)
 
-        # 6. Plan
+        # ── Step 7: Plan ────────────────────────────────────────────────────
         plan = await self._planner.plan(
             decision=decision,
             session_id=sid,
@@ -253,16 +299,15 @@ class Brain:
             ),
         )
 
-        # 7. Build LLM messages from conversation history
+        # ── Step 8: Build LLM messages ──────────────────────────────────────
         llm_messages = self._conversation.get_llm_messages(include_system=True)
-        # Import here to avoid circular at module level
         from spidy.llm.client import LLMMessage
         typed_messages = [
             LLMMessage(role=m["role"], content=m["content"])
             for m in llm_messages
         ]
 
-        # 8. Execute plan
+        # ── Step 9: Execute plan ────────────────────────────────────────────
         results = await self._router.execute(
             plan=plan,
             session_id=sid,
@@ -270,14 +315,22 @@ class Brain:
             user_name=self._user_name,
         )
 
-        # 9. Compose response text from results
-        response_text = self._compose_response(results)
+        # ── Step 10: Compose response ───────────────────────────────────────
+        #
+        # V2: ResponseComposer handles multi-step aggregation + natural phrasing.
+        primary_action = plan.first.action if plan.first else ""
+        response_text = self._response_composer.compose(results, action=primary_action)
 
-        # 10. Add assistant turn to conversation window
+        # ── Step 11: Record action in conversation ──────────────────────────
+        if results:
+            best = next((r for r in results if r.success), results[0])
+            self._conversation.record_action(best.action, best.message)
+
+        # ── Step 12: Add assistant turn ─────────────────────────────────────
         if response_text:
             self._conversation.add_turn(TurnRole.ASSISTANT, response_text)
 
-        # 11. Store interaction in memory (Milestone 8)
+        # ── Step 13: Store interaction in memory ────────────────────────────
         if self._memory is not None and response_text:
             try:
                 await self._memory.store_interaction(
@@ -286,10 +339,10 @@ class Brain:
                     session_id=sid,
                     intent=intent.category.value if hasattr(intent, "category") and hasattr(intent.category, "value") else str(getattr(intent, "category", "")),
                 )
-            except Exception as exc:  # noqa: BLE001 — memory failure must never crash Brain
+            except Exception as exc:  # noqa: BLE001
                 log.warning("Brain: memory store failed (non-fatal): {exc}", exc=exc)
 
-        # 12. Publish response event
+        # ── Step 14: Publish response event ─────────────────────────────────
         await self._bus.publish(BrainResponseReadyEvent(
             session_id=sid,
             response_text=response_text,
@@ -346,15 +399,80 @@ class Brain:
         """The connected vision interface (None until M9)."""
         return self._vision
 
+    # ── M13: Autonomous Agent ──────────────────────────────────────────────
+
+    def attach_agent(self, agent: "AutonomousAgent") -> None:
+        """
+        Attach an AutonomousAgent to this Brain instance.
+
+        Called by SpidyCore (or tests) after both Brain and AutonomousAgent
+        are constructed. This avoids circular imports at construction time.
+
+        Parameters
+        ----------
+        agent:
+            A fully-constructed AutonomousAgent that uses this Brain.
+        """
+        self._agent = agent
+        log.debug("Brain: AutonomousAgent attached.")
+
+    async def run_goal(self, goal: str, session_id: str | None = None) -> str:
+        """
+        Execute a high-level goal autonomously (Milestone 13).
+
+        Delegates to the attached AutonomousAgent. If no agent is attached,
+        falls back to Brain.process() for simple single-step goals.
+
+        Parameters
+        ----------
+        goal:
+            The user's high-level goal description
+            (e.g. "Create a Flask project").
+        session_id:
+            Optional override for the session ID.
+
+        Returns
+        -------
+        str
+            Natural language response describing what was accomplished.
+        """
+        if self._agent is not None:
+            return await self._agent.run_goal(goal, session_id=session_id)
+
+        # Graceful fallback when no agent is attached:
+        # treat the goal as a single Brain.process() call
+        log.debug(
+            "Brain.run_goal: no AutonomousAgent attached — falling back to process()"
+        )
+        return await self.process(goal, session_id=session_id)
+
+    async def cancel_goal(self) -> bool:
+        """
+        Cancel the currently running autonomous goal.
+
+        Returns
+        -------
+        bool
+            True if a goal was cancelled, False if none was running.
+        """
+        if self._agent is not None:
+            return await self._agent.cancel_current_goal()
+        return False
+
+    @property
+    def autonomous_agent(self) -> "AutonomousAgent | None":
+        """The attached AutonomousAgent (None until attach_agent() is called)."""
+        return self._agent
+
     # ── Private helpers ────────────────────────────────────────────────────
 
     @staticmethod
     def _compose_response(results: list) -> str:
         """
-        Compose the final response text from a list of ToolResults.
+        Legacy single-result composer (kept for backward compatibility).
 
-        For M3 (single-step plans) this is just the first non-empty result.
-        For future multi-step plans, this will aggregate and synthesise.
+        V2 uses ResponseComposer.compose() directly in process().
+        This method is retained so existing tests that call it still pass.
         """
         for result in results:
             if result.message:

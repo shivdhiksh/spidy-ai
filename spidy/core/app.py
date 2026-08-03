@@ -500,7 +500,25 @@ class SpidyCore:
                 self._brain_ui_bridge.start()
                 log.info("BrainUIBridge started. Overlay will now display chat.")
 
-                # ── Start Plugin Manager (Milestone 12) ───────────────────
+                # ── Attach AutonomousAgent (Milestone 13) ─────────────────
+                # Build the agent and wire it to the Brain AFTER the Brain has
+                # started so all skill routes are registered first.
+                try:
+                    from spidy.agent.agent import AutonomousAgent
+                    autonomous_agent = AutonomousAgent(
+                        brain=self._brain,
+                        bus=self._bus,
+                        llm_client=llm_client,
+                    )
+                    self._brain.attach_agent(autonomous_agent)
+                    log.info("AutonomousAgent attached to Brain.")
+                except Exception as exc:
+                    log.warning(
+                        "AutonomousAgent failed to attach (non-fatal): {exc}. "
+                        "Brain will still handle single-step commands.",
+                        exc=exc,
+                    )
+
                 if self._settings.plugins.enabled:
                     try:
                         from spidy.plugins.manager import PluginManager
@@ -553,9 +571,21 @@ class SpidyCore:
         """
         Interactive text REPL for testing without voice hardware.
 
-        Reads lines from stdin asynchronously and forwards them to
-        Brain.process(). Exits on 'quit', 'exit', or CTRL+C / CTRL+D.
+        M13.1: Classifies each utterance before processing:
+          - Executable intents (launch_app, search_files, create_folder, etc.)
+            → brain.run_goal()  (AutonomousAgent multi-step pipeline)
+          - Cancel commands → brain.cancel_goal()
+          - Conversational intents (greet, chat, calculate, help, etc.)
+            → brain.process()  (single-step Brain pipeline, unchanged)
+
+        Exits on 'quit', 'exit', or CTRL+C / CTRL+D.
         """
+        from spidy.brain.intent_classifier import IntentClassifier
+        from spidy.brain.goal_intent_classifier import GoalIntentClassifier
+
+        _intent_clf = IntentClassifier()
+        _goal_clf = GoalIntentClassifier()
+
         loop = asyncio.get_running_loop()
         print("\n" + "=" * 60)
         print("  Spidy Text REPL — type a command, press Enter")
@@ -579,7 +609,32 @@ class SpidyCore:
 
             if self._brain is not None:
                 try:
-                    response = await self._brain.process(line)
+                    # ── M13.1: Classify utterance for routing ───────────────
+                    intent = await _intent_clf.classify(line)
+
+                    # Cancel goal — special case handled immediately
+                    if intent.action == "cancel_goal":
+                        cancelled = await self._brain.cancel_goal()
+                        if cancelled:
+                            print("\n  Spidy: Goal cancelled.\n")
+                        else:
+                            print("\n  Spidy: No goal is currently running.\n")
+                        continue
+
+                    # Route: goal vs chat
+                    if _goal_clf.is_executable(intent):
+                        log.debug(
+                            "REPL: routing '{a}' → run_goal()",
+                            a=intent.action,
+                        )
+                        response = await self._brain.run_goal(line)
+                    else:
+                        log.debug(
+                            "REPL: routing '{a}' → process()",
+                            a=intent.action,
+                        )
+                        response = await self._brain.process(line)
+
                     if response:
                         print(f"\n  Spidy: {response}\n")
                     else:

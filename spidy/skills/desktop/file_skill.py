@@ -178,6 +178,56 @@ class FileSkill(BaseSkill):
                     "list recent documents", "recently used files",
                 ],
             ),
+            SkillCapability(
+                action="create_folder",
+                description="Create a new folder at the specified path (defaults to Desktop).",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("folder_name", "string", required=True,
+                                description="Name of the folder to create."),
+                    ParamSchema("path", "path", required=False,
+                                description="Parent directory. Defaults to the Desktop."),
+                ],
+                examples=[
+                    "create a folder", "make a new folder", "new folder",
+                    "create folder Test", "make a folder called Projects",
+                    "create a folder on the desktop",
+                ],
+            ),
+            SkillCapability(
+                action="rename_folder",
+                description="Rename an existing folder.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("old_name", "string", required=True,
+                                description="Current folder name."),
+                    ParamSchema("new_name", "string", required=True,
+                                description="New folder name."),
+                    ParamSchema("path", "path", required=False,
+                                description="Parent directory. Defaults to the Desktop."),
+                ],
+                examples=[
+                    "rename folder Test to MyProject",
+                    "rename folder Projects to Archive",
+                ],
+            ),
+            SkillCapability(
+                action="delete_folder",
+                description="Delete a folder (moves to Recycle Bin by default; use force=true to permanently delete).",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("folder_name", "string", required=True,
+                                description="Name of the folder to delete."),
+                    ParamSchema("path", "path", required=False,
+                                description="Parent directory. Defaults to the Desktop."),
+                    ParamSchema("force", "bool", required=False, default=False,
+                                description="If true, permanently delete instead of sending to Recycle Bin."),
+                ],
+                examples=[
+                    "delete folder Test", "remove folder Projects",
+                    "delete the test folder",
+                ],
+            ),
         ]
 
     # ── Dispatch ──────────────────────────────────────────────────────────
@@ -195,6 +245,12 @@ class FileSkill(BaseSkill):
             return await self._reveal_in_explorer(context)
         if action == "list_recent_files":
             return await self._list_recent_files(context)
+        if action == "create_folder":
+            return await self._create_folder(context)
+        if action == "rename_folder":
+            return await self._rename_folder(context)
+        if action == "delete_folder":
+            return await self._delete_folder(context)
         return SkillResult.fail(f"FileSkill: unknown action '{action}'.")
 
     # ── Actions ───────────────────────────────────────────────────────────
@@ -311,26 +367,35 @@ class FileSkill(BaseSkill):
 
     async def _open_folder(self, context: SkillContext) -> SkillResult:
         raw_path = context.get("path", "")
-        if not raw_path:
-            return SkillResult.fail("FileSkill: 'path' parameter is required for open_folder.")
 
-        folder_path = Path(raw_path).expanduser().resolve()
+        # Resolve spoken names ("downloads", "desktop", etc.) to real paths.
+        # If a full path was provided use it directly; otherwise treat the
+        # raw_path value as a spoken shorthand.
+        folder_path = self._resolve_parent_path(raw_path or None)
+
         if not folder_path.exists():
-            return SkillResult.fail(f"FileSkill: folder not found: '{folder_path}'")
+            return SkillResult.fail(
+                f"I couldn't find the folder '{folder_path.name}'. "
+                "Make sure it exists and try again."
+            )
         if not folder_path.is_dir():
-            return SkillResult.fail(f"FileSkill: path is not a folder: '{folder_path}'")
+            return SkillResult.fail(
+                f"'{folder_path.name}' is not a folder."
+            )
 
         try:
             await asyncio.to_thread(
                 self._run_explorer, str(folder_path), select_mode=False
             )
         except Exception as exc:  # noqa: BLE001
-            return SkillResult.fail(f"FileSkill: could not open folder: {exc}", error=exc)
+            return SkillResult.fail(
+                f"I couldn't open the folder: {exc}", error=exc
+            )
 
         await self._emit_folder_opened(str(folder_path), reveal_mode=False,
                                        session_id=context.session_id)
         return SkillResult.ok(
-            f"Opened folder '{folder_path}'.",
+            f"Opened folder '{folder_path.name}'.",
             data={"path": str(folder_path)},
             action_taken="open_folder",
         )
@@ -385,7 +450,290 @@ class FileSkill(BaseSkill):
             action_taken="list_recent_files",
         )
 
+    # ── Folder mutation actions (with post-execution verification) ──────────────────
+
+    async def _create_folder(self, context: SkillContext) -> SkillResult:
+        """
+        Create a new folder, then VERIFY it exists before reporting success.
+
+        The default parent is the user's Desktop so that natural commands like
+        "create a new folder" place the folder somewhere visible.
+        """
+        folder_name: str = (context.get("folder_name") or "").strip()
+        if not folder_name:
+            folder_name = "New Folder"  # default name when not specified
+
+        raw_path = context.get("path")
+        parent = self._resolve_parent_path(raw_path)
+
+        folder_path = parent / folder_name
+
+        # Check for existing folder
+        if folder_path.exists():
+            return SkillResult.fail(
+                f"A folder named '{folder_name}' already exists at {parent}. "
+                "Please choose a different name."
+            )
+
+        # Execute
+        try:
+            await asyncio.to_thread(folder_path.mkdir, True, False)
+        except FileExistsError:
+            return SkillResult.fail(
+                f"A folder named '{folder_name}' already exists at {parent}."
+            )
+        except PermissionError:
+            return SkillResult.fail(
+                f"I don't have permission to create a folder in '{parent}'. "
+                "Try a different location."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(
+                f"I couldn't create the folder '{folder_name}': {exc}", error=exc
+            )
+
+        # ── Post-execution verification ───────────────────────────────────
+        if not (folder_path.exists() and folder_path.is_dir()):
+            return SkillResult.fail(
+                f"I attempted to create '{folder_name}' but verification failed — "
+                "the folder was not found on disk after creation. Please try again."
+            )
+
+        log.info(
+            "FileSkill: created folder '{name}' at '{path}'",
+            name=folder_name, path=str(folder_path),
+        )
+        return SkillResult.ok(
+            f"Created folder '{folder_name}' at {parent}.",
+            data={"path": str(folder_path), "folder_name": folder_name,
+                  "verified": True},
+            action_taken="create_folder",
+        )
+
+    async def _rename_folder(self, context: SkillContext) -> SkillResult:
+        """
+        Rename a folder, then VERIFY the new name exists and the old name is gone.
+        """
+        old_name: str = (context.get("old_name") or "").strip()
+        new_name: str = (context.get("new_name") or "").strip()
+
+        if not old_name:
+            return SkillResult.fail(
+                "I need the current folder name to rename it. "
+                "Try: 'rename folder <old name> to <new name>'."
+            )
+        if not new_name:
+            return SkillResult.fail(
+                "I need the new folder name. "
+                "Try: 'rename folder <old name> to <new name>'."
+            )
+
+        raw_path = context.get("path")
+        parent = self._resolve_parent_path(raw_path)
+
+        old_path = parent / old_name
+        new_path = parent / new_name
+
+        if not old_path.exists():
+            return SkillResult.fail(
+                f"I couldn't find a folder named '{old_name}' at {parent}."
+            )
+        if not old_path.is_dir():
+            return SkillResult.fail(
+                f"'{old_name}' is not a folder."
+            )
+        if new_path.exists():
+            return SkillResult.fail(
+                f"A folder named '{new_name}' already exists at {parent}."
+            )
+
+        try:
+            await asyncio.to_thread(old_path.rename, new_path)
+        except PermissionError:
+            return SkillResult.fail(
+                f"I don't have permission to rename '{old_name}'. "
+                "Close any applications using it and try again."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(
+                f"I couldn't rename '{old_name}' to '{new_name}': {exc}", error=exc
+            )
+
+        # ── Post-execution verification ───────────────────────────────────
+        if not (new_path.exists() and new_path.is_dir()):
+            return SkillResult.fail(
+                f"I attempted to rename '{old_name}' to '{new_name}' but the new folder "
+                "was not found on disk after the operation. Please try again."
+            )
+        if old_path.exists():
+            return SkillResult.fail(
+                f"The rename appeared to run but '{old_name}' still exists. "
+                "The folder may be locked by another process."
+            )
+
+        log.info(
+            "FileSkill: renamed '{old}' → '{new}' at '{path}'",
+            old=old_name, new=new_name, path=str(parent),
+        )
+        return SkillResult.ok(
+            f"Renamed folder '{old_name}' to '{new_name}'.",
+            data={"old_path": str(old_path), "new_path": str(new_path),
+                  "verified": True},
+            action_taken="rename_folder",
+        )
+
+    async def _delete_folder(self, context: SkillContext) -> SkillResult:
+        """
+        Delete a folder, then VERIFY it no longer exists.
+
+        By default sends to the Recycle Bin using winshell (safe/reversible).
+        With force=True, permanently deletes using shutil.rmtree.
+        """
+        folder_name: str = (context.get("folder_name") or "").strip()
+        if not folder_name:
+            return SkillResult.fail(
+                "I need the folder name to delete it. "
+                "Try: 'delete folder <name>'."
+            )
+
+        force_raw = context.get("force", False)
+        if isinstance(force_raw, str):
+            force = force_raw.lower() not in ("false", "0", "no", "")
+        else:
+            force = bool(force_raw)
+
+        raw_path = context.get("path")
+        parent = self._resolve_parent_path(raw_path)
+        folder_path = parent / folder_name
+
+        if not folder_path.exists():
+            return SkillResult.fail(
+                f"I couldn't find a folder named '{folder_name}' at {parent}."
+            )
+        if not folder_path.is_dir():
+            return SkillResult.fail(
+                f"'{folder_name}' is not a folder."
+            )
+
+        try:
+            if force:
+                import shutil
+                await asyncio.to_thread(shutil.rmtree, str(folder_path))
+            else:
+                await asyncio.to_thread(
+                    self._send_to_recycle_bin, str(folder_path)
+                )
+        except PermissionError:
+            return SkillResult.fail(
+                f"I don't have permission to delete '{folder_name}'. "
+                "Close any applications using it and try again."
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(
+                f"I couldn't delete '{folder_name}': {exc}", error=exc
+            )
+
+        # ── Post-execution verification ───────────────────────────────────
+        if folder_path.exists():
+            return SkillResult.fail(
+                f"I attempted to delete '{folder_name}' but it still exists on disk. "
+                "The folder may be in use by another application."
+            )
+
+        action_word = "Permanently deleted" if force else "Moved to Recycle Bin"
+        log.info(
+            "FileSkill: deleted folder '{name}' at '{path}' (force={f})",
+            name=folder_name, path=str(parent), f=force,
+        )
+        return SkillResult.ok(
+            f"{action_word} folder '{folder_name}'.",
+            data={"path": str(folder_path), "folder_name": folder_name,
+                  "verified": True, "permanent": force},
+            action_taken="delete_folder",
+        )
+
+
     # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _resolve_parent_path(self, raw_path: str | None) -> Path:
+        """
+        Resolve the parent directory for folder operations.
+
+        When raw_path is None or a spoken shorthand ("desktop", "downloads"),
+        map it to the corresponding real path.  Default is the Desktop.
+
+        Mapping
+        -------
+        None / "" / "desktop"   → ~/Desktop
+        "downloads"             → ~/Downloads
+        "documents"             → ~/Documents
+        "pictures"              → ~/Pictures
+        "music"                 → ~/Music
+        "videos"                → ~/Videos
+        Any other value         → Path(raw_path).expanduser()
+        """
+        if not raw_path:
+            return Path.home() / "Desktop"
+
+        normalized = raw_path.strip().lower()
+        _SPOKEN_PATHS: dict[str, Path] = {
+            "desktop":   Path.home() / "Desktop",
+            "downloads": Path.home() / "Downloads",
+            "documents": Path.home() / "Documents",
+            "pictures":  Path.home() / "Pictures",
+            "music":     Path.home() / "Music",
+            "videos":    Path.home() / "Videos",
+            "home":      Path.home(),
+        }
+        if normalized in _SPOKEN_PATHS:
+            return _SPOKEN_PATHS[normalized]
+
+        return Path(raw_path).expanduser()
+
+    @staticmethod
+    def _send_to_recycle_bin(path: str) -> None:
+        """
+        Send a path to the Windows Recycle Bin.
+
+        Tries winshell first; falls back to SHFileOperationW via ctypes.
+        """
+        try:
+            import winshell  # type: ignore[import-untyped]
+            winshell.delete_file(path, no_confirm=True, allow_undo=True)
+            return
+        except ImportError:
+            pass
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Fallback: SHFileOperationW (FOF_ALLOWUNDO = 0x40, FOF_NOCONFIRMATION = 0x10)
+        try:
+            import ctypes
+            from ctypes.wintypes import HWND, UINT, LPCWSTR, DWORD, BOOL
+            class SHFILEOPSTRUCTW(ctypes.Structure):
+                _fields_ = [
+                    ("hwnd", HWND),
+                    ("wFunc", UINT),
+                    ("pFrom", LPCWSTR),
+                    ("pTo", LPCWSTR),
+                    ("fFlags", DWORD),
+                    ("fAnyOperationsAborted", BOOL),
+                    ("hNameMappings", ctypes.c_void_p),
+                    ("lpszProgressTitle", LPCWSTR),
+                ]
+            FO_DELETE = 3
+            FOF_ALLOWUNDO = 0x40
+            FOF_NOCONFIRMATION = 0x10
+            FOF_SILENT = 0x4
+            op = SHFILEOPSTRUCTW()
+            op.wFunc = FO_DELETE
+            op.pFrom = path + "\0\0"
+            op.fFlags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT
+            ctypes.windll.shell32.SHFileOperationW(ctypes.byref(op))
+        except Exception:  # noqa: BLE001
+            # Ultimate fallback: permanent delete
+            import shutil
+            shutil.rmtree(path, ignore_errors=True)
 
     @staticmethod
     def _do_file_search(

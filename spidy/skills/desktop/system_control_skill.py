@@ -161,6 +161,16 @@ class SystemControlSkill(BaseSkill):
                     "empty trash", "delete recycle bin contents",
                 ],
             ),
+            SkillCapability(
+                action="show_desktop",
+                description="Show the Desktop by minimizing all open windows (Win+D).",
+                permission_tier="T1",
+                examples=[
+                    "show desktop", "go to desktop", "show the desktop",
+                    "minimize all windows", "minimize everything",
+                    "go to the desktop", "view the desktop",
+                ],
+            ),
         ]
 
     # ── Dispatch ──────────────────────────────────────────────────────────
@@ -180,6 +190,8 @@ class SystemControlSkill(BaseSkill):
             return await self._restart_system(context)
         if action == "empty_recycle_bin":
             return await self._empty_recycle_bin(context)
+        if action == "show_desktop":
+            return await self._show_desktop(context)
         return SkillResult.fail(f"SystemControlSkill: unknown action '{action}'.")
 
     # ── Actions ───────────────────────────────────────────────────────────
@@ -341,6 +353,27 @@ class SystemControlSkill(BaseSkill):
             action_taken="empty_recycle_bin",
         )
 
+    async def _show_desktop(self, context: SkillContext) -> SkillResult:
+        """Minimize all windows to show the Desktop (Win+D)."""
+        try:
+            success = await asyncio.to_thread(self._do_show_desktop)
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(
+                f"I couldn't show the Desktop: {exc}", error=exc
+            )
+
+        if not success:
+            return SkillResult.fail(
+                "I attempted to show the Desktop but the action didn't complete. "
+                "You can press Win+D manually to minimize all windows."
+            )
+
+        await self._emit_desktop_shown(context.session_id)
+        return SkillResult.ok(
+            "Desktop is now visible.",
+            action_taken="show_desktop",
+        )
+
     # ── Internal Windows implementations ─────────────────────────────────
 
     @staticmethod
@@ -492,6 +525,45 @@ class SystemControlSkill(BaseSkill):
                     "SystemControlSkill: empty_recycle_bin is only supported on Windows."
                 )
 
+    @staticmethod
+    def _do_show_desktop() -> bool:
+        """
+        Minimize all windows to reveal the Desktop.
+
+        Strategy 1: Send Win+D via PostMessage to the shell tray window
+                    (works without requiring focus on any specific window).
+        Strategy 2: ctypes keybd_event fallback (Ctrl+Win+D is not the same;
+                    use VK_LWIN + VK_D).
+        Returns True if any strategy succeeded.
+        """
+        try:
+            import ctypes
+            # Strategy 1: PostMessage to the Shell_TrayWnd (most reliable)
+            try:
+                import win32gui  # type: ignore[import-untyped]
+                hwnd = win32gui.FindWindow("Shell_TrayWnd", None)
+                if hwnd:
+                    # WM_COMMAND = 0x0111, MIN_ALL = 0xD3 (419)
+                    ctypes.windll.user32.PostMessageW(hwnd, 0x0111, 0x0D3, 0)
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+
+            # Strategy 2: keybd_event Win+D
+            VK_LWIN = 0x5B
+            VK_D = 0x44
+            KEYEVENTF_KEYUP = 0x0002
+            ctypes.windll.user32.keybd_event(VK_LWIN, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_D, 0, 0, 0)
+            ctypes.windll.user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
+            ctypes.windll.user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+            return True
+        except AttributeError:
+            # Not on Windows
+            return False
+        except Exception:  # noqa: BLE001
+            return False
+
     # ── EventBus publishers ───────────────────────────────────────────────
 
     async def _emit_volume_changed(
@@ -543,3 +615,10 @@ class SystemControlSkill(BaseSkill):
             return
         from spidy.skills.desktop.events import RecycleBinEmptiedEvent
         await self._bus.publish(RecycleBinEmptiedEvent(session_id=session_id))
+
+    async def _emit_desktop_shown(self, session_id: str) -> None:
+        if self._bus is None:
+            return
+        # Desktop-shown is a lightweight system event; reuse SystemSleepInitiatedEvent
+        # shape but with a distinct log entry for traceability.
+        log.info("SystemControlSkill: desktop shown (session={sid})", sid=session_id)

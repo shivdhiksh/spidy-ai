@@ -276,6 +276,93 @@ class BrowserSkill(BaseSkill):
                     "play lofi on youtube",
                 ],
             ),
+            SkillCapability(
+                action="open_browser_and_search",
+                description=(
+                    "Launch a named browser application then immediately navigate "
+                    "to Google search results for the given query. "
+                    "Handles compound commands like 'open Edge and search for python'."
+                ),
+                permission_tier="T1",
+                params=[
+                    ParamSchema("query", "string", required=True,
+                                description="The search query."),
+                    ParamSchema("app_name", "string", required=False,
+                                description="Browser app to launch (e.g. 'edge', 'chrome'). "
+                                            "If omitted, uses the default Playwright browser."),
+                ],
+                examples=[
+                    "open edge and search for python",
+                    "open chrome and search for python tutorials",
+                    "launch firefox and search for weather",
+                    "open browser and search for cats",
+                ],
+            ),
+            SkillCapability(
+                action="search_bing",
+                description="Search Bing for a query and open the search results page.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("query", "string", required=True,
+                                description="The Bing search query."),
+                    ParamSchema("new_tab", "bool", required=False, default=False,
+                                description="Open search in a new tab."),
+                ],
+                examples=[
+                    "search bing for Python",
+                    "bing search for weather",
+                    "bing for best laptops",
+                ],
+            ),
+            SkillCapability(
+                action="search_duckduckgo",
+                description="Search DuckDuckGo for a query and open the search results page.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("query", "string", required=True,
+                                description="The DuckDuckGo search query."),
+                    ParamSchema("new_tab", "bool", required=False, default=False,
+                                description="Open search in a new tab."),
+                ],
+                examples=[
+                    "search duckduckgo for privacy tips",
+                    "duckduckgo for open source software",
+                    "search privately for vpn comparison",
+                ],
+            ),
+            SkillCapability(
+                action="search_wikipedia",
+                description="Search Wikipedia for a topic and open the article page.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("query", "string", required=True,
+                                description="The Wikipedia search query."),
+                    ParamSchema("new_tab", "bool", required=False, default=False,
+                                description="Open search in a new tab."),
+                ],
+                examples=[
+                    "search wikipedia for black holes",
+                    "wiki search for Python programming",
+                    "look up quantum computing on wikipedia",
+                ],
+            ),
+            SkillCapability(
+                action="search_maps",
+                description="Open Google Maps and search for a location or get directions.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("query", "string", required=True,
+                                description="The location, place, or directions query."),
+                    ParamSchema("new_tab", "bool", required=False, default=False,
+                                description="Open maps in a new tab."),
+                ],
+                examples=[
+                    "directions to Times Square",
+                    "show map of Paris",
+                    "google maps for nearest coffee shop",
+                    "navigate to 10 Downing Street",
+                ],
+            ),
             # ── T2 — Potentially disruptive ────────────────────────────
             SkillCapability(
                 action="close_browser",
@@ -320,20 +407,25 @@ class BrowserSkill(BaseSkill):
 
     async def execute(self, action: str, context: SkillContext) -> SkillResult:
         dispatch = {
-            "get_page_info":      self._get_page_info,
-            "list_tabs":          self._list_tabs,
-            "read_page":          self._read_page,
-            "open_browser":       self._open_browser,
-            "open_url":           self._open_url,
-            "open_new_tab":       self._open_new_tab,
-            "navigate_back":      self._navigate_back,
-            "navigate_forward":   self._navigate_forward,
-            "refresh_page":       self._refresh_page,
-            "search_google":      self._search_google,
-            "search_youtube":     self._search_youtube,
-            "close_browser":      self._close_browser,
-            "close_tab":          self._close_tab,
-            "download_file":      self._download_file,
+            "get_page_info":           self._get_page_info,
+            "list_tabs":               self._list_tabs,
+            "read_page":               self._read_page,
+            "open_browser":            self._open_browser,
+            "open_url":                self._open_url,
+            "open_new_tab":            self._open_new_tab,
+            "navigate_back":           self._navigate_back,
+            "navigate_forward":        self._navigate_forward,
+            "refresh_page":            self._refresh_page,
+            "search_google":           self._search_google,
+            "search_youtube":          self._search_youtube,
+            "search_bing":             self._search_bing,
+            "search_duckduckgo":       self._search_duckduckgo,
+            "search_wikipedia":        self._search_wikipedia,
+            "search_maps":             self._search_maps,
+            "open_browser_and_search": self._open_browser_and_search,
+            "close_browser":           self._close_browser,
+            "close_tab":               self._close_tab,
+            "download_file":           self._download_file,
         }
         handler = dispatch.get(action)
         if handler is None:
@@ -567,6 +659,210 @@ class BrowserSkill(BaseSkill):
             f"Searched YouTube for \"{query}\". Page: {info.url}",
             data={"query": query, "engine": "youtube", "page": info.to_dict()},
             action_taken="search_youtube",
+        )
+
+    async def _search_bing(self, context: SkillContext) -> SkillResult:
+        query = context.get("query", "")
+        if not query:
+            return SkillResult.fail("BrowserSkill.search_bing: 'query' parameter is required.")
+        new_tab = bool(context.get("new_tab", False))
+        agent = self._get_or_create_agent()
+        import urllib.parse
+        url = f"https://www.bing.com/search?q={urllib.parse.quote_plus(query)}"
+        info = await agent.navigate(url, new_tab=new_tab)
+        from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
+        await self._emit_event_obj(SearchResultsEvent(
+            engine="bing", query=query, results_url=info.url,
+            session_id=context.session_id,
+        ))
+        await self._emit_event_obj(PageNavigatedEvent(
+            title=info.title, url=info.url, tab_id=info.tab_id,
+            new_tab=new_tab, load_time_ms=info.load_time_ms,
+            session_id=context.session_id,
+        ))
+        return SkillResult.ok(
+            f"Searched Bing for \"{query}\". Page: {info.url}",
+            data={"query": query, "engine": "bing", "page": info.to_dict()},
+            action_taken="search_bing",
+        )
+
+    async def _search_duckduckgo(self, context: SkillContext) -> SkillResult:
+        query = context.get("query", "")
+        if not query:
+            return SkillResult.fail("BrowserSkill.search_duckduckgo: 'query' parameter is required.")
+        new_tab = bool(context.get("new_tab", False))
+        agent = self._get_or_create_agent()
+        import urllib.parse
+        url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}"
+        info = await agent.navigate(url, new_tab=new_tab)
+        from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
+        await self._emit_event_obj(SearchResultsEvent(
+            engine="duckduckgo", query=query, results_url=info.url,
+            session_id=context.session_id,
+        ))
+        await self._emit_event_obj(PageNavigatedEvent(
+            title=info.title, url=info.url, tab_id=info.tab_id,
+            new_tab=new_tab, load_time_ms=info.load_time_ms,
+            session_id=context.session_id,
+        ))
+        return SkillResult.ok(
+            f"Searched DuckDuckGo for \"{query}\". Page: {info.url}",
+            data={"query": query, "engine": "duckduckgo", "page": info.to_dict()},
+            action_taken="search_duckduckgo",
+        )
+
+    async def _search_wikipedia(self, context: SkillContext) -> SkillResult:
+        query = context.get("query", "")
+        if not query:
+            return SkillResult.fail("BrowserSkill.search_wikipedia: 'query' parameter is required.")
+        new_tab = bool(context.get("new_tab", False))
+        agent = self._get_or_create_agent()
+        import urllib.parse
+        url = f"https://en.wikipedia.org/w/index.php?search={urllib.parse.quote_plus(query)}"
+        info = await agent.navigate(url, new_tab=new_tab)
+        from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
+        await self._emit_event_obj(SearchResultsEvent(
+            engine="wikipedia", query=query, results_url=info.url,
+            session_id=context.session_id,
+        ))
+        await self._emit_event_obj(PageNavigatedEvent(
+            title=info.title, url=info.url, tab_id=info.tab_id,
+            new_tab=new_tab, load_time_ms=info.load_time_ms,
+            session_id=context.session_id,
+        ))
+        return SkillResult.ok(
+            f"Searched Wikipedia for \"{query}\". Page: {info.url}",
+            data={"query": query, "engine": "wikipedia", "page": info.to_dict()},
+            action_taken="search_wikipedia",
+        )
+
+    async def _search_maps(self, context: SkillContext) -> SkillResult:
+        query = context.get("query", "")
+        if not query:
+            return SkillResult.fail("BrowserSkill.search_maps: 'query' parameter is required.")
+        new_tab = bool(context.get("new_tab", False))
+        agent = self._get_or_create_agent()
+        import urllib.parse
+        url = f"https://www.google.com/maps/search/{urllib.parse.quote_plus(query)}"
+        info = await agent.navigate(url, new_tab=new_tab)
+        from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
+        await self._emit_event_obj(SearchResultsEvent(
+            engine="maps", query=query, results_url=info.url,
+            session_id=context.session_id,
+        ))
+        await self._emit_event_obj(PageNavigatedEvent(
+            title=info.title, url=info.url, tab_id=info.tab_id,
+            new_tab=new_tab, load_time_ms=info.load_time_ms,
+            session_id=context.session_id,
+        ))
+        return SkillResult.ok(
+            f"Opened Google Maps for \"{query}\". Page: {info.url}",
+            data={"query": query, "engine": "maps", "page": info.to_dict()},
+            action_taken="search_maps",
+        )
+
+    async def _open_browser_and_search(
+        self, context: SkillContext
+    ) -> SkillResult:
+        """
+        Compound action: launch a browser app (via OS), then perform a Google
+        search using the Playwright BrowserAgent.
+
+        Steps
+        -----
+        1. If ``app_name`` is provided, resolve it via AppSkill's alias table
+           and launch the executable with subprocess.Popen.
+        2. Wait briefly for the OS app to settle.
+        3. Use the BrowserAgent (Playwright) to open the Google search URL.
+           With ``connect_to_existing=True`` and a CDP endpoint the agent will
+           try to attach to the running browser; otherwise it opens its own.
+
+        Parameters
+        ----------
+        context.params["query"]    : str — the search query (required)
+        context.params["app_name"] : str — browser to launch (optional)
+        """
+        import asyncio
+        import subprocess
+
+        query: str = context.get("query", "")
+        if not query:
+            return SkillResult.fail(
+                "BrowserSkill.open_browser_and_search: 'query' parameter is required."
+            )
+
+        app_name: str = context.get("app_name", "") or ""
+
+        # ── Step 1: launch the browser app if requested ────────────────────
+        launched_app: str = ""
+        if app_name:
+            try:
+                from spidy.skills.desktop.app_skill import _APP_ALIASES, AppSkill
+
+                resolved = _APP_ALIASES.get(app_name.lower(), app_name)
+                exe_path = AppSkill._resolve_exe_path(resolved)
+
+                log.info(
+                    "BrowserSkill.open_browser_and_search: launching '{app}' ({exe})",
+                    app=app_name,
+                    exe=exe_path,
+                )
+                await asyncio.to_thread(
+                    subprocess.Popen,
+                    [exe_path],
+                    shell=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                # Give the OS app a moment to start before Playwright navigates
+                await asyncio.sleep(1.5)
+                launched_app = app_name
+            except FileNotFoundError:
+                log.warning(
+                    "BrowserSkill.open_browser_and_search: '{app}' not found — "
+                    "will still perform search in Playwright browser.",
+                    app=app_name,
+                )
+            except Exception as exc:  # noqa: BLE001
+                log.warning(
+                    "BrowserSkill.open_browser_and_search: could not launch '{app}': {exc}",
+                    app=app_name,
+                    exc=exc,
+                )
+
+        # ── Step 2: navigate to Google search via BrowserAgent ─────────────
+        agent = self._get_or_create_agent()
+        info = await agent.search_google(query)
+
+        log.info(
+            "BrowserSkill.open_browser_and_search: searched Google for '{q}' → {url}",
+            q=query,
+            url=info.url,
+        )
+
+        from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
+        await self._emit_event_obj(SearchResultsEvent(
+            engine="google", query=query, results_url=info.url,
+            session_id=context.session_id,
+        ))
+        await self._emit_event_obj(PageNavigatedEvent(
+            title=info.title, url=info.url, tab_id=info.tab_id,
+            new_tab=False, load_time_ms=info.load_time_ms,
+            session_id=context.session_id,
+        ))
+
+        if launched_app:
+            msg = (
+                f"Opened {launched_app} and searched Google for \"{query}\". "
+                f"Page: {info.url}"
+            )
+        else:
+            msg = f"Searched Google for \"{query}\". Page: {info.url}"
+
+        return SkillResult.ok(
+            msg,
+            data={"app_name": launched_app, "query": query, "page": info.to_dict()},
+            action_taken="open_browser_and_search",
         )
 
     # ── T2 Actions ────────────────────────────────────────────────────────

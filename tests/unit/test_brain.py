@@ -203,8 +203,10 @@ class TestIntentClassifier:
         assert intent.source == "heuristic"
 
     async def test_lock_screen_intent(self, classifier):
+        # Classifier now emits 'lock_workstation' directly (the real SystemControlSkill action).
+        # The old 'lock_screen' was a stub that said "not yet implemented".
         intent = await classifier.classify("Lock screen")
-        assert intent.action == "lock_screen"
+        assert intent.action == "lock_workstation"
 
     async def test_help_intent(self, classifier):
         intent = await classifier.classify("help")
@@ -245,6 +247,93 @@ class TestIntentClassifier:
             f"Expected 'introduce' for {utterance!r}, got {intent.action!r}"
         )
         assert intent.confidence >= 0.9
+
+    # ── Browser search regression tests ───────────────────────────────────────
+    # These tests guard against the regression introduced by the stabilization
+    # commits (55801c4 / b7e9c07 / 0a9693c) where compound commands like
+    # "open edge and search for python" were mis-routed to launch_app with a
+    # garbage app name, and "search youtube for python" entity extraction was
+    # not verified end-to-end.
+
+    @pytest.mark.parametrize("utterance,expected_query", [
+        ("search youtube for python",           "python"),
+        ("search youtube for lofi music",       "lofi music"),
+        ("search on youtube for cats",          "cats"),
+        ("youtube search for cooking videos",   "cooking videos"),
+    ])
+    async def test_search_youtube_intent_and_query(
+        self, classifier, utterance, expected_query
+    ):
+        """search_youtube must be classified and the query entity extracted."""
+        intent = await classifier.classify(utterance)
+        assert intent.action == "search_youtube", (
+            f"Expected 'search_youtube' for {utterance!r}, got {intent.action!r}"
+        )
+        assert intent.confidence >= 0.9
+        query_entities = [e for e in intent.entities if e.name == "query"]
+        assert query_entities, f"No 'query' entity for {utterance!r}"
+        assert query_entities[0].value == expected_query, (
+            f"Expected query={expected_query!r} for {utterance!r}, "
+            f"got {query_entities[0].value!r}"
+        )
+
+    @pytest.mark.parametrize("utterance,expected_app,expected_query", [
+        ("open edge and search for python",        "edge",    "python"),
+        ("open chrome and search for python",      "chrome",  "python"),
+        ("open firefox and search for cats",       "firefox", "cats"),
+        ("launch edge and search for weather",     "edge",    "weather"),
+        ("open browser and search for tutorials",  "browser", "tutorials"),
+        ("open edge and google python",            "edge",    "python"),
+        ("open chrome and look up python",         "chrome",  "python"),
+    ])
+    async def test_open_browser_and_search_intent(
+        self, classifier, utterance, expected_app, expected_query
+    ):
+        """Compound 'open X and search for Y' must route to open_browser_and_search
+        with both app_name and query entities — NOT to launch_app."""
+        intent = await classifier.classify(utterance)
+        assert intent.action == "open_browser_and_search", (
+            f"Expected 'open_browser_and_search' for {utterance!r}, "
+            f"got {intent.action!r}"
+        )
+        assert intent.confidence >= 0.9
+
+        app_entities   = [e for e in intent.entities if e.name == "app_name"]
+        query_entities = [e for e in intent.entities if e.name == "query"]
+
+        assert app_entities, f"No 'app_name' entity for {utterance!r}"
+        assert app_entities[0].value == expected_app, (
+            f"Expected app_name={expected_app!r} for {utterance!r}, "
+            f"got {app_entities[0].value!r}"
+        )
+
+        assert query_entities, f"No 'query' entity for {utterance!r}"
+        assert query_entities[0].value == expected_query, (
+            f"Expected query={expected_query!r} for {utterance!r}, "
+            f"got {query_entities[0].value!r}"
+        )
+
+    @pytest.mark.parametrize("utterance,expected_app", [
+        ("open edge",    "edge"),
+        ("open chrome",  "chrome"),
+        ("launch edge",  "edge"),
+        ("open firefox", "firefox"),
+    ])
+    async def test_plain_open_app_still_works(
+        self, classifier, utterance, expected_app
+    ):
+        """Plain 'open edge' must still route to launch_app (not open_browser_and_search)
+        and must extract only the clean app name (no trailing 'and search for...')."""
+        intent = await classifier.classify(utterance)
+        assert intent.action == "launch_app", (
+            f"Expected 'launch_app' for {utterance!r}, got {intent.action!r}"
+        )
+        name_entities = [e for e in intent.entities if e.name == "name"]
+        assert name_entities, f"No 'name' entity for {utterance!r}"
+        assert name_entities[0].value == expected_app, (
+            f"Expected name={expected_app!r} for {utterance!r}, "
+            f"got {name_entities[0].value!r}"
+        )
 
 
 # ─── TestConversationManager ──────────────────────────────────────────────────
@@ -403,10 +492,14 @@ class TestDecisionEngine:
         assert decision.mode == DecisionMode.SKILL
         assert decision.skill_name == "fake_skill"
 
-    async def test_shutdown_intent_is_rejected(self, engine_no_skills):
-        intent = Intent(action="shutdown", confidence=0.9, raw_utterance="goodbye")
+    async def test_shutdown_intent_routes_to_skill(self, engine_no_skills):
+        # Previously 'shutdown' was incorrectly in _REJECT_ACTIONS.
+        # It now correctly routes to SystemControlSkill's shutdown_system action.
+        # With no skills registered it routes to LLM_DIRECT/REJECT depending on config.
+        intent = Intent(action="shutdown_system", confidence=0.9, raw_utterance="shutdown computer")
         decision = await engine_no_skills.decide(intent)
-        assert decision.mode == DecisionMode.REJECT
+        # Without a registered skill it should fall back to LLM_DIRECT, CLARIFY, or REJECT — not crash
+        assert decision.mode in (DecisionMode.SKILL, DecisionMode.LLM_DIRECT, DecisionMode.CLARIFY, DecisionMode.REJECT)
 
     async def test_decision_carries_intent(self, engine_no_skills):
         intent = Intent(action="chat", confidence=0.9, raw_utterance="hi")

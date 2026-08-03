@@ -73,9 +73,10 @@ def _make_mock_agent(running: bool = True):
 
 
 class TestBrowserSkillCapabilities:
-    def test_fourteen_capabilities_declared(self):
+    def test_fifteen_capabilities_declared(self):
+        # v1.0: Added search_bing, search_duckduckgo, search_wikipedia, search_maps (15 → 19)
         skill = _make_skill()
-        assert len(skill.capabilities()) == 14
+        assert len(skill.capabilities()) == 19
 
     def test_all_expected_actions_present(self):
         skill = _make_skill()
@@ -84,7 +85,9 @@ class TestBrowserSkillCapabilities:
             "get_page_info", "list_tabs", "read_page",
             "open_browser", "open_url", "open_new_tab",
             "navigate_back", "navigate_forward", "refresh_page",
-            "search_google", "search_youtube",
+            "search_google", "search_youtube", "search_bing",
+            "search_duckduckgo", "search_wikipedia", "search_maps",
+            "open_browser_and_search",
             "close_browser", "close_tab", "download_file",
         }
         assert expected == actions
@@ -100,7 +103,9 @@ class TestBrowserSkillCapabilities:
         t1_expected = {
             "open_browser", "open_url", "open_new_tab",
             "navigate_back", "navigate_forward", "refresh_page",
-            "search_google", "search_youtube",
+            "search_google", "search_youtube", "search_bing",
+            "search_duckduckgo", "search_wikipedia", "search_maps",
+            "open_browser_and_search",
         }
         t1_actual = {c.action for c in skill.capabilities() if c.permission_tier == "T1"}
         assert t1_expected == t1_actual
@@ -642,3 +647,170 @@ class TestOnUnload:
         skill._agent = agent
         await skill.on_unload()
         agent.stop.assert_not_called()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Regression: open_browser_and_search compound action
+# Covers the regression introduced by stabilization commits 55801c4 / b7e9c07 /
+# 0a9693c where "open edge and search for python" either failed with a bad app
+# name or silently fell through to launch_app without performing the search.
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestOpenBrowserAndSearch:
+    """Regression tests for the compound open_browser_and_search action.
+
+    Root causes fixed (commits 55801c4 / b7e9c07 / 0a9693c):
+      - "open edge and search for python" was mis-classified as launch_app
+        with app name "edge and search for python" → FileNotFoundError.
+      - "search youtube for python" classification was correct but had no
+        end-to-end test ensuring the query entity was extracted and routed.
+    """
+
+    @pytest.mark.asyncio
+    async def test_search_is_performed_after_launch(self):
+        """BrowserAgent.search_google is called with the correct query."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        with (
+            patch("subprocess.Popen", MagicMock()),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            ctx = _ctx("open_browser_and_search", {"app_name": "edge", "query": "python"})
+            result = await skill.execute("open_browser_and_search", ctx)
+
+        assert result.success, f"Expected success but got: {result.message}"
+        agent.search_google.assert_called_once_with("python")
+
+    @pytest.mark.asyncio
+    async def test_result_message_contains_app_and_query(self):
+        """Response message mentions both the browser name and the query."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        with (
+            patch("subprocess.Popen", MagicMock()),
+            patch("asyncio.sleep", new=AsyncMock()),
+        ):
+            ctx = _ctx("open_browser_and_search", {"app_name": "edge", "query": "python"})
+            result = await skill.execute("open_browser_and_search", ctx)
+
+        assert "edge" in result.message.lower()
+        assert "python" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_missing_query_returns_fail(self):
+        """open_browser_and_search fails gracefully when query is absent."""
+        skill = _make_skill()
+        ctx = _ctx("open_browser_and_search", {"app_name": "edge"})
+        result = await skill.execute("open_browser_and_search", ctx)
+        assert not result.success
+        assert "query" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_search_without_app_name_still_works(self):
+        """When no app_name is provided, only the Playwright search runs (no Popen)."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        ctx = _ctx("open_browser_and_search", {"query": "python"})
+        result = await skill.execute("open_browser_and_search", ctx)
+
+        assert result.success
+        agent.search_google.assert_called_once_with("python")
+
+    @pytest.mark.asyncio
+    async def test_popen_failure_does_not_abort_search(self):
+        """If the OS app cannot be launched, the Playwright search still runs."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        with patch(
+            "subprocess.Popen",
+            MagicMock(side_effect=FileNotFoundError("msedge.exe not found")),
+        ):
+            ctx = _ctx("open_browser_and_search", {"app_name": "edge", "query": "python"})
+            result = await skill.execute("open_browser_and_search", ctx)
+
+        # Search must still succeed via Playwright despite the OS launch failing
+        assert result.success, f"Expected success even after Popen fail: {result.message}"
+        agent.search_google.assert_called_once_with("python")
+
+    @pytest.mark.asyncio
+    async def test_search_youtube_still_routes_correctly(self):
+        """Sanity-check: 'search_youtube' action is unaffected by the new action."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        ctx = _ctx("search_youtube", {"query": "python"})
+        result = await skill.execute("search_youtube", ctx)
+
+        assert result.success
+        agent.search_youtube.assert_called_once_with("python", new_tab=False)
+
+    @pytest.mark.asyncio
+    async def test_missing_query_returns_fail(self):
+        """open_browser_and_search fails gracefully when query is absent."""
+        skill = _make_skill()
+        ctx = _ctx("open_browser_and_search", {"app_name": "edge"})
+        result = await skill.execute("open_browser_and_search", ctx)
+        assert not result.success
+        assert "query" in result.message.lower()
+
+    @pytest.mark.asyncio
+    async def test_search_without_app_name_still_works(self):
+        """When no app_name is provided, only the Playwright search runs."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        ctx = _ctx("open_browser_and_search", {"query": "python"})
+        result = await skill.execute("open_browser_and_search", ctx)
+
+        assert result.success
+        agent.search_google.assert_called_once_with("python")
+
+    @pytest.mark.asyncio
+    async def test_popen_failure_does_not_abort_search(
+        self, monkeypatch
+    ):
+        """If the OS app cannot be launched, the Playwright search still runs."""
+        import subprocess
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        # Simulate app not found
+        monkeypatch.setattr(
+            subprocess, "Popen",
+            MagicMock(side_effect=FileNotFoundError("msedge.exe not found"))
+        )
+
+        ctx = _ctx("open_browser_and_search", {"app_name": "edge", "query": "python"})
+        result = await skill.execute("open_browser_and_search", ctx)
+
+        # Search must still succeed via Playwright despite the OS launch failing
+        assert result.success, f"Expected success even after Popen fail: {result.message}"
+        agent.search_google.assert_called_once_with("python")
+
+    @pytest.mark.asyncio
+    async def test_search_youtube_still_routes_correctly(
+        self
+    ):
+        """Sanity-check: 'search_youtube' action is unaffected by the new action."""
+        skill = _make_skill()
+        agent = _make_mock_agent(running=False)
+        skill._agent = agent
+
+        ctx = _ctx("search_youtube", {"query": "python"})
+        result = await skill.execute("search_youtube", ctx)
+
+        assert result.success
+        agent.search_youtube.assert_called_once_with("python", new_tab=False)
+

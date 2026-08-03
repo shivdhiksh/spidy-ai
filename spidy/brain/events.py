@@ -1,7 +1,13 @@
 """
 Brain Events
 =============
-All EventBus events published by the Brain Core (Milestone 3).
+All EventBus events published by the Brain Core (Milestone 3+).
+
+Milestone 13 additions
+-----------------------
+BrainGoalStartedEvent   — autonomous goal execution began
+BrainGoalCompletedEvent — autonomous goal completed successfully
+BrainGoalCancelledEvent — autonomous goal was cancelled by user
 
 Topic namespace: ``brain.*``
 
@@ -69,3 +75,67 @@ class BrainToolResultEvent(Event):
     action: str = ""
     success: bool = False
     message: str = ""
+
+
+@dataclass
+class BrainProgressEvent(Event):
+    """Emitted to update the UI on long-running process status."""
+    topic = "brain.progress"
+    session_id: str = ""
+    message: str = ""
+    progress_percent: int = 0
+
+
+@dataclass
+class BrainContextResolvedEvent(Event):
+    """Emitted when context/memory has been retrieved for a request."""
+    topic = "brain.context_resolved"
+    session_id: str = ""
+    context_data: dict | None = None
+
+
+@dataclass
+class BrainProactiveCheckEvent(Event):
+    """Emitted when the system performs a proactive check for user needs."""
+    topic = "brain.proactive_check"
+    session_id: str = ""
+    reason: str = ""
+
+
+# ── Milestone 13: Autonomous Goal Events ──────────────────────────────────────
+
+
+@dataclass
+class BrainGoalStartedEvent(Event):
+    """
+    Emitted when the AutonomousAgent begins executing a user goal.
+
+    Published at the start of AutonomousAgent.run_goal() so that
+    UI and logging subscribers can show a "working on it" indicator.
+    """
+    topic = "brain.goal_started"
+    session_id: str = ""
+    goal_description: str = ""
+
+
+@dataclass
+class BrainGoalCompletedEvent(Event):
+    """
+    Emitted when the AutonomousAgent successfully completes a goal.
+
+    The summary field contains the natural-language completion response
+    that should be shown/spoken to the user.
+    """
+    topic = "brain.goal_completed"
+    session_id: str = ""
+    goal_description: str = ""
+    summary: str = ""
+    completed_task_count: int = 0
+
+
+@dataclass
+class BrainGoalCancelledEvent(Event):
+    """Emitted when the user cancels an in-progress autonomous goal."""
+    topic = "brain.goal_cancelled"
+    session_id: str = ""
+    goal_description: str = ""

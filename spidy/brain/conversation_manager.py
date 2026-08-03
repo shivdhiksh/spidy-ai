@@ -41,10 +41,15 @@ log = get_logger(__name__)
 
 _DEFAULT_MAX_TURNS = 20
 _SYSTEM_PROMPT = (
-    "You are Spidy, a helpful, thoughtful, and friendly AI desktop companion. "
-    "You help the user with tasks on their Windows computer. "
-    "Keep responses concise and natural. "
-    "If you don't know something, say so honestly."
+    "You are Spidy, an intelligent and friendly AI desktop companion — like JARVIS but warmer. "
+    "You help the user with tasks on their Windows computer: opening apps, searching the web, "
+    "managing files, setting timers, controlling system settings, and answering questions. "
+    "Keep responses concise and natural — no bullet points unless asked. "
+    "When you complete an action, confirm it briefly ('I've opened VS Code'). "
+    "When you can't do something, say so honestly and suggest an alternative. "
+    "Remember what the user has asked for earlier in the conversation and use that context. "
+    "If the user says 'it' or 'that', figure out what they mean from the conversation. "
+    "Never sound robotic. Be warm, helpful, and human."
 )
 
 
@@ -74,6 +79,9 @@ class ConversationManager:
         self._turns: deque[ConversationTurn] = deque()
         self._session_id: str = ""
         self._active = False
+        # V2: Track the last executed action and result for context resolution
+        self._last_action: str = ""
+        self._last_result_message: str = ""
 
     # ── Session lifecycle ──────────────────────────────────────────────────
 
@@ -200,19 +208,70 @@ class ConversationManager:
 
     def get_summary(self) -> str:
         """
-        One-line summary of the recent conversation.
+        Summary of the recent conversation for Planner context injection.
 
+        Includes up to the last 8 turns with full text (up to 120 chars each).
         Used by the DecisionEngine for quick context checks.
         """
         if not self._turns:
             return ""
 
-        recent = list(self._turns)[-3:]
+        recent = list(self._turns)[-8:]
         parts: list[str] = []
         for t in recent:
             prefix = "User" if t.role == TurnRole.USER else "Spidy"
-            parts.append(f"{prefix}: {t.text[:50]}")
+            parts.append(f"{prefix}: {t.text[:120]}")
         return " | ".join(parts)
+
+    def get_entity_history(self, max_turns: int = 10) -> list["ConversationTurn"]:
+        """
+        Return the most recent N turns that have an Intent attached.
+
+        Used by ContextResolver to extract named entities for anaphora resolution.
+
+        Parameters
+        ----------
+        max_turns:
+            Maximum number of recent turns to return.
+
+        Returns
+        -------
+        list[ConversationTurn]
+            Turns with intents, ordered oldest-first.
+        """
+        turns_with_intent = [
+            t for t in self._turns
+            if t.intent is not None
+        ]
+        return turns_with_intent[-max_turns:]
+
+    def record_action(self, action: str, result_message: str) -> None:
+        """
+        Record the last executed action and its result for context resolution.
+
+        Called by the Brain after each ToolRouter result so the ContextResolver
+        can track what "it" or "that" refers to in subsequent turns.
+
+        Parameters
+        ----------
+        action:
+            The skill action that was executed (e.g. ``"launch_app"``)
+        result_message:
+            The response message produced by the skill.
+        """
+        self._last_action = action
+        self._last_result_message = result_message
+
+    def get_last_action(self) -> tuple[str, str]:
+        """
+        Return the last executed action and result message.
+
+        Returns
+        -------
+        tuple[str, str]
+            ``(action, result_message)`` — both empty strings if no action yet.
+        """
+        return self._last_action, self._last_result_message
 
     # ── Properties ────────────────────────────────────────────────────────
 

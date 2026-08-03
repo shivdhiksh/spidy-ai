@@ -47,6 +47,7 @@ class TestSystemControlSkillCapabilities:
             "set_volume", "set_brightness", "lock_workstation",
             "sleep_system", "shutdown_system", "restart_system",
             "empty_recycle_bin",
+            "show_desktop",   # M13.2
         }
         assert expected == actions
 

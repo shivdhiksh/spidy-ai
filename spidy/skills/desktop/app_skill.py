@@ -46,7 +46,12 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 # Common Windows app aliases: spoken name → executable
+#
+# Cross-platform OS aliases are included so macOS / Linux vocabulary
+# (e.g. "Finder", "Trash", "Terminal", "Applications") is transparently
+# mapped to the Windows equivalent without confusing the user.
 _APP_ALIASES: dict[str, str] = {
+    # ── Core Windows apps ────────────────────────────────────────────────
     "notepad": "notepad.exe",
     "calculator": "calc.exe",
     "paint": "mspaint.exe",
@@ -78,6 +83,34 @@ _APP_ALIASES: dict[str, str] = {
     "zoom": "Zoom.exe",
     "vlc": "vlc.exe",
     "snipping tool": "SnippingTool.exe",
+
+    # ── macOS → Windows cross-platform aliases ───────────────────────────
+    # macOS "Finder" is the file manager → Windows File Explorer
+    "finder": "explorer.exe",
+    "mac finder": "explorer.exe",
+    # macOS "Applications" folder → Windows "Programs" view in Explorer
+    "applications": "explorer.exe",
+    "apps folder": "explorer.exe",
+    # macOS / Linux generic file manager aliases
+    "file manager": "explorer.exe",
+    "file browser": "explorer.exe",
+    "files": "explorer.exe",   # GNOME Files / elementary Files
+    "nautilus": "explorer.exe",
+    "file explorer": "explorer.exe",
+    "windows explorer": "explorer.exe",
+    # macOS Terminal / iTerm2 → Windows Terminal (with cmd.exe fallback)
+    "iterm": "wt.exe",
+    "iterm2": "wt.exe",
+    "bash": "wt.exe",
+    "zsh": "wt.exe",
+    "shell": "wt.exe",
+    "console": "wt.exe",
+    # Linux / macOS Trash → Windows Recycle Bin shell
+    # (Note: emptying Trash/Recycle Bin is handled by SystemControlSkill;
+    #  opening the Recycle Bin view uses the explorer shell command below.)
+    "trash": "explorer.exe",
+    "recycle bin": "explorer.exe",
+    "bin": "explorer.exe",
 }
 
 # Fallback full paths for apps not in PATH (e.g. Chrome installed to Program Files)
@@ -371,6 +404,7 @@ class AppSkill(BaseSkill):
         Tries (in order):
         1. The name as-is (works when it is already a full path or is on PATH).
         2. Known install paths from _KNOWN_PATHS (with env-var expansion).
+        3. Special fallback: wt.exe → cmd.exe when Windows Terminal is absent.
 
         Returns the first path that exists on disk, or the original name if
         nothing is found (Popen will raise FileNotFoundError as normal).
@@ -385,6 +419,12 @@ class AppSkill(BaseSkill):
             expanded = os.path.expandvars(candidate)
             if os.path.isfile(expanded):
                 return expanded
+        # Special case: Windows Terminal not installed → fall back to cmd.exe
+        if key == "wt.exe" and shutil.which("cmd.exe"):
+            log.info(
+                "AppSkill: wt.exe not found; falling back to cmd.exe"
+            )
+            return "cmd.exe"
         # Return original — Popen will raise FileNotFoundError if not found
         return exe_name
 

@@ -346,31 +346,20 @@ class TestSystemSkill:
         assert result.data is not None
         assert "platform" in result.data
 
-    @pytest.mark.asyncio
-    async def test_set_volume_stub_success(self):
-        skill = self._make()
-        ctx = _ctx("set_volume", params={"level": 50})
-        result = await skill.execute("set_volume", ctx)
-        # Stub in M4 — returns success with explanation
-        assert result.success
-        assert "Milestone 7" in result.message or "not yet" in result.message.lower()
-
-    @pytest.mark.asyncio
-    async def test_lock_screen_stub_success(self):
-        skill = self._make()
-        result = await skill.execute("lock_screen", _ctx("lock_screen"))
-        assert result.success
-        assert "not yet" in result.message.lower() or "Milestone 7" in result.message
 
     def test_get_system_info_tier_t0(self):
         skill = self._make()
         tier_map = {c.action: c.permission_tier for c in skill.capabilities()}
         assert tier_map["get_system_info"] == "T0"
 
-    def test_set_volume_tier_t1(self):
+    def test_system_skill_only_has_get_system_info(self):
+        """SystemSkill stubs (set_volume, lock_screen) were removed in v1.0.
+        Those actions now belong to SystemControlSkill."""
         skill = self._make()
-        tier_map = {c.action: c.permission_tier for c in skill.capabilities()}
-        assert tier_map["set_volume"] == "T1"
+        actions = {c.action for c in skill.capabilities()}
+        assert actions == {"get_system_info"}
+        assert "set_volume" not in actions
+        assert "lock_screen" not in actions
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -383,13 +372,17 @@ class TestRegisterBuiltinSkills:
         from spidy.skills.registry import SkillRegistry
         registry = SkillRegistry()
         registered = register_builtin_skills(registry)
-        assert len(registered) == 6
+        # v1.0 adds CalculatorSkill, ClipboardSkill, ScreenshotSkill (6 → 9 total)
+        assert len(registered) == 9
         assert "help_skill" in registered
         assert "time_skill" in registered
         assert "greet_skill" in registered
         assert "note_skill" in registered
         assert "timer_skill" in registered
         assert "system_skill" in registered
+        assert "calculator_skill" in registered
+        assert "clipboard_skill" in registered
+        assert "screenshot_skill" in registered
 
     def test_disabled_skill_not_registered(self):
         from spidy.config.manager import SkillsConfig

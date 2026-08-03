@@ -45,7 +45,10 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 # Actions that should never be dispatched to LLM_DIRECT
-_REJECT_ACTIONS: frozenset[str] = frozenset({"shutdown"})
+# NOTE: 'shutdown_system' and 'restart_system' are real SystemControlSkill actions.
+# The old 'shutdown' intent (brain-stop signal) is mapped to 'shutdown_system' by
+# the Planner's alias table. Removing it from REJECT allows the skill to execute.
+_REJECT_ACTIONS: frozenset[str] = frozenset()  # No hard rejects — all route to skill or LLM
 
 # Minimum confidence to act without asking for clarification
 _DEFAULT_MIN_CONFIDENCE = 0.6

@@ -1,12 +1,15 @@
 """
-SystemSkill — Safe system information and control actions.
-Permission tiers: T0 for info, T1 for control.
+SystemSkill — System information.
+Permission tier: T0.
 
 Actions
 -------
 get_system_info  — CPU, RAM, battery, platform info   (T0)
-set_volume       — Change system volume (stub, M7+)   (T1)
-lock_screen      — Lock the Windows session (stub)    (T1)
+
+Note
+----
+Volume control and screen lock are provided by SystemControlSkill (desktop package).
+This skill only handles read-only system introspection.
 """
 
 from __future__ import annotations
@@ -14,20 +17,20 @@ from __future__ import annotations
 import platform
 from typing import Any
 
-from spidy.skills.base import BaseSkill, SkillCapability, ParamSchema, SkillContext, SkillResult
+from spidy.skills.base import BaseSkill, SkillCapability, SkillContext, SkillResult
 
 
 class SystemSkill(BaseSkill):
     """
-    Provides system information and basic control actions.
+    Provides live system information.
 
-    Volume control and screen lock are stubs in M4.
-    Full implementation requires pyaudio / win32 in M7 (Desktop Agent).
-    System info is live and uses psutil when available.
+    Volume control and screen lock were originally stubs here; they are
+    now fully implemented in SystemControlSkill (spidy.skills.desktop).
+    This skill only exposes get_system_info to avoid action name conflicts.
     """
 
     name = "system_skill"
-    version = "1.0.0"
+    version = "1.1.0"
 
     def capabilities(self) -> list[SkillCapability]:
         return [
@@ -36,32 +39,14 @@ class SystemSkill(BaseSkill):
                 description="Get current CPU, memory, battery, and platform information.",
                 permission_tier="T0",
                 examples=["system info", "how is my computer doing",
-                          "cpu usage", "battery level", "ram usage"],
-            ),
-            SkillCapability(
-                action="set_volume",
-                description="Set or change the system volume.",
-                permission_tier="T1",
-                params=[ParamSchema("level", "int", required=False,
-                                    description="Volume level 0–100. Omit to mute/unmute.")],
-                examples=["set volume to 50", "volume up", "mute", "unmute",
-                          "turn volume down"],
-            ),
-            SkillCapability(
-                action="lock_screen",
-                description="Lock the current Windows session.",
-                permission_tier="T1",
-                examples=["lock screen", "lock my computer", "lock the session"],
+                          "cpu usage", "battery level", "ram usage",
+                          "check system status", "what's my memory usage"],
             ),
         ]
 
     async def execute(self, action: str, context: SkillContext) -> SkillResult:
         if action == "get_system_info":
             return await self._get_system_info(context)
-        if action == "set_volume":
-            return await self._set_volume(context)
-        if action == "lock_screen":
-            return await self._lock_screen(context)
         return SkillResult.fail(f"SystemSkill: unknown action '{action}'.")
 
     # ── Actions ───────────────────────────────────────────────────────────
@@ -110,27 +95,3 @@ class SystemSkill(BaseSkill):
 
         msg = "System status:\n" + "\n".join(lines)
         return SkillResult.ok(msg, data=info, action_taken="get_system_info")
-
-    async def _set_volume(self, context: SkillContext) -> SkillResult:
-        # Stub — full implementation requires pycaw / win32 (Milestone 7)
-        level = context.get("level")
-        if level is not None:
-            try:
-                level = int(level)
-                level = max(0, min(100, level))
-                msg = (
-                    f"Volume control is not yet implemented (coming in Milestone 7). "
-                    f"Requested level: {level}%"
-                )
-            except (ValueError, TypeError):
-                msg = "Volume control is not yet implemented (coming in Milestone 7)."
-        else:
-            msg = "Volume control is not yet implemented (coming in Milestone 7)."
-        return SkillResult.ok(msg, action_taken="set_volume")
-
-    async def _lock_screen(self, _context: SkillContext) -> SkillResult:
-        # Stub — full implementation uses win32api.LockWorkStation() (Milestone 7)
-        return SkillResult.ok(
-            "Screen lock is not yet implemented (coming in Milestone 7).",
-            action_taken="lock_screen",
-        )

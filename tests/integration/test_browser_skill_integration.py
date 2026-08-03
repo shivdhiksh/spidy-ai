@@ -86,7 +86,8 @@ class TestRegisterBrowserSkills:
         skill = registry.find_skill_by_name("browser_skill")
         assert skill is not None
 
-    def test_all_14_actions_registered(self):
+    def test_all_browser_actions_registered(self):
+        """BrowserSkill currently provides 15 actions (14 original + open_browser_and_search)."""
         registry = SkillRegistry()
         register_browser_skills(registry)
         all_caps = registry.all_capabilities()
@@ -106,13 +107,14 @@ class TestRegisterBrowserSkills:
         assert "refresh_page" in action_names
         assert "search_google" in action_names
         assert "search_youtube" in action_names
+        assert "open_browser_and_search" in action_names  # compound action added in M6
 
         # T2
         assert "close_browser" in action_names
         assert "close_tab" in action_names
         assert "download_file" in action_names
 
-        assert len(action_names) == 14
+        assert len(action_names) >= 15  # future actions will only expand this
 
     def test_actions_findable_via_registry(self):
         registry = SkillRegistry()

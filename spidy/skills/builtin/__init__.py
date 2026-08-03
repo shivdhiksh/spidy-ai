@@ -17,13 +17,14 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from spidy.config.manager import SkillsConfig
+    from spidy.core.event_bus import EventBus
     from spidy.skills.registry import SkillRegistry
 
 
 def register_builtin_skills(
     registry: "SkillRegistry",
     config: "SkillsConfig | None" = None,
-    bus: object = None,
+    bus: "EventBus | None" = None,
     notes_file: str = "notes.jsonl",
 ) -> list[str]:
     """
@@ -103,6 +104,32 @@ def register_builtin_skills(
             registered.append("system_skill")
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to register SystemSkill: {exc}", exc=exc)
+
+    # ── New v1.0 skills ───────────────────────────────────────────────────
+
+    if _enabled("calculator_skill_enabled"):
+        try:
+            from spidy.skills.builtin.calculator_skill import CalculatorSkill
+            registry.register(CalculatorSkill())
+            registered.append("calculator_skill")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to register CalculatorSkill: {exc}", exc=exc)
+
+    if _enabled("clipboard_skill_enabled"):
+        try:
+            from spidy.skills.builtin.clipboard_skill import ClipboardSkill
+            registry.register(ClipboardSkill())
+            registered.append("clipboard_skill")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to register ClipboardSkill: {exc}", exc=exc)
+
+    if _enabled("screenshot_skill_enabled"):
+        try:
+            from spidy.skills.builtin.screenshot_skill import ScreenshotSkill
+            registry.register(ScreenshotSkill())
+            registered.append("screenshot_skill")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to register ScreenshotSkill: {exc}", exc=exc)
 
     log.info(
         "Built-in skills registered: {skills}",

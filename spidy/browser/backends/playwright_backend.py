@@ -82,6 +82,8 @@ class PlaywrightBackend(BrowserBackend):
         self._active_page_idx: int = 0
         self._download_dir: str = str(Path.home())
         self._running: bool = False
+        # Stored so _heal() can relaunch with identical configuration
+        self._last_start_kwargs: dict = {}
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -100,6 +102,15 @@ class PlaywrightBackend(BrowserBackend):
         if self._running:
             log.debug("PlaywrightBackend.start() called when already running — no-op.")
             return
+
+        # Persist so _heal() can relaunch with identical configuration
+        self._last_start_kwargs = {
+            "browser_type": browser_type,
+            "headless": headless,
+            "download_dir": download_dir,
+            "cdp_endpoint": cdp_endpoint,
+            "connect_to_existing": connect_to_existing,
+        }
 
         self._download_dir = str(Path(download_dir).expanduser())
         os.makedirs(self._download_dir, exist_ok=True)
@@ -174,22 +185,129 @@ class PlaywrightBackend(BrowserBackend):
 
     @property
     def is_running(self) -> bool:
-        return self._running
+        """Return True only when the browser process is still alive.
 
-    # ── Active page helper ────────────────────────────────────────────────
+        Uses a structural check (``browser.is_connected()``) rather than
+        trusting the internal ``_running`` flag, which can become stale when
+        the user closes the browser window externally or a CDP session dies.
+        """
+        if not self._running:
+            return False
+        # For a launched browser, verify the process is still connected.
+        if self._browser is not None:
+            try:
+                if not self._browser.is_connected():
+                    # Process died externally — mark stale so _ensure_running
+                    # triggers a full relaunch on the next action.
+                    self._running = False
+                    return False
+            except Exception:  # noqa: BLE001
+                self._running = False
+                return False
+        return True
+
+    # ── Active page helpers ───────────────────────────────────────────────
 
     def _active_page(self) -> Page:
-        """Return the currently active page. Raises if not running."""
+        """Return the currently active page (synchronous, no healing).
+
+        Used only for safe read-only methods that don't call ``goto()``.
+        Raises ``RuntimeError`` if not running.
+        """
         if not self._running or not self._pages:
             raise RuntimeError("Browser is not running. Call BrowserAgent.start() first.")
         # Refresh from context in case Playwright closed/added pages
         if self._context is not None:
-            ctx_pages = list(self._context.pages)
-            if ctx_pages:
-                self._pages = ctx_pages
-                self._active_page_idx = min(
-                    self._active_page_idx, len(self._pages) - 1
+            try:
+                ctx_pages = list(self._context.pages)
+                if ctx_pages:
+                    self._pages = ctx_pages
+                    self._active_page_idx = min(
+                        self._active_page_idx, len(self._pages) - 1
+                    )
+            except Exception:  # noqa: BLE001
+                pass  # context may be closed; callers handle stale pages
+        return self._pages[self._active_page_idx]
+
+    def _is_page_healthy(self, page: "Page") -> bool:
+        """Return True when *page* is still open and usable."""
+        try:
+            return not page.is_closed()
+        except Exception:  # noqa: BLE001
+            return False
+
+    async def _heal(self) -> None:
+        """Tear down stale handles and relaunch the browser.
+
+        Called when the session is detected to be dead mid-operation.
+        Uses ``_last_start_kwargs`` so the new session matches the original
+        configuration (browser type, headless flag, CDP endpoint, etc.).
+        """
+        log.warning(
+            "PlaywrightBackend._heal(): stale session detected — relaunching browser."
+        )
+        # Reset all handles without calling stop() — they may already be dead.
+        self._browser = None
+        self._context = None
+        self._pages = []
+        self._playwright = None
+        self._running = False
+        kwargs = self._last_start_kwargs or {}
+        await self.start(**kwargs)
+
+    async def _get_or_heal_page(self) -> "Page":
+        """Return a healthy, usable Playwright Page — healing automatically if needed.
+
+        Three-level recovery strategy
+        ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+        1. **Fast path** — refresh ``_pages`` from the live context and return
+           the active page if it is healthy.
+        2. **Page closed** — the page was closed externally but the context is
+           still alive: open a fresh page in the existing context.
+        3. **Context / browser dead** — perform a full ``_heal()`` (clears all
+           stale handles, relaunches the browser) and return the new page.
+        """
+        # ── Level 1: refresh page list from the live context ──────────────
+        if self._context is not None:
+            try:
+                ctx_pages = list(self._context.pages)
+                if ctx_pages:
+                    self._pages = ctx_pages
+                    self._active_page_idx = min(
+                        self._active_page_idx, len(self._pages) - 1
+                    )
+            except Exception:  # noqa: BLE001
+                pass  # context closed — will be caught below
+
+        if self._pages:
+            page = self._pages[self._active_page_idx]
+            if self._is_page_healthy(page):
+                return page
+            log.warning(
+                "PlaywrightBackend._get_or_heal_page(): active page is closed "
+                "(tab_id={idx}).",
+                idx=self._active_page_idx,
+            )
+
+        # ── Level 2: open a fresh page in the existing context ────────────
+        if self._context is not None:
+            try:
+                page = await self._context.new_page()
+                self._pages = [page]
+                self._active_page_idx = 0
+                log.info(
+                    "PlaywrightBackend._get_or_heal_page(): "
+                    "recovered — new page opened in existing context."
                 )
+                return page
+            except Exception:  # noqa: BLE001
+                log.warning(
+                    "PlaywrightBackend._get_or_heal_page(): "
+                    "context is dead — performing full heal."
+                )
+
+        # ── Level 3: full heal (relaunch browser) ─────────────────────────
+        await self._heal()
         return self._pages[self._active_page_idx]
 
     async def _page_info(self, page: Page, tab_id: int = 0) -> PageInfo:
@@ -208,11 +326,15 @@ class PlaywrightBackend(BrowserBackend):
 
         t0 = time.monotonic()
         if new_tab and self._context is not None:
-            page = await self._context.new_page()
+            try:
+                page = await self._context.new_page()
+            except Exception:  # context dead — heal and open in fresh context
+                await self._heal()
+                page = await self._context.new_page()  # type: ignore[union-attr]
             self._pages.append(page)
             self._active_page_idx = len(self._pages) - 1
         else:
-            page = self._active_page()
+            page = await self._get_or_heal_page()
 
         try:
             await page.goto(url, timeout=self._page_load_timeout, wait_until="domcontentloaded")
@@ -265,7 +387,7 @@ class PlaywrightBackend(BrowserBackend):
         return tabs
 
     async def navigate_back(self) -> PageInfo:
-        page = self._active_page()
+        page = await self._get_or_heal_page()
         try:
             await page.go_back(timeout=self._nav_timeout, wait_until="domcontentloaded")
         except Exception as exc:  # noqa: BLE001
@@ -273,7 +395,7 @@ class PlaywrightBackend(BrowserBackend):
         return await self._page_info(page, tab_id=self._active_page_idx)
 
     async def navigate_forward(self) -> PageInfo:
-        page = self._active_page()
+        page = await self._get_or_heal_page()
         try:
             await page.go_forward(timeout=self._nav_timeout, wait_until="domcontentloaded")
         except Exception as exc:  # noqa: BLE001
@@ -281,7 +403,7 @@ class PlaywrightBackend(BrowserBackend):
         return await self._page_info(page, tab_id=self._active_page_idx)
 
     async def refresh(self) -> PageInfo:
-        page = self._active_page()
+        page = await self._get_or_heal_page()
         try:
             await page.reload(timeout=self._nav_timeout, wait_until="domcontentloaded")
         except Exception as exc:  # noqa: BLE001
@@ -291,7 +413,7 @@ class PlaywrightBackend(BrowserBackend):
     # ── Content ───────────────────────────────────────────────────────────
 
     async def read_page_text(self, max_chars: int = 5000) -> str:
-        page = self._active_page()
+        page = await self._get_or_heal_page()
         try:
             text = await page.inner_text("body")
             # Collapse excessive whitespace
@@ -310,7 +432,7 @@ class PlaywrightBackend(BrowserBackend):
         dest = Path(dest_dir).expanduser()
         dest.mkdir(parents=True, exist_ok=True)
 
-        page = self._active_page()
+        page = await self._get_or_heal_page()
         try:
             async with page.expect_download(timeout=60_000) as dl_info:
                 # Navigate to the download URL — Playwright intercepts the download

@@ -51,8 +51,11 @@ class TestFileSkillCapabilities:
         skill = _make_skill()
         actions = skill.capability_names()
         expected = {
+            # Existing actions
             "search_files", "search_folders", "open_file",
             "open_folder", "reveal_in_explorer", "list_recent_files",
+            # M13.2 — folder mutation actions
+            "create_folder", "rename_folder", "delete_folder",
         }
         assert expected == set(actions)
 
@@ -308,13 +311,24 @@ class TestOpenFolder:
         ctx = _ctx("open_folder", {"path": "/nonexistent/folder/xyz"})
         result = await skill.execute("open_folder", ctx)
         assert not result.success
-        assert "not found" in result.message.lower()
+        # M13.2: error message was humanized from "not found" to "couldn't find"
+        assert (
+            "not found" in result.message.lower()
+            or "couldn't find" in result.message.lower()
+            or "could not" in result.message.lower()
+        )
 
     @pytest.mark.asyncio
-    async def test_open_folder_requires_path(self):
+    async def test_open_folder_no_path_defaults_to_desktop(self):
+        # M13.2: open_folder with no path now defaults to the Desktop
+        # (a valid directory), so it should succeed or open Desktop.
         skill = _make_skill()
-        result = await skill.execute("open_folder", _ctx("open_folder", {}))
-        assert not result.success
+        desktop = __import__('pathlib').Path.home() / "Desktop"
+        if not desktop.exists():
+            pytest.skip("Desktop directory does not exist on this system")
+        with __import__('unittest.mock', fromlist=['patch']).patch("subprocess.Popen"):
+            result = await skill.execute("open_folder", _ctx("open_folder", {}))
+        assert result.success  # Desktop exists, should succeed
 
     @pytest.mark.asyncio
     async def test_open_folder_rejects_file(self, tmp_path):
