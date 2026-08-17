@@ -96,7 +96,7 @@ class TestUIConfigValidation:
         from spidy.config.manager import UIConfig
         cfg = UIConfig()
         assert cfg.theme == "dark"
-        assert cfg.position == "top-right"
+        assert cfg.position == "center"    # M17: default changed to centered
         assert cfg.opacity == 0.92
         assert cfg.hotkey == "ctrl+space"
 

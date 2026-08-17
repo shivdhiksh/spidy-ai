@@ -1,23 +1,24 @@
 """
-UI State Machine — Milestone 5
-================================
+UI State Machine — Milestone 5 / Milestone 17
+==============================================
 Defines the visual states Spidy's overlay can be in and the allowed
 transitions between them.
 
 State diagram
 -------------
 
-    ┌─────────────────────────────────────────────────────────┐
-    │                                                         │
-    │   IDLE ←────────────────────────────────── SPEAKING    │
-    │     │                                          ↑        │
-    │     ↓                                          │        │
-    │  WAKE_READY ──→ LISTENING ──→ THINKING ────────┘        │
-    │     ↑               │                                   │
-    │     └───────────────┘   (cancelled)                     │
-    │                                                         │
-    │   ERROR (reachable from any state, returns to IDLE)     │
-    └─────────────────────────────────────────────────────────┘
+    ┌─────────────────────────────────────────────────────────────┐
+    │                                                             │
+    │   IDLE ←──────────────────────────────────── SPEAKING      │
+    │     │     ↑                                      ↑         │
+    │     ↓     │                                      │         │
+    │  WAKE_READY ──→ LISTENING ──→ THINKING ───────────┘        │
+    │     ↑               │              │                       │
+    │     └───────────────┘              ↓                       │
+    │                               WORKING ──→ IDLE             │
+    │                                                             │
+    │   ERROR (reachable from any state, returns to IDLE)         │
+    └─────────────────────────────────────────────────────────────┘
 
 State meanings
 --------------
@@ -27,6 +28,7 @@ WAKE_READY  Ready for wake-word detection. Edge glow active.
 LISTENING   Actively capturing speech. Waveform animated. Mic button red.
 THINKING    LLM is processing. Three-dot spinner animation.
 SPEAKING    TTS is playing. Audio bars animated. Mic button disabled.
+WORKING     Autonomous agent executing a goal. Task progress visible.
 ERROR       Brief error flash. Automatically reverts to IDLE after timeout.
 """
 
@@ -43,6 +45,7 @@ class UIState(str, Enum):
     LISTENING = "listening"
     THINKING = "thinking"
     SPEAKING = "speaking"
+    WORKING = "working"   # Autonomous agent is executing a goal
     ERROR = "error"
 
     def __str__(self) -> str:
@@ -54,11 +57,12 @@ class UIState(str, Enum):
 # Maps each state to the set of states it may transition to.
 # Error can always be reached from any state.
 _ALLOWED: dict[UIState, set[UIState]] = {
-    UIState.IDLE:       {UIState.WAKE_READY, UIState.LISTENING, UIState.ERROR},
-    UIState.WAKE_READY: {UIState.IDLE, UIState.LISTENING, UIState.ERROR},
-    UIState.LISTENING:  {UIState.IDLE, UIState.WAKE_READY, UIState.THINKING, UIState.ERROR},
-    UIState.THINKING:   {UIState.IDLE, UIState.SPEAKING, UIState.ERROR},
-    UIState.SPEAKING:   {UIState.IDLE, UIState.LISTENING, UIState.ERROR},
+    UIState.IDLE:       {UIState.WAKE_READY, UIState.LISTENING, UIState.WORKING, UIState.ERROR},
+    UIState.WAKE_READY: {UIState.IDLE, UIState.LISTENING, UIState.WORKING, UIState.ERROR},
+    UIState.LISTENING:  {UIState.IDLE, UIState.WAKE_READY, UIState.THINKING, UIState.WORKING, UIState.ERROR},
+    UIState.THINKING:   {UIState.IDLE, UIState.SPEAKING, UIState.WORKING, UIState.ERROR},
+    UIState.SPEAKING:   {UIState.IDLE, UIState.LISTENING, UIState.WORKING, UIState.ERROR},
+    UIState.WORKING:    {UIState.IDLE, UIState.LISTENING, UIState.ERROR},
     UIState.ERROR:      {UIState.IDLE},
 }
 
@@ -122,6 +126,10 @@ class UIStateMachine:
     @property
     def is_thinking(self) -> bool:
         return self._state == UIState.THINKING
+
+    @property
+    def is_working(self) -> bool:
+        return self._state == UIState.WORKING
 
     @property
     def is_active(self) -> bool:

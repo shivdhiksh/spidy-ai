@@ -115,12 +115,18 @@ class SkillResult:
     action_taken:
         Description of what was actually done (may differ from intent
         if partial execution occurred).
+    non_retryable:
+        When True the ToolRouter retry loop exits immediately after the first
+        attempt.  Set this for deterministic failures that will never succeed
+        on a retry — e.g. a missing required parameter whose value cannot
+        appear by itself on a second call.
     """
     success: bool
     message: str
     data: Any = None
     error: Exception | None = None
     action_taken: str = ""
+    non_retryable: bool = False  # True → exit retry loop immediately (P2 fix)
 
     @classmethod
     def ok(cls, message: str, data: Any = None, action_taken: str = "") -> "SkillResult":
@@ -128,9 +134,21 @@ class SkillResult:
         return cls(success=True, message=message, data=data, action_taken=action_taken)
 
     @classmethod
-    def fail(cls, message: str, error: Exception | None = None) -> "SkillResult":
-        """Convenience constructor for failed results."""
-        return cls(success=False, message=message, error=error)
+    def fail(
+        cls,
+        message: str,
+        error: Exception | None = None,
+        non_retryable: bool = False,
+    ) -> "SkillResult":
+        """Convenience constructor for failed results.
+
+        Parameters
+        ----------
+        non_retryable:
+            Pass ``True`` for deterministic validation failures (e.g. a
+            required parameter is absent) where retrying can never succeed.
+        """
+        return cls(success=False, message=message, error=error, non_retryable=non_retryable)
 
 
 # ─── BaseSkill ABC ────────────────────────────────────────────────────────────

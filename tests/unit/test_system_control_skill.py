@@ -262,7 +262,13 @@ class TestSleepSystem:
     async def test_sleep_success(self):
         skill = _make_skill()
         with patch.object(SystemControlSkill, "_do_sleep", return_value=None):
-            result = await skill.execute("sleep_system", _ctx("sleep_system"))
+            ctx = _ctx("sleep_system")
+            # First call → confirmation prompt
+            r1 = await skill.execute("sleep_system", ctx)
+            assert r1.success
+            assert r1.data.get("awaiting_confirmation") is True
+            # Second call → execute
+            result = await skill.execute("sleep_system", ctx)
         assert result.success
         assert "sleep" in result.message.lower()
 
@@ -271,8 +277,12 @@ class TestSleepSystem:
         bus = MagicMock()
         bus.publish = AsyncMock()
         skill = _make_skill(bus=bus)
+        ctx = _ctx("sleep_system")
         with patch.object(SystemControlSkill, "_do_sleep", return_value=None):
-            await skill.execute("sleep_system", _ctx("sleep_system"))
+            # Step 1: confirmation
+            await skill.execute("sleep_system", ctx)
+            # Step 2: confirmed execute
+            await skill.execute("sleep_system", ctx)
         bus.publish.assert_called_once()
         from spidy.skills.desktop.events import SystemSleepInitiatedEvent
         assert isinstance(bus.publish.call_args[0][0], SystemSleepInitiatedEvent)
@@ -280,9 +290,13 @@ class TestSleepSystem:
     @pytest.mark.asyncio
     async def test_sleep_failure(self):
         skill = _make_skill()
+        ctx = _ctx("sleep_system")
         with patch.object(SystemControlSkill, "_do_sleep",
                           side_effect=Exception("Cannot sleep")):
-            result = await skill.execute("sleep_system", _ctx("sleep_system"))
+            # Step 1: confirmation prompt (no exception yet)
+            await skill.execute("sleep_system", ctx)
+            # Step 2: confirmed execute (exception raised here)
+            result = await skill.execute("sleep_system", ctx)
         assert not result.success
 
 
@@ -296,7 +310,12 @@ class TestShutdownSystem:
     async def test_shutdown_immediate(self):
         skill = _make_skill()
         with patch.object(SystemControlSkill, "_do_shutdown", return_value=None) as mock_fn:
-            result = await skill.execute("shutdown_system", _ctx("shutdown_system", {"delay": "0"}))
+            ctx = _ctx("shutdown_system", {"delay": "0"})
+            # Step 1: confirmation
+            r1 = await skill.execute("shutdown_system", ctx)
+            assert r1.data.get("awaiting_confirmation") is True
+            # Step 2: confirmed execute
+            result = await skill.execute("shutdown_system", ctx)
         assert result.success
         assert "shutting down" in result.message.lower()
         mock_fn.assert_called_with(0, restart=False)
@@ -305,8 +324,9 @@ class TestShutdownSystem:
     async def test_shutdown_with_delay(self):
         skill = _make_skill()
         with patch.object(SystemControlSkill, "_do_shutdown", return_value=None):
-            result = await skill.execute("shutdown_system",
-                                         _ctx("shutdown_system", {"delay": "60"}))
+            ctx = _ctx("shutdown_system", {"delay": "60"})
+            await skill.execute("shutdown_system", ctx)   # step 1
+            result = await skill.execute("shutdown_system", ctx)  # step 2
         assert result.success
         assert "60" in result.message
         assert "abort" in result.message.lower()
@@ -316,8 +336,10 @@ class TestShutdownSystem:
         bus = MagicMock()
         bus.publish = AsyncMock()
         skill = _make_skill(bus=bus)
+        ctx = _ctx("shutdown_system")
         with patch.object(SystemControlSkill, "_do_shutdown", return_value=None):
-            await skill.execute("shutdown_system", _ctx("shutdown_system"))
+            await skill.execute("shutdown_system", ctx)  # step 1
+            await skill.execute("shutdown_system", ctx)  # step 2
         bus.publish.assert_called_once()
         from spidy.skills.desktop.events import SystemShutdownInitiatedEvent
         assert isinstance(bus.publish.call_args[0][0], SystemShutdownInitiatedEvent)
@@ -333,7 +355,9 @@ class TestRestartSystem:
     async def test_restart_immediate(self):
         skill = _make_skill()
         with patch.object(SystemControlSkill, "_do_shutdown", return_value=None) as mock_fn:
-            result = await skill.execute("restart_system", _ctx("restart_system"))
+            ctx = _ctx("restart_system")
+            await skill.execute("restart_system", ctx)   # step 1: confirmation
+            result = await skill.execute("restart_system", ctx)  # step 2: execute
         assert result.success
         assert "restart" in result.message.lower()
         mock_fn.assert_called_with(0, restart=True)
@@ -342,8 +366,9 @@ class TestRestartSystem:
     async def test_restart_with_delay(self):
         skill = _make_skill()
         with patch.object(SystemControlSkill, "_do_shutdown", return_value=None):
-            result = await skill.execute("restart_system",
-                                         _ctx("restart_system", {"delay": "30"}))
+            ctx = _ctx("restart_system", {"delay": "30"})
+            await skill.execute("restart_system", ctx)   # step 1
+            result = await skill.execute("restart_system", ctx)  # step 2
         assert result.success
         assert "30" in result.message
 
@@ -352,8 +377,10 @@ class TestRestartSystem:
         bus = MagicMock()
         bus.publish = AsyncMock()
         skill = _make_skill(bus=bus)
+        ctx = _ctx("restart_system")
         with patch.object(SystemControlSkill, "_do_shutdown", return_value=None):
-            await skill.execute("restart_system", _ctx("restart_system"))
+            await skill.execute("restart_system", ctx)  # step 1
+            await skill.execute("restart_system", ctx)  # step 2
         bus.publish.assert_called_once()
         from spidy.skills.desktop.events import SystemRestartInitiatedEvent
         assert isinstance(bus.publish.call_args[0][0], SystemRestartInitiatedEvent)

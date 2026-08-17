@@ -45,6 +45,7 @@ from spidy.ui.events import (
     UIHideEvent, UIMessageEvent, UINotifyEvent, UIReadyEvent,
     UIShowEvent, UIStateChangeEvent, UIThemeChangeEvent,
     UIWaveformDataEvent,
+    UIConfirmationGrantedEvent, UIConfirmationDeniedEvent,
 )
 from spidy.ui.hotkey import GlobalHotkeyManager
 from spidy.ui.overlay import OverlayWindow, UISignalBridge
@@ -152,6 +153,15 @@ class SpidyApp:
         self._bridge.waveform_data_received.connect(self._overlay.update_waveform)
         self._bridge.theme_change_requested.connect(self._on_theme_change)
 
+        # M17: task progress + confirmation wiring
+        self._bridge.task_progress_received.connect(self._overlay.update_task_progress)
+        self._bridge.confirmation_show.connect(self._overlay.show_confirmation)
+        self._bridge.confirmation_hide.connect(self._overlay.hide_confirmation)
+
+        # Confirmation card signals -> EventBus (publish back to agent layer)
+        self._overlay._confirmation_card.confirmed.connect(self._on_confirmation_granted)
+        self._overlay._confirmation_card.cancelled.connect(self._on_confirmation_denied)
+
         # Overlay outbound signals → EventBus
         self._overlay.mic_button_clicked.connect(self._on_mic_clicked)
         self._overlay.overlay_closed.connect(self._on_overlay_closed)
@@ -197,11 +207,25 @@ class SpidyApp:
         b.subscribe("ui.theme_change", self._handle_theme_change)
         b.subscribe("ui.hotkey_pressed", self._handle_hotkey)
 
-        # Listen for voice pipeline events (future integration)
-        b.subscribe("voice.listening_started", self._handle_listening_started)
-        b.subscribe("voice.listening_stopped", self._handle_listening_stopped)
-        b.subscribe("voice.speaking_started", self._handle_speaking_started)
-        b.subscribe("voice.speaking_stopped", self._handle_speaking_stopped)
+        # Voice pipeline events
+        b.subscribe("voice.listening_started",  self._handle_listening_started)
+        b.subscribe("voice.listening_stopped",  self._handle_listening_stopped)
+        b.subscribe("voice.speaking_started",   self._handle_speaking_started)
+        b.subscribe("voice.speaking_stopped",   self._handle_speaking_stopped)
+
+        # Wake word
+        b.subscribe("wake_word.detected", self._handle_wake_detected)
+
+        # Agent events (M17 -- autonomous task progress + confirmation)
+        b.subscribe("agent.goal_created",          self._handle_agent_goal_created)
+        b.subscribe("agent.goal_started",          self._handle_agent_goal_started)
+        b.subscribe("agent.goal_completed",        self._handle_agent_goal_completed)
+        b.subscribe("agent.goal_failed",           self._handle_agent_goal_failed)
+        b.subscribe("agent.task_started",          self._handle_agent_task_started)
+        b.subscribe("agent.task_completed",        self._handle_agent_task_completed)
+        b.subscribe("agent.task_failed",           self._handle_agent_task_failed)
+        b.subscribe("agent.progress",              self._handle_agent_progress)
+        b.subscribe("agent.confirmation_required", self._handle_agent_confirmation_required)
 
         log.debug("UI EventBus subscriptions registered.")
 
@@ -229,8 +253,10 @@ class SpidyApp:
 
     async def _handle_notify(self, event: UINotifyEvent) -> None:
         if self._bridge:
+            # UISignalBridge.request_notification accepts (title, msg, level);
+            # duration_ms is not forwarded — the bridge/overlay do not use it.
             self._bridge.request_notification(
-                event.title, event.body, event.level, event.duration_ms
+                event.title, event.body, event.level
             )
 
     async def _handle_waveform(self, event: UIWaveformDataEvent) -> None:
@@ -270,6 +296,11 @@ class SpidyApp:
         if self._bridge:
             self._bridge.request_state_change("idle")
 
+    async def _handle_wake_detected(self, event) -> None:
+        """Wake word detected → overlay immediately shows AWAKE/LISTENING."""
+        if self._bridge:
+            self._bridge.request_state_change("listening")
+
     # ── Qt slot handlers (called from Qt main thread) ─────────────────────
 
     def _on_mic_clicked(self) -> None:
@@ -300,6 +331,16 @@ class SpidyApp:
         except KeyError:
             log.warning(f"Unknown theme: {name!r}")
 
+    def _on_confirmation_granted(self, task_id: str, goal_id: str) -> None:
+        """User pressed CONFIRM -- publish back to agent layer."""
+        from spidy.ui.events import UIConfirmationGrantedEvent
+        self._publish_sync(UIConfirmationGrantedEvent(goal_id=goal_id, task_id=task_id))
+
+    def _on_confirmation_denied(self, task_id: str, goal_id: str) -> None:
+        """User pressed CANCEL -- publish back to agent layer."""
+        from spidy.ui.events import UIConfirmationDeniedEvent
+        self._publish_sync(UIConfirmationDeniedEvent(goal_id=goal_id, task_id=task_id))
+
     # ── Helpers ───────────────────────────────────────────────────────────
 
     def _publish_sync(self, event) -> None:
@@ -315,3 +356,92 @@ class SpidyApp:
         if self._tray:
             self._tray.stop()
         log.info("Spidy UI shutdown complete.")
+
+
+    # ==========================================================================
+    # Agent event handlers (M17)
+    # ==========================================================================
+
+    # Internal state for tracking task progress
+    _agent_goal_desc: str = ""
+    _agent_steps: list   = []
+
+    async def _handle_agent_goal_created(self, event) -> None:
+        desc = getattr(event, "description", "")
+        self._agent_goal_desc = desc
+        self._agent_steps = []
+
+    async def _handle_agent_goal_started(self, event) -> None:
+        desc = getattr(event, "description", "")
+        self._agent_goal_desc = desc
+        if self._bridge:
+            self._bridge.request_state_change("working")
+            self._bridge.request_task_progress(desc, self._agent_steps)
+
+    async def _handle_agent_goal_completed(self, event) -> None:
+        summary = getattr(event, "summary", "Goal completed.")
+        if self._bridge:
+            self._bridge.request_state_change("idle")
+            self._bridge.request_notification("Goal Complete", summary, "success")
+        self._agent_steps = []
+
+    async def _handle_agent_goal_failed(self, event) -> None:
+        error = getattr(event, "error", "Goal failed.")
+        if self._bridge:
+            self._bridge.request_state_change("error")
+            self._bridge.request_notification("Goal Failed", error, "error")
+        self._agent_steps = []
+
+    async def _handle_agent_task_started(self, event) -> None:
+        desc  = getattr(event, "description", "")
+        index = getattr(event, "task_index", len(self._agent_steps))
+        total = getattr(event, "total_tasks", 0)
+        # Mark all prior steps done, this one running
+        steps = []
+        for i, s in enumerate(self._agent_steps):
+            if isinstance(s, dict) and s.get("status") == "running":
+                steps.append({"description": s["description"], "status": "done"})
+            else:
+                steps.append(s)
+        steps.append({"description": desc, "status": "running"})
+        self._agent_steps = steps
+        if self._bridge:
+            self._bridge.request_task_progress(self._agent_goal_desc, self._agent_steps)
+
+    async def _handle_agent_task_completed(self, event) -> None:
+        # Mark the last running step as done
+        steps = []
+        for s in self._agent_steps:
+            if isinstance(s, dict) and s.get("status") == "running":
+                steps.append({"description": s["description"], "status": "done"})
+            else:
+                steps.append(s)
+        self._agent_steps = steps
+        if self._bridge:
+            self._bridge.request_task_progress(self._agent_goal_desc, self._agent_steps)
+
+    async def _handle_agent_task_failed(self, event) -> None:
+        steps = []
+        for s in self._agent_steps:
+            if isinstance(s, dict) and s.get("status") == "running":
+                steps.append({"description": s["description"], "status": "failed"})
+            else:
+                steps.append(s)
+        self._agent_steps = steps
+        if self._bridge:
+            self._bridge.request_task_progress(self._agent_goal_desc, self._agent_steps)
+
+    async def _handle_agent_progress(self, event) -> None:
+        msg = getattr(event, "message", "")
+        if self._bridge and msg:
+            self._bridge.request_state_change("working")
+
+    async def _handle_agent_confirmation_required(self, event) -> None:
+        task_id  = getattr(event, "task_id",          "")
+        goal_id  = getattr(event, "goal_id",          "")
+        desc     = getattr(event, "task_description", "")
+        prompt   = getattr(event, "prompt",           "")
+        if not prompt:
+            prompt = "This action requires your confirmation before proceeding."
+        if self._bridge:
+            self._bridge.request_confirmation_show(task_id, goal_id, desc, prompt)

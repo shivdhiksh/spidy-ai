@@ -5,6 +5,7 @@ Abstract interface and data types shared by all LLM backends.
 
 Supported providers:
   Ollama  (local, default)  → spidy.llm.backends.ollama
+  NVIDIA  (cloud, primary)  → spidy.llm.backends.nvidia  (NIM API, OpenAI-compatible)
   OpenAI  (cloud)           → spidy.llm.backends.openai
   Claude  (cloud)           → spidy.llm.backends.claude
   Gemini  (cloud)           → spidy.llm.backends.gemini
@@ -232,6 +233,16 @@ class LLMClientFactory:
             return OllamaClient(
                 base_url=base_url or "http://localhost:11434",
                 model=model or "llama3.2:3b",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        if name in ("nvidia", "nim"):
+            from spidy.llm.backends.nvidia import NvidiaClient
+            return NvidiaClient(
+                api_key=api_key,
+                model=model or "meta/llama-3.1-8b-instruct",
+                base_url=base_url or "https://integrate.api.nvidia.com/v1",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,

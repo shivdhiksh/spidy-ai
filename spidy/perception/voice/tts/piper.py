@@ -189,32 +189,43 @@ class PiperTTSEngine(TTSEngine):
 
     def _synthesize_sync(self, text: str) -> AudioBuffer:
         """Run Piper synthesis synchronously (called via asyncio.to_thread)."""
-        # Synthesize to a WAV buffer in memory
+        from piper.config import SynthesisConfig
+
+        # Build synthesis parameters via SynthesisConfig (Piper 1.6.0 API).
+        # synthesize_wav() is used instead of synthesize() because:
+        #   1. It writes directly to a wave.Wave_write file handle
+        #   2. It sets WAV headers (channels, sample rate, bit depth) automatically
+        #      via set_wav_format=True (default), preventing wave.Error: "# channels not specified"
+        #   3. synthesize() in Piper 1.6 returns an Iterable[AudioChunk], not a WAV
+        # length_scale: lower = faster speech (inverse of speed multiplier)
+        syn_config = SynthesisConfig(
+            length_scale=1.0 / self._speed,
+            noise_scale=0.667,
+            noise_w_scale=0.8,  # Piper 1.6: noise_w renamed to noise_w_scale
+            volume=self._volume,
+        )
+
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav_file:
-            self._piper_voice.synthesize(
-                text,
-                wav_file,
-                length_scale=1.0 / self._speed,  # Piper: lower=faster
-                noise_scale=0.667,
-                noise_w=0.8,
-            )
+            self._piper_voice.synthesize_wav(text, wav_file, syn_config=syn_config)
 
         wav_buffer.seek(0)
         with wave.open(wav_buffer, "rb") as wav_file:
             frames = wav_file.readframes(wav_file.getnframes())
             sr = wav_file.getframerate()
 
-        # Convert int16 PCM bytes → float32 numpy
+        # Convert int16 PCM bytes → float32 numpy.
+        # Volume already applied by SynthesisConfig.volume — no second scaling.
         int16_samples = np.frombuffer(frames, dtype=np.int16)
-        float32_samples = (int16_samples.astype(np.float32) / 32767.0) * self._volume
-        duration = len(float32_samples) / sr
+        float32_samples = int16_samples.astype(np.float32) / 32767.0
+        duration = len(float32_samples) / sr if sr > 0 else 0.0
 
         return AudioBuffer(
             samples=float32_samples,
             sample_rate=sr,
             duration_seconds=duration,
         )
+
 
     def _play_buffer(self, buffer: AudioBuffer) -> None:
         """

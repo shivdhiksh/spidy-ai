@@ -59,6 +59,9 @@ DARK_THEME = Theme(
         # Wake-ready edge glow (for future wake-word integration)
         wake_glow="#6C63FF",
 
+        # Autonomous working state glow — deep amber/gold
+        working_glow="#E8A020",
+
         # Notifications
         notify_info="#00D4FF",
         notify_success="#00E96A",
@@ -67,6 +70,13 @@ DARK_THEME = Theme(
 
         # Tray
         tray_icon_bg="#6C63FF",
+
+        # HUD futuristic interface colors (M17.2)
+        hud_primary="#00E5FF",    # Luminous cyan
+        hud_secondary="#00ACC1",  # Electric teal
+        hud_dim="#004D5E",        # Dim cyan for inactive elements
+        hud_grid="#060D1A",       # Near-black deep blue (HUD background)
+        hud_text="#B2EBF2",       # Soft cyan-white for readout text
     ),
     fonts=ThemeFonts(
         family_primary="Segoe UI",

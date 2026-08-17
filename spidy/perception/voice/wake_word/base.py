@@ -95,3 +95,14 @@ class WakeWordModel(ABC):
         this size. Must match the model's expected input length.
         """
         ...
+
+    def reset_buffer(self) -> None:
+        """
+        Reset the model's internal temporal smoothing buffer.
+
+        Call after wake detection fires and after TTS playback ends, to
+        prevent stale audio frames from influencing the next detection
+        window.  The base implementation is a no-op — subclasses with
+        stateful buffers (e.g. OpenWakeWordModel) should override.
+        """
+        pass

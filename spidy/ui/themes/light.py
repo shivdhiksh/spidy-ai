@@ -59,6 +59,9 @@ LIGHT_THEME = Theme(
         # Wake-ready edge glow
         wake_glow="#5C54EF",
 
+        # Autonomous working state glow — warm amber for light mode
+        working_glow="#C07800",
+
         # Notifications
         notify_info="#0098CC",
         notify_success="#00A64E",
@@ -67,6 +70,13 @@ LIGHT_THEME = Theme(
 
         # Tray
         tray_icon_bg="#5C54EF",
+
+        # HUD futuristic interface colors (M17.2) - slightly warmer for light mode
+        hud_primary="#0097A7",    # Deep teal (readable on light)
+        hud_secondary="#00838F",  # Darker teal
+        hud_dim="#B2EBF2",        # Very light cyan for inactive
+        hud_grid="#E0F7FA",       # Light cyan-white background
+        hud_text="#006064",       # Dark teal text
     ),
     fonts=ThemeFonts(
         family_primary="Segoe UI",

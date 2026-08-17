@@ -8,12 +8,19 @@ Audio contract
 - Input: float32 numpy array, 16kHz, mono
 - Comes from AudioCaptureEngine after wake word detection and VAD
 - No streaming required for Milestone 1 (batch transcription)
+
+Milestone 14 additions
+-----------------------
+- Optional ``transcribe_streaming()`` async generator for partial transcripts.
+  Existing implementations do NOT need to override it — the default raises
+  ``NotImplementedError`` gracefully and falls back to batch mode.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import AsyncGenerator
 
 import numpy as np
 
@@ -36,12 +43,22 @@ class TranscriptResult:
         Duration of the input audio, in seconds.
     is_empty:
         True if no speech was detected in the audio.
+    is_partial:
+        True if this result is an intermediate (streaming) segment.
+        False (default) for final batch results.
+    segment_signals:
+        Optional list of per-segment quality signals from faster-whisper
+        (no_speech_prob, avg_logprob, compression_ratio).
+        None when the STT backend does not provide this metadata.
+        Used by TranscriptQualityGuard for suspicious-transcript detection.
     """
     text: str
     confidence: float = 1.0
     language: str | None = None
     duration_seconds: float = 0.0
     is_empty: bool = False
+    is_partial: bool = False       # M14: True for streaming segments
+    segment_signals: "list | None" = None   # faster-whisper SegmentQualitySignals
 
     def __post_init__(self) -> None:
         # Normalise whitespace
@@ -76,6 +93,27 @@ class SpeechRecognizer(ABC):
         """
         ...
 
+    async def transcribe_streaming(
+        self,
+        audio_data: np.ndarray,
+    ) -> AsyncGenerator[TranscriptResult, None]:
+        """
+        Stream partial transcription results as they arrive (Milestone 14).
+
+        Default implementation falls back to a single batch call so existing
+        engines work without modification.  Override in concrete classes to
+        provide true streaming.
+
+        Yields
+        ------
+        TranscriptResult
+            Partial segments with ``is_partial=True``, then a final result
+            with ``is_partial=False``.
+        """
+        # Default: single batch call, yield as one segment
+        result = await self.transcribe(audio_data)
+        yield result
+
     @abstractmethod
     def load(self) -> None:
         """Load the model into memory (and GPU if available)."""
@@ -97,3 +135,4 @@ class SpeechRecognizer(ABC):
     def model_name(self) -> str:
         """Human-readable model identifier."""
         ...
+

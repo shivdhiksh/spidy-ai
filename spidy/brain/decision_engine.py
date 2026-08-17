@@ -112,7 +112,21 @@ class DecisionEngine:
                 rationale=f"Action '{intent.action}' is handled by the system, not the Brain.",
             )
 
-        # Low confidence — ask for clarification
+        # Low confidence — ask for clarification.
+        # EXCEPTION: action == "chat" is the intentional no-match fallback produced
+        # by IntentClassifier when no rule fires.  Its confidence is always
+        # _LOW_CONFIDENCE (0.5) by design, which sits below this gate.  We must
+        # bypass the gate for "chat" so that factual questions like
+        # "What is the capital of Japan?" reach the LLM instead of returning
+        # "I'm not sure I understood that." (P2 fix — Issue 2).
+        if intent.action == "chat":
+            log.debug("Intent 'chat' → LLM_DIRECT (confidence gate bypassed)")
+            return Decision(
+                mode=DecisionMode.LLM_DIRECT,
+                intent=intent,
+                rationale="'chat' fallback — direct LLM answer (confidence gate bypassed).",
+            )
+
         if intent.confidence < self._min_confidence:
             return Decision(
                 mode=DecisionMode.CLARIFY,

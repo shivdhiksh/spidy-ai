@@ -52,6 +52,7 @@ class TestAppSkillCapabilities:
         expected = {
             "detect_running_apps", "launch_app",
             "bring_app_to_foreground", "close_app",
+            "minimize_window", "maximize_window",
         }
         assert expected == actions
 

@@ -94,6 +94,10 @@ class WakeWordConfig(BaseModel):
     model: str = "hey_jarvis"
     threshold: float = 0.5
     chunk_size: int = 1280
+    custom_model_path: str | None = None  # Path to a custom .onnx model file.
+                                           # When set, bypasses model: and _MODEL_MAP.
+                                           # score_key becomes the filename stem.
+                                           # Use for future Hey Spidy custom model.
 
     @field_validator("threshold")
     @classmethod
@@ -124,13 +128,125 @@ class AudioConfig(BaseModel):
     output_device: int | None = None
     sample_rate: int = 16000
     channels: int = 1
+    mic_gain: float = 1.0   # Software amplification applied before wake-word / STT.
+                             # Increase if microphone volume is too low for OWW detection.
+                             # Typical fix for quiet microphones: 4.0–12.0.
+                             # Audio is hard-clipped at [-1.0, 1.0] after amplification.
+
+
+class VADConfig(BaseModel):
+    """Voice Activity Detection configuration (Milestone 14)."""
+    aggressiveness: int = 2                 # webrtcvad mode 0–3 (higher = more noise filtering)
+    silence_threshold: float = 0.01        # Energy fallback: RMS below this = silence
+    min_speech_duration_ms: int = 250      # Ignore sounds shorter than this
+    silence_timeout_seconds: float = 1.5   # Stop recording after N seconds of silence
+
+
+class VoiceSessionConfig(BaseModel):
+    """Continuous conversation session configuration (Milestone 14)."""
+    continuous_mode: bool = True                # Stay awake between turns (no repeat wake word)
+    conversation_timeout_seconds: float = 60.0  # Inactivity timeout
+    max_turns_per_session: int = 50             # Max utterances per session
+    streaming_tts: bool = True                  # Use sentence-level streaming TTS
+    stop_mid_sentence: bool = False             # Interrupt at sentence boundary (False) or immediately
+    measure_latency: bool = True                # Log voice pipeline latency
+    interrupt_keywords: list[str] = Field(
+        default_factory=lambda: [
+            "stop", "cancel", "never mind", "wait", "pause", "resume",
+        ]
+    )
+    # Post-ack audio buffer flush (Issue 1: ack-echo contamination)
+    # After the wake-ack TTS completes, clear the audio capture buffer
+    # before opening the microphone for the user's command.
+    # This prevents Piper's echo tail (~100ms) from entering STT.
+    # Set to 0 to disable (e.g. headphone setups with no echo).
+    post_ack_flush_ms: int = 100
+    # Transcript deduplication window (Issue 4: duplicate STT events)
+    # If the same transcript arrives again within this window (seconds),
+    # it is silently dropped. Two genuinely separate identical commands
+    # separated by more than this interval are both processed.
+    # Set to 0.0 to disable deduplication.
+    transcript_dedup_window_seconds: float = 1.5
+
+
+class WakeAckConfig(BaseModel):
+    """
+    Wake acknowledgement configuration (Milestone 15).
+
+    When the wake word fires, Spidy immediately speaks one of these
+    phrases before opening the microphone for the user's command.
+
+    Rules
+    -----
+    - Never calls the LLM, Brain, STT, or Memory.
+    - If enabled=False, Spidy wakes normally with no spoken acknowledgement.
+    - Phrases are spoken via the existing Piper TTS with mic muted,
+      so the ack audio is never interpreted as a user command.
+
+    YAML example
+    ------------
+    voice:
+      wake_ack:
+        enabled: true
+        phrases:
+          - "Yes Shiva."
+          - "Hmm?"
+    """
+    enabled: bool = True
+    phrases: list[str] = Field(
+        default_factory=lambda: ["Yes Shiva.", "Hmm?"]
+    )
+
+
+class BargeInConfig(BaseModel):
+    """
+    Barge-in interruption detector configuration (Milestone 15).
+
+    While Spidy is speaking (TTS), a lightweight faster-whisper model stays
+    active so the user can say "Spidy stop" and immediately halt speech.
+
+    Performance (measured)
+    ----------------------
+    - Model tiny.en, window 0.8 s:
+        0.8 s accumulate + ~671 ms STT = ~1.4 s worst-case detection
+    - Memory: ~20 MB extra RSS when base.en is already loaded
+    """
+    enabled: bool = True
+    model: str = "tiny.en"            # faster-whisper model (keep tiny.en; base.en is busy)
+    window_seconds: float = 0.8       # audio window to accumulate (0.4-2.0 s)
+    min_rms_threshold: float = 0.015  # energy gate -- discard chunks below this RMS
+
+
+class TTSFilterConfig(BaseModel):
+    """
+    TTS text pre-processing filter configuration.
+
+    Applied ONLY to the text sent to speech synthesis. The original
+    response_text is never modified and is always shown in the UI/chat.
+
+    Removes markdown, code blocks, headers, and list markers so Spidy
+    speaks natural prose instead of reading raw markdown aloud.
+    """
+    enabled: bool = True
+    # Text to speak when a fenced code block is removed.
+    # Should be short (<=10 words) for a natural spoken transition.
+    code_block_replacement: str = "I've written the code. You can see it in the chat."
+    # Replacement for bare URLs (https://...)
+    url_replacement: str = "the link"
 
 
 class VoiceConfig(BaseModel):
     wake_word: WakeWordConfig = Field(default_factory=WakeWordConfig)
+    wake_ack: WakeAckConfig = Field(default_factory=WakeAckConfig)
     stt: STTConfig = Field(default_factory=STTConfig)
     tts: TTSConfig = Field(default_factory=TTSConfig)
     audio: AudioConfig = Field(default_factory=AudioConfig)
+    # ── Milestone 14 additions ──────────────────────────────────────────────
+    vad: VADConfig = Field(default_factory=VADConfig)
+    session: VoiceSessionConfig = Field(default_factory=VoiceSessionConfig)
+    # ── Milestone 15 additions ──────────────────────────────────────────
+    barge_in: BargeInConfig = Field(default_factory=BargeInConfig)
+    tts_filter: TTSFilterConfig = Field(default_factory=TTSFilterConfig)
 
 
 class ReasoningConfig(BaseModel):
@@ -222,9 +338,9 @@ class UIConfig(BaseModel):
     enabled: bool = True
     theme: str = "dark"              # "dark" | "light"
     opacity: float = 0.92
-    position: str = "top-right"      # "top-right" | "top-left" | "bottom-right" | "bottom-left"
-    width: int = 400
-    height: int = 580
+    position: str = "center"         # "center" | "top-right" | "top-left" | "bottom-right" | "bottom-left"
+    width: int = 0                   # M17.2: 0 = auto-responsive (75-90% screen)
+    height: int = 0                  # M17.2: 0 = auto-responsive
     always_on_top: bool = True
     animate: bool = True
     hotkey: str = "ctrl+space"       # Global toggle hotkey
@@ -253,7 +369,7 @@ class UIConfig(BaseModel):
     @field_validator("position")
     @classmethod
     def validate_position(cls, v: str) -> str:
-        valid = {"top-right", "top-left", "bottom-right", "bottom-left"}
+        valid = {"center", "top-right", "top-left", "bottom-right", "bottom-left"}
         if v not in valid:
             raise ValueError(f"position must be one of {valid}, got '{v}'")
         return v
@@ -290,12 +406,13 @@ class PermissionsConfig(BaseModel):
     t2_confirmation_timeout_seconds: float = 30.0
 
 
+
 class LLMProviderConfig(BaseModel):
     """
     Per-provider LLM configuration.
     Each entry in MultiLLMConfig.providers is one of these.
     """
-    name: str                          # e.g. "ollama", "openai", "claude", "gemini"
+    name: str                          # e.g. "nvidia", "ollama", "openai", "claude", "gemini"
     enabled: bool = True
     model: str = ""                    # model name; falls back to provider default
     base_url: str = ""                 # override base URL (useful for Ollama)
@@ -305,18 +422,67 @@ class LLMProviderConfig(BaseModel):
     timeout_seconds: int = 30
 
 
+def _default_llm_providers() -> list:  # -> list[LLMProviderConfig]
+    """
+    Build the default ordered provider list for MultiLLMConfig.
+
+    When ``NVIDIA_API_KEY`` is present in the environment:
+        [nvidia (primary), ollama (fallback)]
+
+    When ``NVIDIA_API_KEY`` is absent:
+        [ollama]  ← identical to the previous single-provider default
+
+    Security note
+    -------------
+    We only check for the *presence* of the key here, not its value.
+    The actual key string is read inside ``NvidiaClient.__init__()`` and
+    is never stored in config objects or emitted in logs.
+    """
+    nvidia_key_present = bool(os.environ.get("NVIDIA_API_KEY", "").strip())
+
+    ollama_provider = LLMProviderConfig(
+        name="ollama",
+        model="llama3.2:3b",
+        base_url="http://localhost:11434",
+        timeout_seconds=30,
+    )
+
+    if not nvidia_key_present:
+        return [ollama_provider]
+
+    log.debug(
+        "NVIDIA_API_KEY detected — NVIDIA NIM will be the primary LLM provider "
+        "with Ollama as fallback."
+    )
+    nvidia_provider = LLMProviderConfig(
+        name="nvidia",
+        model="meta/llama-3.1-8b-instruct",
+        base_url="https://integrate.api.nvidia.com/v1",
+        # api_key is intentionally left empty here.
+        # NvidiaClient reads NVIDIA_API_KEY directly from os.environ.
+        api_key="",
+        timeout_seconds=60,
+    )
+    return [nvidia_provider, ollama_provider]
+
+
 class MultiLLMConfig(BaseModel):
     """
     Ordered list of LLM providers with failover policy.
 
     Providers are tried in order. On failure the router falls back
     to the next enabled provider in the list.
+
+    Default priority (when ``NVIDIA_API_KEY`` env var is present)
+    -------------------------------------------------------------
+    1. NVIDIA NIM  — fast cloud inference, primary for all LLM requests
+    2. Ollama      — local fallback when NVIDIA is unavailable or key is absent
+
+    When ``NVIDIA_API_KEY`` is absent the list contains only Ollama,
+    preserving the previous behaviour exactly.
     """
     providers: list[LLMProviderConfig] = Field(
-        default_factory=lambda: [
-            LLMProviderConfig(name="ollama", model="llama3.2:3b",
-                              base_url="http://localhost:11434"),
-        ]
+        default_factory=_default_llm_providers
     )
     # Number of consecutive failures before a provider is skipped for a session
     failure_threshold: int = 3

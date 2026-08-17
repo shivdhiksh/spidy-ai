@@ -23,6 +23,17 @@ The router tracks consecutive failure counts per provider.
 Once a provider reaches failure_threshold, it is skipped for the
 current session to avoid repeated timeouts.
 
+Latency and provider identification logging
+-------------------------------------------
+Every ``complete()`` call logs at INFO level:
+    LLM request: provider=nvidia model=meta/llama-3.1-8b-instruct
+    LLM response: provider=nvidia model=... duration=4231ms success=True
+
+On fallback:
+    LLM fallback: nvidia → ollama
+
+The API key is NEVER logged at any level.
+
 Usage
 -----
     router = LLMRouter(
@@ -35,6 +46,7 @@ Usage
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, AsyncIterator
 
 from spidy.llm.client import BaseLLMClient, LLMMessage, LLMResponse
@@ -101,6 +113,10 @@ class LLMRouter(BaseLLMClient):
         Attempt completion across providers in order.
 
         Returns the first successful response, or failure if all fail.
+
+        Logs at INFO level for every attempt:
+            LLM request: provider=X model=Y
+            LLM response: provider=X model=Y duration=Zms success=True/False
         """
         from spidy.llm.events import LLMProviderFailedEvent, LLMProviderSwitchedEvent
 
@@ -116,10 +132,18 @@ class LLMRouter(BaseLLMClient):
                 )
                 continue
 
+            provider_name = getattr(provider, "provider_name", f"provider_{idx}")
+            provider_model = getattr(provider, "_model", "unknown")
+
             # Notify of provider switch
             if active_provider_idx is not None and self._bus:
                 prev_name = getattr(self._providers[active_provider_idx], "provider_name", "unknown")
-                curr_name = getattr(provider, "provider_name", "unknown")
+                curr_name = provider_name
+                log.info(
+                    "LLM fallback: {prev} → {curr}",
+                    prev=prev_name,
+                    curr=curr_name,
+                )
                 await self._bus.publish(LLMProviderSwitchedEvent(
                     from_provider=prev_name,
                     to_provider=curr_name,
@@ -127,27 +151,38 @@ class LLMRouter(BaseLLMClient):
                 ))
 
             active_provider_idx = idx
-            provider_name = getattr(provider, "provider_name", f"provider_{idx}")
 
-            log.debug(
-                "LLMRouter: trying provider '{p}' (idx={i})",
+            # ── Provider identification log ────────────────────────────
+            # NOTE: API key is NEVER logged — only provider name and model.
+            log.info(
+                "LLM request: provider={p} model={m}",
                 p=provider_name,
-                i=idx,
+                m=provider_model,
             )
 
+            _req_start = time.monotonic()
             response = await provider.complete(messages, temperature=temperature, max_tokens=max_tokens)
+            _duration_ms = (time.monotonic() - _req_start) * 1000
+
+            # ── Response identification log ────────────────────────────
+            log.info(
+                "LLM response: provider={p} model={m} duration={d:.0f}ms success={s}",
+                p=provider_name,
+                m=response.model or provider_model,
+                d=_duration_ms,
+                s=response.success,
+            )
 
             if response.success:
                 # Reset failure count on success
                 self._failure_counts[idx] = 0
-                log.debug("LLMRouter: '{p}' succeeded.", p=provider_name)
                 return response
 
             # Provider failed
             self._failure_counts[idx] = self._failure_counts.get(idx, 0) + 1
             last_error = response.error_message
             log.warning(
-                "LLMRouter: provider '{p}' failed (failures={n}): {err}",
+                "LLM provider '{p}' failed (failures={n}): {err}",
                 p=provider_name,
                 n=self._failure_counts[idx],
                 err=last_error[:100],

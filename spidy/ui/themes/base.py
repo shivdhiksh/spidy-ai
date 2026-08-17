@@ -57,6 +57,9 @@ class ThemeColors:
     # Wake-ready edge glow
     wake_glow: str           # Animated glow color (for future wake-word)
 
+    # Autonomous working state glow
+    working_glow: str        # Gold/amber glow for WORKING state
+
     # Notification levels
     notify_info: str
     notify_success: str
@@ -65,6 +68,13 @@ class ThemeColors:
 
     # System tray
     tray_icon_bg: str
+
+    # ── HUD / Futuristic Interface (M17.2) ─────────────────────────────────
+    hud_primary: str     # Luminous cyan — main HUD accent
+    hud_secondary: str   # Electric teal — secondary HUD elements
+    hud_dim: str         # Dim cyan — inactive HUD elements
+    hud_grid: str        # Near-black blue — HUD background/grid
+    hud_text: str        # Bright HUD readout text (slightly off-white cyan)
 
 
 @dataclass(frozen=True)

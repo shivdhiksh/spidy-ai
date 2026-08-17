@@ -62,6 +62,8 @@ class OllamaClient(BaseLLMClient):
         HTTP request timeout in seconds.
     """
 
+    provider_name = "ollama"
+
     def __init__(
         self,
         base_url: str = _DEFAULT_BASE_URL,

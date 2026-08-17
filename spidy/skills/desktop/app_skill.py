@@ -205,6 +205,32 @@ class AppSkill(BaseSkill):
                 ],
             ),
             SkillCapability(
+                action="minimize_window",
+                description="Minimize an application window to the taskbar.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("name", "string", required=True,
+                                description="Application name or window title to minimize."),
+                ],
+                examples=[
+                    "minimize notepad", "minimize edge", "minimize chrome",
+                    "minimise vs code", "minimize calculator",
+                ],
+            ),
+            SkillCapability(
+                action="maximize_window",
+                description="Maximize (or restore) an application window.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("name", "string", required=True,
+                                description="Application name or window title to maximize."),
+                ],
+                examples=[
+                    "maximize edge", "maximise chrome", "restore notepad",
+                    "maximize vs code", "maximise calculator",
+                ],
+            ),
+            SkillCapability(
                 action="close_app",
                 description="Close (terminate) a running application.",
                 permission_tier="T2",
@@ -230,6 +256,10 @@ class AppSkill(BaseSkill):
             return await self._launch_app(context)
         if action == "bring_app_to_foreground":
             return await self._bring_to_foreground(context)
+        if action == "minimize_window":
+            return await self._minimize_window(context)
+        if action == "maximize_window":
+            return await self._maximize_window(context)
         if action == "close_app":
             return await self._close_app(context)
         return SkillResult.fail(f"AppSkill: unknown action '{action}'.")
@@ -264,7 +294,10 @@ class AppSkill(BaseSkill):
     async def _launch_app(self, context: SkillContext) -> SkillResult:
         name: str = context.get("name", "")
         if not name:
-            return SkillResult.fail("AppSkill: 'name' parameter is required for launch_app.")
+            return SkillResult.fail(
+                "AppSkill: 'name' parameter is required for launch_app.",
+                non_retryable=True,
+            )
 
         args_str: str = context.get("args", "") or ""
         args: list[str] = args_str.split() if args_str else []
@@ -318,7 +351,8 @@ class AppSkill(BaseSkill):
         name: str = context.get("name", "")
         if not name:
             return SkillResult.fail(
-                "AppSkill: 'name' parameter is required for bring_app_to_foreground."
+                "AppSkill: 'name' parameter is required for bring_app_to_foreground.",
+                non_retryable=True,
             )
 
         hwnd, matched_name = await asyncio.to_thread(self._find_window_by_name, name)
@@ -346,7 +380,10 @@ class AppSkill(BaseSkill):
     async def _close_app(self, context: SkillContext) -> SkillResult:
         name: str = context.get("name", "")
         if not name:
-            return SkillResult.fail("AppSkill: 'name' parameter is required for close_app.")
+            return SkillResult.fail(
+                "AppSkill: 'name' parameter is required for close_app.",
+                non_retryable=True,
+            )
 
         force_raw = context.get("force", False)
         if isinstance(force_raw, str):
@@ -393,6 +430,108 @@ class AppSkill(BaseSkill):
             data={"closed": closed, "errors": errors},
             action_taken="close_app",
         )
+
+    async def _minimize_window(self, context: SkillContext) -> SkillResult:
+        """
+        Minimize an application window to the taskbar.
+
+        BUG 3 FIX: Previously there was no minimize action; the intent fell
+        through to chat and produced no window operation.
+        """
+        name: str = context.get("name", "")
+        if not name:
+            return SkillResult.fail(
+                "AppSkill: 'name' parameter is required for minimize_window.",
+                non_retryable=True,
+            )
+
+        hwnd, matched = await asyncio.to_thread(self._find_window_by_name, name)
+        if not hwnd:
+            return SkillResult.fail(
+                f"AppSkill: no visible window found for '{name}'. "
+                "The application may not be running or may have no visible window."
+            )
+
+        try:
+            import win32gui  # type: ignore[import-untyped]
+            import win32con  # type: ignore[import-untyped]
+            win32gui.ShowWindow(hwnd, win32con.SW_MINIMIZE)
+            log.info("Minimized window '{name}' (hwnd={hwnd})", name=matched, hwnd=hwnd)
+            return SkillResult.ok(
+                f"Minimized '{matched}'.",
+                data={"hwnd": hwnd, "name": matched},
+                action_taken="minimize_window",
+            )
+        except ImportError:
+            # Fallback via ctypes if win32con not available
+            try:
+                import ctypes
+                SW_MINIMIZE = 6
+                ctypes.windll.user32.ShowWindow(hwnd, SW_MINIMIZE)
+                log.info("Minimized window '{name}' via ctypes", name=matched)
+                return SkillResult.ok(
+                    f"Minimized '{matched}'.",
+                    data={"hwnd": hwnd, "name": matched},
+                    action_taken="minimize_window",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return SkillResult.fail(f"AppSkill: minimize failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(f"AppSkill: minimize failed: {exc}")
+
+    async def _maximize_window(self, context: SkillContext) -> SkillResult:
+        """
+        Maximize (or restore) an application window.
+
+        BUG 3 FIX: Previously there was no maximize action.
+        Uses SW_MAXIMIZE to maximize or SW_RESTORE if already maximized.
+        """
+        name: str = context.get("name", "")
+        if not name:
+            return SkillResult.fail(
+                "AppSkill: 'name' parameter is required for maximize_window.",
+                non_retryable=True,
+            )
+
+        hwnd, matched = await asyncio.to_thread(self._find_window_by_name, name)
+        if not hwnd:
+            return SkillResult.fail(
+                f"AppSkill: no visible window found for '{name}'. "
+                "The application may not be running or may have no visible window."
+            )
+
+        try:
+            import win32gui  # type: ignore[import-untyped]
+            import win32con  # type: ignore[import-untyped]
+            # SW_MAXIMIZE = 3; SW_RESTORE = 9 (restores if minimized first)
+            placement = win32gui.GetWindowPlacement(hwnd)
+            if placement[1] == win32con.SW_SHOWMAXIMIZED:
+                win32gui.ShowWindow(hwnd, win32con.SW_RESTORE)
+                verb = "Restored"
+            else:
+                win32gui.ShowWindow(hwnd, win32con.SW_MAXIMIZE)
+                verb = "Maximized"
+            log.info("{verb} window '{name}' (hwnd={hwnd})", verb=verb, name=matched, hwnd=hwnd)
+            return SkillResult.ok(
+                f"{verb} '{matched}'.",
+                data={"hwnd": hwnd, "name": matched},
+                action_taken="maximize_window",
+            )
+        except ImportError:
+            try:
+                import ctypes
+                SW_MAXIMIZE = 3
+                ctypes.windll.user32.ShowWindow(hwnd, SW_MAXIMIZE)
+                log.info("Maximized window '{name}' via ctypes", name=matched)
+                return SkillResult.ok(
+                    f"Maximized '{matched}'.",
+                    data={"hwnd": hwnd, "name": matched},
+                    action_taken="maximize_window",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return SkillResult.fail(f"AppSkill: maximize failed: {exc}")
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(f"AppSkill: maximize failed: {exc}")
 
     # ── Internal helpers ──────────────────────────────────────────────────
 

@@ -26,12 +26,13 @@ Model sizes:
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, AsyncGenerator
 
 import numpy as np
 
 from spidy.logging.logger import get_logger
 from spidy.perception.voice.stt.base import SpeechRecognizer, TranscriptResult
+from spidy.voice.events import VoicePartialTranscriptEvent
 
 if TYPE_CHECKING:
     from faster_whisper import WhisperModel as FWModel
@@ -72,6 +73,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         vad_filter: bool = True,
         vad_threshold: float = 0.5,
         model_dir: str | None = None,
+        initial_prompt: str | None = None,
     ) -> None:
         self._model_size = model_size
         self._requested_device = device
@@ -80,6 +82,17 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         self._vad_filter = vad_filter
         self._vad_threshold = vad_threshold
         self._model_dir = model_dir
+        # Issue 3 fix: initial_prompt primes Whisper with command vocabulary.
+        # Without this, Whisper's language model picks the most probable words
+        # from its full vocabulary — 'Notepad' becomes 'not bad', 'Edge' becomes
+        # 'the edge of my body'. A prompt biases the decoder toward these terms.
+        # Default covers the most common Windows app/command names.
+        self._initial_prompt: str = initial_prompt or (
+            "Open Notepad. Open Chrome. Open Edge. Open File Explorer. "
+            "Open Settings. Open Calculator. Open Paint. Open Teams. "
+            "Open Spotify. Open Discord. Close this. Minimize. Maximize. "
+            "Search for. Play music. Volume up. Volume down."
+        )
         self._model: "FWModel | None" = None
         self._resolved_device: str = "cpu"
         self._resolved_compute_type: str = "int8"
@@ -190,12 +203,123 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             log.error("Transcription failed: {exc}", exc=exc)
             return TranscriptResult(text="", is_empty=True)
 
+    async def transcribe_streaming(
+        self,
+        audio_data: np.ndarray,
+        bus=None,
+        session_id: str = "",
+    ) -> AsyncGenerator[TranscriptResult, None]:
+        """
+        Stream partial transcription results using faster-whisper's
+        segment generator (Milestone 14).
+
+        Yields each segment as it completes, then a final merged result.
+        Publishes VoicePartialTranscriptEvent to the bus for each segment
+        if ``bus`` is provided.
+
+        Parameters
+        ----------
+        audio_data:
+            Float32 audio at 16kHz mono.
+        bus:
+            Optional EventBus for publishing partial events.
+        session_id:
+            Session ID passed into partial events.
+        """
+        if self._model is None:
+            log.error("transcribe_streaming() called before load().")
+            yield TranscriptResult(text="", is_empty=True)
+            return
+
+        duration = len(audio_data) / _SAMPLE_RATE
+        accumulated = []
+
+        try:
+            segments, info = await asyncio.to_thread(
+                lambda: self._model.transcribe(
+                    audio_data,
+                    language=self._language,
+                    vad_filter=self._vad_filter,
+                    vad_parameters={"threshold": self._vad_threshold},
+                    beam_size=5,
+                    best_of=5,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                )
+            )
+
+            # Iterate segments from the generator
+            def _next_segment():
+                try:
+                    return next(iter([]))
+                except StopIteration:
+                    return None
+
+            # Consume the segment generator in a thread-safe way
+            segment_list = await asyncio.to_thread(list, segments)
+            detected_lang = getattr(info, "language", self._language or "en")
+
+            for segment in segment_list:
+                seg_text = segment.text.strip()
+                if not seg_text:
+                    continue
+
+                accumulated.append(seg_text)
+                partial_text = " ".join(accumulated)
+
+                partial_result = TranscriptResult(
+                    text=partial_text,
+                    language=detected_lang,
+                    duration_seconds=duration,
+                    is_partial=True,
+                )
+
+                # Publish partial event to bus if available
+                if bus is not None:
+                    try:
+                        await bus.publish(VoicePartialTranscriptEvent(
+                            text=partial_text,
+                            is_final=False,
+                        ))
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                yield partial_result
+
+            # Yield final result
+            full_text = " ".join(accumulated).strip()
+            final_result = TranscriptResult(
+                text=full_text,
+                confidence=1.0,
+                language=detected_lang,
+                duration_seconds=duration,
+                is_empty=not bool(full_text),
+                is_partial=False,
+            )
+
+            if bus is not None:
+                try:
+                    await bus.publish(VoicePartialTranscriptEvent(
+                        text=full_text,
+                        is_final=True,
+                    ))
+                except Exception:  # noqa: BLE001
+                    pass
+
+            yield final_result
+
+        except Exception as exc:  # noqa: BLE001
+            log.error("Streaming transcription failed: {exc}", exc=exc)
+            yield TranscriptResult(text="", is_empty=True)
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _transcribe_sync(self, audio_data: np.ndarray) -> TranscriptResult:
         """
         Synchronous transcription — runs in thread pool via asyncio.to_thread.
         """
+        from spidy.voice.transcript_guard import SegmentQualitySignals
+
         duration = len(audio_data) / _SAMPLE_RATE
 
         # faster-whisper transcribe() returns (segments_generator, info)
@@ -203,17 +327,42 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             audio_data,
             language=self._language,
             vad_filter=self._vad_filter,
-            vad_parameters={"threshold": self._vad_threshold},
+            # Fix 3C: VAD threshold lowered 0.5 → 0.3 (less aggressive speech gate).
+            # At 0.5, Silero frequently truncates short commands like 'Open Notepad'
+            # because the trailing phonemes of a 2-word command fall below the gate.
+            # min_speech_duration_ms=250 prevents Silero from dropping segments
+            # shorter than 250ms (a single syllable) which Whisper would then skip.
+            vad_parameters={
+                "threshold": 0.3,
+                "min_speech_duration_ms": 250,
+            },
             beam_size=5,
             best_of=5,
-            temperature=0.0,    # greedy — more consistent
+            # Fix 3D: temperature fallback chain instead of pure greedy (0.0).
+            # With temperature=0.0, Whisper commits to the highest-probability token
+            # with no fallback. For short/noisy audio this locks in wrong words
+            # ('not bad' instead of 'Notepad'). Passing a list enables Whisper's
+            # internal fallback: if temperature=0.0 produces a result with low
+            # confidence (high compression ratio or high no_speech_prob), it retries
+            # at 0.2, then 0.4. This matches OpenAI's production API behaviour.
+            temperature=[0.0, 0.2, 0.4],
             condition_on_previous_text=False,
+            initial_prompt=self._initial_prompt,
+            no_speech_threshold=0.6,
         )
 
-        # Consume generator and join segments
+        # Consume generator, join segments, and collect quality signals
         text_parts: list[str] = []
+        quality_signals: list[SegmentQualitySignals] = []
         for segment in segments:
             text_parts.append(segment.text)
+            # Collect segment-level quality metadata for TranscriptQualityGuard.
+            # These attributes are always present on faster-whisper segment objects.
+            quality_signals.append(SegmentQualitySignals(
+                no_speech_prob=getattr(segment, "no_speech_prob", 0.0),
+                avg_logprob=getattr(segment, "avg_logprob", 0.0),
+                compression_ratio=getattr(segment, "compression_ratio", 1.0),
+            ))
 
         full_text = " ".join(text_parts).strip()
         detected_lang = getattr(info, "language", self._language or "en")
@@ -225,6 +374,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                 language=detected_lang,
                 duration_seconds=duration,
                 is_empty=True,
+                segment_signals=quality_signals or None,
             )
 
         log.debug(
@@ -239,6 +389,7 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             language=detected_lang,
             duration_seconds=duration,
             is_empty=False,
+            segment_signals=quality_signals or None,
         )
 
     # ── Properties ────────────────────────────────────────────────────────

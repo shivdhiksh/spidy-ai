@@ -70,6 +70,16 @@ _FALLBACK_RESPONSE = (
 _DEFAULT_MAX_RETRIES = 2
 _RETRY_BASE_DELAY = 0.5  # seconds
 
+# Exception types that are deterministic programming errors — retrying them
+# can never succeed.  We detect these in _run_skill() and set
+# ToolResult.non_retryable = True so the retry loop exits immediately.
+_NON_RETRYABLE_EXCEPTIONS: tuple[type[BaseException], ...] = (
+    AttributeError,
+    TypeError,
+    ImportError,
+    NotImplementedError,
+)
+
 
 # Actions that have no skill implementation yet but deserve a clear, honest
 # explanation rather than the generic "I don't have a skill for that" message.
@@ -303,6 +313,18 @@ class ToolRouter:
             if result.success:
                 return result
 
+            # P1-1: Non-retryable errors (AttributeError, TypeError, etc.) are
+            # deterministic programming bugs — retrying them wastes time and
+            # always fails. Exit the retry loop immediately.
+            if result.non_retryable:
+                log.warning(
+                    "Skill '{action}' raised a non-retryable error — "
+                    "skipping retries: {err}",
+                    action=step.action,
+                    err=result.error,
+                )
+                return result
+
             last_result = result
 
             if attempt < self._max_retries:
@@ -363,6 +385,9 @@ class ToolRouter:
                 action=step.action,
                 ok=skill_result.success,
             )
+            # P2: propagate structured non_retryable flag from the skill result.
+            # Skills set non_retryable=True for deterministic validation failures
+            # (e.g. a required parameter is absent) so the retry loop exits immediately.
             return ToolResult(
                 success=skill_result.success,
                 message=skill_result.message,
@@ -370,6 +395,22 @@ class ToolRouter:
                 data=skill_result.data,
                 error=str(skill_result.error) if skill_result.error else "",
                 step_type="skill",
+                non_retryable=skill_result.non_retryable,
+            )
+        except _NON_RETRYABLE_EXCEPTIONS as exc:  # P1-1: deterministic errors — do NOT retry
+            log.error(
+                "Skill '{name}' raised a non-retryable {etype}: {exc}",
+                name=skill.name,
+                etype=type(exc).__name__,
+                exc=exc,
+            )
+            return ToolResult(
+                success=False,
+                message="Something went wrong while running that skill.",
+                action=step.action,
+                error=str(exc),
+                step_type="skill",
+                non_retryable=True,
             )
         except Exception as exc:  # noqa: BLE001
             log.error(

@@ -11,6 +11,22 @@ from pathlib import Path
 import pytest
 import yaml
 
+# ─── Load .env (stdlib-only, no python-dotenv required) ───────────────────────
+# Reads KEY=VALUE lines from the project root .env file and sets each variable
+# via os.environ.setdefault() so that shell-level variables always take
+# precedence.  Keys are never printed, logged, or compared by value here.
+# This allows `NVIDIA_API_KEY` (and any other future keys) to be picked up
+# automatically on every `pytest` run without any extra shell setup.
+_ENV_FILE = Path(__file__).parent.parent / ".env"
+if _ENV_FILE.exists():
+    for _line in _ENV_FILE.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
+    del _line, _k, _v  # don't leak loop vars into module namespace
+del _ENV_FILE
+
 # ─── Qt offscreen platform ────────────────────────────────────────────────────
 # Must be set before ANY PySide6 / Qt import anywhere in the test process.
 # Placing it here (conftest.py at the tests/ root) guarantees it is set

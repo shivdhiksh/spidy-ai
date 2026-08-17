@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     from spidy.plugins.manager import PluginManager
     from spidy.ui.app import SpidyApp
     from spidy.ui.brain_bridge import BrainUIBridge
+    from spidy.voice.continuous import ContinuousVoiceController
 
 log = get_logger(__name__)
 
@@ -111,6 +112,7 @@ class SpidyCore:
         self._bus: EventBus | None = None
         self._device_mgr: DeviceManager | None = None
         self._voice_engine: VoiceEngine | None = None
+        self._voice_controller: "ContinuousVoiceController | None" = None
         self._observer_mgr: ObserverManager | None = None
         self._brain: Brain | None = None
         self._memory_mgr: MemoryManager | None = None
@@ -409,18 +411,43 @@ class SpidyCore:
         loop = asyncio.get_running_loop()
 
         # ── Start VoiceEngine (skipped in text mode) ──────────────────────
-        if not self._text_mode and self._settings and self._settings.voice.wake_word.enabled:
+        # [DIAG-1] Log whether wake-word is enabled before attempting to start.
+        _wake_enabled = (
+            not self._text_mode
+            and self._settings is not None
+            and self._settings.voice.wake_word.enabled
+        )
+        log.info(
+            "[VOICE DIAG-1] wake_word.enabled={v} | text_mode={t}",
+            v=getattr(getattr(getattr(self._settings, 'voice', None), 'wake_word', None), 'enabled', None)
+              if self._settings else None,
+            t=self._text_mode,
+        )
+        if _wake_enabled:
+            # [DIAG-2] Entering VoiceEngine startup block.
+            log.info("[VOICE DIAG-2] Entering VoiceEngine startup block.")
             try:
                 from spidy.perception.voice.factory import VoiceEngineFactory
                 self._voice_engine = VoiceEngineFactory.build(
                     self._settings, self._bus
                 )
+                # [DIAG-3] VoiceEngine object created successfully.
+                log.info(
+                    "[VOICE DIAG-3] VoiceEngine created: {cls}",
+                    cls=type(self._voice_engine).__name__,
+                )
                 await self._voice_engine.start()
+                # [DIAG-4] VoiceEngine.start() awaited successfully.
+                log.info(
+                    "[VOICE DIAG-4] VoiceEngine.start() completed. "
+                    "State={s}",
+                    s=self._voice_engine.state.name,
+                )
                 log.info("VoiceEngine running. Say the wake word to activate Spidy.")
             except Exception as exc:
-                log.warning(
-                    "VoiceEngine failed to start (non-fatal): {exc}. "
-                    "Running without voice.",
+                log.exception(
+                    "[VOICE DIAG] VoiceEngine failed to start — full traceback below. "
+                    "exc={exc}. Running without voice.",
                     exc=exc,
                 )
                 self._voice_engine = None
@@ -518,6 +545,53 @@ class SpidyCore:
                         "Brain will still handle single-step commands.",
                         exc=exc,
                     )
+
+                # ── Milestone 14: ContinuousVoiceController ───────────────
+                if self._voice_engine is not None and self._settings:
+                    # [DIAG-7] Entering ContinuousVoiceController construction block.
+                    log.info(
+                        "[VOICE DIAG-7] Building ContinuousVoiceController "
+                        "(voice_engine={ve}).",
+                        ve=type(self._voice_engine).__name__,
+                    )
+                    try:
+                        from spidy.perception.voice.factory import VoiceEngineFactory
+                        self._voice_controller = VoiceEngineFactory.build_controller(
+                            voice_engine=self._voice_engine,
+                            brain=self._brain,
+                            bus=self._bus,
+                            config=self._settings,
+                        )
+                        # [DIAG-7b] Controller object created.
+                        log.info(
+                            "[VOICE DIAG-7b] ContinuousVoiceController constructed: {cls}",
+                            cls=type(self._voice_controller).__name__,
+                        )
+                        await self._voice_controller.start()
+                        # [DIAG-8] VoiceController.start() awaited successfully.
+                        log.info(
+                            "[VOICE DIAG-8] ContinuousVoiceController.start() completed. "
+                            "is_running={r}",
+                            r=self._voice_controller.is_running,
+                        )
+                        # [DIAG-9] Report whether the wake-word listener loop is active.
+                        log.info(
+                            "[VOICE DIAG-9] Wake-word listener loop active: {active} "
+                            "(capture_engine running: {cap})",
+                            active=self._voice_engine.state.name != "STOPPED",
+                            cap=self._voice_engine._capture_engine.is_running,  # noqa: SLF001
+                        )
+                        log.info(
+                            "ContinuousVoiceController started. "
+                            "Voice companion is active."
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "ContinuousVoiceController failed to start (non-fatal): "
+                            "{exc}. Running in basic voice mode.",
+                            exc=exc,
+                        )
+                        self._voice_controller = None
 
                 if self._settings.plugins.enabled:
                     try:
@@ -723,6 +797,13 @@ class SpidyCore:
         # Stop Brain↔UI bridge first (it holds brain.* subscriptions)
         if self._brain_ui_bridge is not None:
             self._brain_ui_bridge.stop()
+
+        # ── Stop M14 ContinuousVoiceController ───────────────────────────
+        if self._voice_controller is not None:
+            try:
+                await self._voice_controller.stop()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("VoiceController stop error (non-fatal): {exc}", exc=exc)
 
         # Stop Brain
         if self._brain is not None:

@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from spidy.logging.logger import get_logger
@@ -50,6 +52,51 @@ if TYPE_CHECKING:
     from spidy.core.event_bus import EventBus
 
 log = get_logger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Destructive action confirmation gate
+# ---------------------------------------------------------------------------
+
+# Actions in this set require explicit user confirmation before execution.
+# The first call returns a prompt; a follow-up "yes" within TTL seconds executes.
+_DESTRUCTIVE_ACTIONS: frozenset[str] = frozenset({
+    "shutdown_system",
+    "restart_system",
+    "sleep_system",
+})
+
+# How long (seconds) a pending confirmation remains valid.
+_CONFIRMATION_TTL: float = 30.0
+
+
+@dataclass
+class _ConfirmationState:
+    """
+    Pending destructive-action confirmation for one session.
+
+    Fields
+    ------
+    action:
+        The action awaiting confirmation (e.g. "shutdown_system").
+    context_params:
+        The original SkillContext params so the action can be re-executed
+        with the same parameters after confirmation.
+    created_at:
+        Monotonic timestamp when the confirmation was requested.
+    ttl:
+        Seconds until the confirmation expires (default 30).
+    """
+    action: str
+    context_params: dict = field(default_factory=dict)
+    created_at: float = field(default_factory=time.monotonic)
+    ttl: float = _CONFIRMATION_TTL
+
+    def is_expired(self) -> bool:
+        return (time.monotonic() - self.created_at) > self.ttl
+
+    def seconds_remaining(self) -> float:
+        return max(0.0, self.ttl - (time.monotonic() - self.created_at))
 
 
 class SystemControlSkill(BaseSkill):
@@ -71,6 +118,9 @@ class SystemControlSkill(BaseSkill):
 
     def __init__(self, bus: "EventBus | None" = None) -> None:
         self._bus = bus
+        # Keyed by session_id; holds pending destructive confirmations.
+        # Purely in-memory; never persisted or influenced by LLM output.
+        self._pending_confirmations: dict[str, _ConfirmationState] = {}
 
     # ── Capabilities ──────────────────────────────────────────────────────
 
@@ -176,23 +226,103 @@ class SystemControlSkill(BaseSkill):
     # ── Dispatch ──────────────────────────────────────────────────────────
 
     async def execute(self, action: str, context: SkillContext) -> SkillResult:
+        # ── Non-destructive actions: dispatch immediately ──────────────────
         if action == "set_volume":
             return await self._set_volume(context)
         if action == "set_brightness":
             return await self._set_brightness(context)
         if action == "lock_workstation":
             return await self._lock_workstation(context)
-        if action == "sleep_system":
-            return await self._sleep_system(context)
-        if action == "shutdown_system":
-            return await self._shutdown_system(context)
-        if action == "restart_system":
-            return await self._restart_system(context)
         if action == "empty_recycle_bin":
             return await self._empty_recycle_bin(context)
         if action == "show_desktop":
             return await self._show_desktop(context)
+
+        # ── Destructive actions: require 2-step confirmation ──────────────
+        # Safety design:
+        #  - First call   → store pending confirmation, return prompt text.
+        #  - Second call  → if confirmation is pending and not expired, execute.
+        #  - Expired      → clear state, return timeout message.
+        #
+        # The confirmation state is keyed by session_id and is purely
+        # in-memory and deterministic — it cannot be bypassed by LLM output.
+        if action in _DESTRUCTIVE_ACTIONS:
+            return await self._execute_destructive(action, context)
+
         return SkillResult.fail(f"SystemControlSkill: unknown action '{action}'.")
+
+    async def _execute_destructive(
+        self, action: str, context: SkillContext
+    ) -> SkillResult:
+        """
+        Two-step confirmation gate for destructive OS actions.
+
+        First call:  stores pending state and returns a Yes/No prompt.
+        Second call: if within TTL, executes the action.
+        Expired:     clears state and returns a timeout message.
+        """
+        sid = context.session_id or "__default__"
+        pending = self._pending_confirmations.get(sid)
+
+        if pending is not None and pending.action == action:
+            # We have a pending confirmation for this exact action in this session
+            if pending.is_expired():
+                # TTL expired — cancel and ask again
+                del self._pending_confirmations[sid]
+                log.info(
+                    "SystemControlSkill: confirmation for '{action}' expired "
+                    "(session={sid}).",
+                    action=action,
+                    sid=sid,
+                )
+                return SkillResult.fail(
+                    "The confirmation timed out. Please try again if you still "
+                    f"want to {action.replace('_', ' ')}."
+                )
+
+            # Confirmed! Execute the action now.
+            del self._pending_confirmations[sid]
+            log.info(
+                "SystemControlSkill: confirmation received for '{action}' "
+                "(session={sid}) — executing.",
+                action=action,
+                sid=sid,
+            )
+            if action == "sleep_system":
+                return await self._sleep_system(context)
+            if action == "shutdown_system":
+                return await self._shutdown_system(context)
+            if action == "restart_system":
+                return await self._restart_system(context)
+
+        # No pending confirmation (or different action) — ask for confirmation
+        action_label = {
+            "shutdown_system": "shut down the computer",
+            "restart_system": "restart the computer",
+            "sleep_system": "put the computer to sleep",
+        }.get(action, action.replace("_", " "))
+
+        self._pending_confirmations[sid] = _ConfirmationState(
+            action=action,
+            context_params=dict(context.params or {}),
+        )
+        log.info(
+            "SystemControlSkill: requesting confirmation for '{action}' "
+            "(session={sid}, ttl={ttl}s).",
+            action=action,
+            sid=sid,
+            ttl=int(_CONFIRMATION_TTL),
+        )
+        return SkillResult.ok(
+            f"Are you sure you want me to {action_label}? "
+            f"Say yes to confirm (you have {int(_CONFIRMATION_TTL)} seconds).",
+            data={"awaiting_confirmation": True, "action": action},
+            action_taken="confirmation_requested",
+        )
+
+    def clear_confirmation(self, session_id: str) -> None:
+        """Clear any pending confirmation for the given session (e.g. on session end)."""
+        self._pending_confirmations.pop(session_id, None)
 
     # ── Actions ───────────────────────────────────────────────────────────
 

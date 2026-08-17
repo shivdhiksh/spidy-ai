@@ -30,6 +30,7 @@ from loguru import logger
 
 # ─── Internal state ──────────────────────────────────────────────────────────
 _configured = False
+_bootstrapped = False   # True only after bootstrap (not full configure)
 _log_dir: Path = Path(os.environ.get("APPDATA", ".")) / "Spidy" / "logs"
 
 
@@ -78,8 +79,11 @@ def configure(
         Whether to show local variable values in tracebacks. Disable in
         production (may expose sensitive data).
     """
-    global _configured, _log_dir
+    global _configured, _bootstrapped, _log_dir
 
+    # BUG 5 FIX: Only skip if we already ran a FULL configure() — not just
+    # a bootstrap.  The bootstrap sets _bootstrapped=True but leaves
+    # _configured=False so the real call from SpidyCore always wins.
     if _configured:
         return
 
@@ -89,7 +93,7 @@ def configure(
     _log_dir.mkdir(parents=True, exist_ok=True)
     log_file = _log_dir / "spidy_{time:YYYY-MM-DD}.log"
 
-    # Remove any default loguru handlers
+    # Remove ALL existing handlers (including any bootstrap handler)
     logger.remove()
 
     # ── Stderr sink (coloured, human-readable) ────────────────────────────
@@ -117,11 +121,45 @@ def configure(
     )
 
     _configured = True
+    _bootstrapped = True
     logger.bind(module="spidy.logging").info(
         "Logger configured | level={level} | log_dir={dir}",
         level=level,
         dir=str(_log_dir),
     )
+
+
+def _bootstrap() -> None:
+    """
+    Minimal bootstrap logger for import-time use only.
+
+    BUG 5 FIX: Uses enqueue=False to avoid spawning background threads
+    before the asyncio event loop starts.  _configured is left False so
+    the real configure() call from SpidyCore always overrides this.
+    """
+    global _bootstrapped
+    if _bootstrapped:
+        return
+    # Remove the default loguru stderr handler (handler #0)
+    try:
+        logger.remove()
+    except Exception:  # noqa: BLE001
+        pass
+    logger.add(
+        sys.stderr,
+        level="INFO",
+        format=(
+            "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+            "{level:<8} | "
+            "{extra[module]:<30} | "
+            "{message}"
+        ),
+        colorize=True,
+        backtrace=True,
+        diagnose=False,
+        enqueue=False,  # No background thread during early import
+    )
+    _bootstrapped = True
 
 
 def get_logger(module_name: str):
@@ -147,9 +185,12 @@ def get_logger(module_name: str):
         log = get_logger(__name__)
         log.info("Ready")
     """
-    if not _configured:
-        # Bootstrap logging with defaults if called before configure().
-        # This ensures modules that log at import time still work.
-        configure()
+    if not _bootstrapped:
+        # BUG 5 FIX: Use lightweight bootstrap (no enqueue, no file sink)
+        # so early import-time log calls don't trigger background threads
+        # before the asyncio loop is running.  The real configure() from
+        # SpidyCore will replace these handlers with the full setup.
+        _bootstrap()
 
     return logger.bind(module=module_name)
+

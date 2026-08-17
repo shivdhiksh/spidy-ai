@@ -3,6 +3,8 @@
 from spidy.ui.events import (
     UIMicButtonClickedEvent,
     UIClosedEvent,
+    UIConfirmationDeniedEvent,
+    UIConfirmationGrantedEvent,
     UIHideEvent,
     UIHotkeyPressedEvent,
     UIMessageEvent,
@@ -35,6 +37,8 @@ __all__ = [
     "UIHotkeyPressedEvent",
     "UIMicButtonClickedEvent",
     "UISettingsOpenedEvent",
+    "UIConfirmationGrantedEvent",
+    "UIConfirmationDeniedEvent",
     # State
     "UIState",
     "UIStateMachine",

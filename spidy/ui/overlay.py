@@ -1,112 +1,83 @@
 """
-OverlayWindow — Spidy's glassmorphism desktop companion
-========================================================
+overlay.py -- Spidy HUD: Full-screen futuristic desktop interface (M17.2)
+=========================================================================
+Completely replaces the 800x600 split-column layout.
 
 Architecture
-------------
-OverlayWindow is a frameless, always-on-top QWidget that floats
-over all other windows.  It is the only module that directly
-creates Qt widgets; all other modules interact with it through:
+-----------
+- OverlayWindow          top-level frameless window (responsive HUD)
+  ├─ _HUDHeader          top bar: date/time | Spidy status | sys status
+  ├─ _HUDLeftPanel       system telemetry (CPU/RAM/GPU/etc.)
+  ├─ SpidyCoreWidget     LARGE central AI core (the primary focus)
+  ├─ _HUDRightPanel      task console + notifications
+  ├─ HUDChatOverlay      floating conversation cards (over center)
+  ├─ HUDConfirmation     amber confirmation overlay (over center)
+  └─ _HUDFooter          [controls] | voice visualizer | status
 
-    1.  UISignalBridge signals  (thread-safe Qt→Qt)
-    2.  EventBus events (via SpidyApp)
+The class surface (public methods/signals) is kept compatible with the
+previous OverlayWindow so that app.py needs minimal changes.
+UISignalBridge is kept in this module for backward compatibility.
 
-Layout
-------
-    ┌─────────────────────────────────────────┐
-    │  HEADER   [⚡ Spidy]  [state]  [− ×]    │  ← Draggable
-    ├─────────────────────────────────────────┤
-    │                                          │
-    │  CHAT VIEW  (scrollable bubbles)         │
-    │                                          │
-    ├─────────────────────────────────────────┤
-    │  WAVEFORM  ████ ████ ████ (listening)   │  ← Hidden when idle
-    │  INDICATOR ●  ●  ●   (thinking/speaking)│
-    ├─────────────────────────────────────────┤
-    │  BOTTOM   [🎤 MicButton]  [state label] │
-    └─────────────────────────────────────────┘
-
-State → widget visibility mapping
-----------------------------------
-State         Waveform   Indicator   MicState   Label
------------   --------   ---------   --------   --------
-IDLE          hidden     hidden      idle       ""
-WAKE_READY    hidden     hidden      idle       "Say 'Hey Spidy'…"
-LISTENING     visible    hidden      listening  "Listening…"
-THINKING      hidden     visible     thinking   "Thinking…"
-SPEAKING      hidden     visible     speaking   "Speaking…"
-ERROR         hidden     hidden      disabled   "Error"
-
-Glassmorphism
--------------
-Achieved via:
-  - Qt.WA_TranslucentBackground on the window
-  - Custom paintEvent drawing a rounded-rect with semi-transparent fill
-  - Windows acrylic blur via SetWindowCompositionAttribute (optional,
-    falls back gracefully on non-Windows or unsupported builds)
-
-Wake-word readiness
--------------------
-show_for_wake_word() is a no-arg slot ready to be connected to the
-VoiceEngine's wake-word detection signal in a future milestone.
-When called it will slide the overlay in from the configured edge.
+UISignalBridge
+--------------
+Thread-safe: the async EventBus calls request_* from background threads.
+Qt signals marshal the calls onto the Qt main thread.
 """
 
 from __future__ import annotations
 
+import ctypes
+import datetime
+import logging
 import math
+import platform
 import sys
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import (
-    QEasingCurve, QObject, QPoint, QPropertyAnimation, QRect,
-    Qt, QTimer, Signal, Slot,
+    QEasingCurve, QPointF, QPropertyAnimation, QRectF, QSequentialAnimationGroup,
+    Qt, QTimer, Signal,
 )
 from PySide6.QtGui import (
-    QBrush, QColor, QFont, QGuiApplication,
-    QPainter, QPainterPath, QPen,
-    QMouseEvent, QCloseEvent,
+    QBrush, QColor, QFont, QGuiApplication, QLinearGradient,
+    QPainter, QPainterPath, QPen, QPixmap,
 )
 from PySide6.QtWidgets import (
-    QFrame, QGraphicsOpacityEffect,
-    QHBoxLayout, QLabel, QPushButton, QSizePolicy,
+    QHBoxLayout, QPushButton, QSizePolicy,
     QVBoxLayout, QWidget,
 )
+
+from spidy.ui.widgets.hud_chat        import HUDChatOverlay
+from spidy.ui.widgets.hud_confirmation import HUDConfirmation
+from spidy.ui.widgets.hud_core        import SpidyCoreWidget
+from spidy.ui.widgets.hud_task_console import HUDTaskConsole, TaskStep
+from spidy.ui.widgets.hud_telemetry   import TelemetryPanel
+from spidy.ui.widgets.hud_voice_bar   import HUDVoiceBar
 
 if TYPE_CHECKING:
     from spidy.ui.themes.base import Theme
 
-from spidy.ui.notifications import NotificationManager
-from spidy.ui.state import UIState
-from spidy.ui.widgets.chat_view import ChatMessage, ChatView
-from spidy.ui.widgets.mic_button import MicrophoneButton
-from spidy.ui.widgets.speaking_indicator import SpeakingIndicator
-from spidy.ui.widgets.waveform import WaveformWidget
-
-# ─── Constants ───────────────────────────────────────────────────────────────
-
-_FADE_MS = 250
-_SLIDE_MS = 320
-_EDGE_GLOW_MS = 40   # Edge glow animation timer
+log = logging.getLogger(__name__)
 
 
-# ─── UISignalBridge ──────────────────────────────────────────────────────────
+# ── UISignalBridge ─────────────────────────────────────────────────────────
 
-class UISignalBridge(QObject):
+class UISignalBridge(QWidget):
     """
-    Thread-safe bridge between async EventBus handlers and Qt slots.
+    Thread-safe bridge from async EventBus → Qt main thread.
 
-    When an EventBus subscriber (running in asyncio or a background thread)
-    needs to update the Qt UI, it calls methods on this bridge.
-    PySide6 automatically queues cross-thread signal emissions, making
-    the bridge safe to use from any thread.
+    All ``request_*`` methods are safe to call from any thread.
     """
 
-    state_change_requested = Signal(str)       # UIState value string
-    message_received = Signal(str, str)        # role, text
-    notification_requested = Signal(str, str, str, int)  # title, body, level, dur_ms
-    waveform_data_received = Signal(list)      # list[float]
-    theme_change_requested = Signal(str)       # theme name
+    # Original signals (kept for backward compat with app.py)
+    state_change_requested   = Signal(str)
+    message_received         = Signal(str, str)       # role, text
+    notification_requested   = Signal(str, str, str)  # title, msg, level
+    waveform_data_received   = Signal(object)         # list[float]
+    theme_change_requested   = Signal(object)         # Theme
+    task_progress_received   = Signal(str, object)    # goal, steps
+    confirmation_show        = Signal(str, str, str, str)  # tid, gid, desc, prompt
+    confirmation_hide        = Signal()
 
     def request_state_change(self, state: str) -> None:
         self.state_change_requested.emit(state)
@@ -114,503 +85,648 @@ class UISignalBridge(QObject):
     def request_message(self, role: str, text: str) -> None:
         self.message_received.emit(role, text)
 
-    def request_notification(
-        self, title: str, body: str, level: str = "info", duration_ms: int = 4000
-    ) -> None:
-        self.notification_requested.emit(title, body, level, duration_ms)
+    def request_notification(self, title: str, msg: str, level: str = "info") -> None:
+        self.notification_requested.emit(title, msg, level)
 
     def request_waveform(self, amplitudes: list) -> None:
         self.waveform_data_received.emit(amplitudes)
 
-    def request_theme_change(self, name: str) -> None:
-        self.theme_change_requested.emit(name)
+    def request_task_progress(self, goal: str, steps: object) -> None:
+        self.task_progress_received.emit(goal, steps)
+
+    def request_confirmation_show(
+        self, task_id: str, goal_id: str, description: str, prompt: str
+    ) -> None:
+        self.confirmation_show.emit(task_id, goal_id, description, prompt)
+
+    def request_confirmation_hide(self) -> None:
+        self.confirmation_hide.emit()
 
 
-# ─── HeaderBar ───────────────────────────────────────────────────────────────
+# ── HUD sub-panels ─────────────────────────────────────────────────────────
 
-class _HeaderBar(QWidget):
-    """Draggable header bar with title, state indicator, and window controls."""
+class _HUDInfoWidget(QWidget):
+    """Tiny glass HUD module with title + value lines."""
 
-    minimize_clicked = Signal()
-    close_clicked = Signal()
-
-    def __init__(self, theme: "Theme", parent: QWidget | None = None) -> None:
+    def __init__(self, title: str, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setFixedHeight(48)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._drag_pos: QPoint | None = None
+        self._title = title
+        self._lines: list[tuple[str, str]] = []   # (label, value)
+        self._c_primary  = QColor("#00E5FF")
+        self._c_dim      = QColor("#004D5E")
+        self._c_text     = QColor("#B2EBF2")
+        self._c_bg       = QColor("#0A1929")
 
-        layout = QHBoxLayout(self)
-        layout.setContentsMargins(16, 0, 12, 0)
-        layout.setSpacing(8)
-
-        # Logo + title
-        logo = QLabel("⚡")
-        logo.setFont(QFont(theme.fonts.family_primary, 16))
-        layout.addWidget(logo)
-
-        self._title = QLabel("Spidy")
-        self._title.setFont(
-            QFont(theme.fonts.family_primary, theme.fonts.size_lg, QFont.Weight.DemiBold)
-        )
-        self._title.setStyleSheet(f"color: {theme.colors.text_primary};")
-        layout.addWidget(self._title)
-
-        layout.addStretch()
-
-        # State label
-        self._state_label = QLabel("")
-        self._state_label.setFont(
-            QFont(theme.fonts.family_primary, theme.fonts.size_sm)
-        )
-        self._state_label.setStyleSheet(f"color: {theme.colors.text_muted};")
-        layout.addWidget(self._state_label)
-
-        # Window controls
-        for symbol, sig in [("−", self.minimize_clicked), ("×", self.close_clicked)]:
-            btn = QPushButton(symbol)
-            btn.setFixedSize(28, 28)
-            btn.clicked.connect(sig.emit)
-            btn.setStyleSheet(
-                f"QPushButton {{"
-                f"  background: transparent;"
-                f"  color: {theme.colors.text_muted};"
-                f"  border: none;"
-                f"  border-radius: 6px;"
-                f"  font-size: 16px;"
-                f"}}"
-                f"QPushButton:hover {{"
-                f"  background: {theme.colors.bg_tertiary};"
-                f"  color: {theme.colors.text_primary};"
-                f"}}"
-            )
-            layout.addWidget(btn)
-
-    def set_state_label(self, text: str) -> None:
-        self._state_label.setText(text)
+    def set_lines(self, lines: list[tuple[str, str]]) -> None:
+        self._lines = list(lines)
+        self.update()
 
     def apply_theme(self, theme: "Theme") -> None:
-        self._title.setStyleSheet(f"color: {theme.colors.text_primary};")
-        self._state_label.setStyleSheet(f"color: {theme.colors.text_muted};")
+        c = theme.colors
+        self._c_primary  = QColor(c.hud_primary)
+        self._c_dim      = QColor(c.hud_dim)
+        self._c_text     = QColor(c.hud_text)
+        self._c_bg       = QColor(c.hud_grid)
+        self.update()
 
-    # Drag to reposition
-    def mousePressEvent(self, event: QMouseEvent) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._drag_pos = event.globalPosition().toPoint() - self.window().frameGeometry().topLeft()
+    def paintEvent(self, event) -> None:
+        p = QPainter(self)
+        if not p.isActive(): return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+        pad = 6
 
-    def mouseMoveEvent(self, event: QMouseEvent) -> None:
-        if self._drag_pos and event.buttons() == Qt.MouseButton.LeftButton:
-            self.window().move(event.globalPosition().toPoint() - self._drag_pos)
+        # Glass bg
+        bg = QColor(self._c_bg)
+        bg.setAlphaF(0.72)
+        border = QColor(self._c_primary)
+        border.setAlphaF(0.35)
+        path = QPainterPath()
+        path.addRoundedRect(QRectF(0, 0, w, h), 5, 5)
+        p.setBrush(QBrush(bg))
+        p.setPen(QPen(border, 0.8))
+        p.drawPath(path)
 
-    def mouseReleaseEvent(self, event: QMouseEvent) -> None:
-        self._drag_pos = None
+        # Title — capped: 7pt min, 10pt max
+        title_col = QColor(self._c_primary)
+        title_col.setAlphaF(0.75)
+        p.setPen(QPen(title_col))
+        font_t = QFont("Consolas", max(7, min(10, int(h * 0.11))), QFont.Weight.Bold)
+        font_t.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
+        p.setFont(font_t)
+        p.drawText(QRectF(pad, pad, w - pad * 2, h * 0.22), Qt.AlignmentFlag.AlignLeft, self._title)
+
+        # Lines
+        if not self._lines:
+            p.end(); return
+        row_h = (h * 0.72) / len(self._lines)
+        y = h * 0.26
+        # Value font — capped: 7pt min, 11pt max
+        font_v = QFont("Consolas", max(7, min(11, int(row_h * 0.45))))
+        p.setFont(font_v)
+        for label, val in self._lines:
+            lbl_col = QColor(self._c_text)
+            lbl_col.setAlphaF(0.55)
+            p.setPen(QPen(lbl_col))
+            p.drawText(QRectF(pad, y, w * 0.52 - pad, row_h), Qt.AlignmentFlag.AlignVCenter, label)
+            val_col = QColor(self._c_primary)
+            val_col.setAlphaF(0.80)
+            p.setPen(QPen(val_col))
+            p.drawText(QRectF(w * 0.52, y, w * 0.46, row_h),
+                       Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight, val)
+            y += row_h
+        p.end()
 
 
-# ─── OverlayWindow ────────────────────────────────────────────────────────────
+class _HUDHeader(QWidget):
+    """Top bar: left datetime | center status | right sys info."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedHeight(52)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 4, 12, 4)
+        layout.setSpacing(8)
+
+        self._tl = _HUDInfoWidget("SPIDY SYSTEM")
+        self._tc = _HUDInfoWidget("SPIDY INTELLIGENCE")
+        self._tr = _HUDInfoWidget("SPIDY NETWORK")
+
+        for w in (self._tl, self._tc, self._tr):
+            layout.addWidget(w, 1)
+
+        self._state_label = self._tc  # kept for test compat
+
+        # Clock timer
+        self._clock = QTimer(self)
+        self._clock.setInterval(1000)
+        self._clock.timeout.connect(self._update_clock)
+        self._clock.start()
+        self._update_clock()
+
+    def set_state(self, state: str) -> None:
+        _label_map = {
+            "idle":      "SLEEPING",
+            "wake_ready":"AWAKE",
+            "listening": "LISTENING",
+            "thinking":  "PROCESSING",
+            "speaking":  "SPEAKING",
+            "working":   "WORKING",
+            "error":     "ERROR",
+        }
+        txt = _label_map.get(state, state.upper())
+        self._tc.set_lines([("STATUS", txt), ("CORE", "ONLINE")])
+
+    def apply_theme(self, theme: "Theme") -> None:
+        for w in (self._tl, self._tc, self._tr):
+            w.apply_theme(theme)
+
+    def _update_clock(self) -> None:
+        now = datetime.datetime.now()
+        self._tl.set_lines([
+            ("DATE", now.strftime("%d %b %Y")),
+            ("TIME", now.strftime("%H:%M:%S")),
+        ])
+        self._tr.set_lines([
+            ("SYS",  "ONLINE"),
+            ("NET",  "ACTIVE"),
+        ])
+
+
+class _HUDLeftPanel(QWidget):
+    """Left side: system telemetry."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        # Width is set dynamically by OverlayWindow._compute_side_widths()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self._tele = TelemetryPanel(["cpu", "ram", "gpu", "vram", "disk"])
+        layout.addWidget(self._tele, 3)
+
+        self._mic_info = _HUDInfoWidget("MIC STATUS")
+        self._mic_info.set_lines([("MIC", "READY"), ("WAKE", "HOT")])
+        layout.addWidget(self._mic_info, 1)
+
+    def apply_theme(self, theme: "Theme") -> None:
+        self._tele.apply_theme(theme)
+        self._mic_info.apply_theme(theme)
+
+    def set_mic_state(self, listening: bool) -> None:
+        self._mic_info.set_lines([
+            ("MIC", "ACTIVE" if listening else "READY"),
+            ("WAKE", "HOT"),
+        ])
+
+
+class _HUDRightPanel(QWidget):
+    """Right side: task console + status widgets."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
+        # Width is set dynamically by OverlayWindow._compute_side_widths()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.setSpacing(6)
+
+        self._agent_info = _HUDInfoWidget("SPIDY AGENT")
+        self._agent_info.set_lines([("STATUS", "IDLE"), ("TASKS", "0")])
+        layout.addWidget(self._agent_info, 1)
+
+        self._task_console = HUDTaskConsole()
+        layout.addWidget(self._task_console, 3)
+
+        self._app_info = _HUDInfoWidget("ACTIVE APP")
+        self._app_info.set_lines([("APP", "—"), ("WIN", "—")])
+        layout.addWidget(self._app_info, 1)
+
+    def apply_theme(self, theme: "Theme") -> None:
+        self._agent_info.apply_theme(theme)
+        self._task_console.apply_theme(theme)
+        self._app_info.apply_theme(theme)
+
+    def show_task_console(self, visible: bool) -> None:
+        self._task_console.setVisible(visible)
+
+    def update_task(self, goal: str, steps: list) -> None:
+        self._task_console.update_progress(goal, steps)
+        self._agent_info.set_lines([("STATUS", "WORKING"), ("GOAL", goal[:18])])
+
+
+class _HUDFooter(QWidget):
+    """Bottom bar: controls | voice visualizer | status."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setFixedHeight(64)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(8, 4, 8, 4)
+        layout.setSpacing(8)
+
+        # Left controls
+        self._ctrl_panel = _HUDInfoWidget("CONTROLS")
+        self._ctrl_panel.set_lines([("HOTKEY", "Ctrl+Space")])
+        self._ctrl_panel.setFixedWidth(130)
+        layout.addWidget(self._ctrl_panel)
+
+        # Voice visualizer (center)
+        self._voice_bar = HUDVoiceBar()
+        layout.addWidget(self._voice_bar, 3)
+
+        # Right status
+        self._status_panel = _HUDInfoWidget("SPIDY MEMORY")
+        self._status_panel.set_lines([("SESSION", "ACTIVE"), ("MEM", "—")])
+        self._status_panel.setFixedWidth(140)
+        layout.addWidget(self._status_panel)
+
+    def apply_theme(self, theme: "Theme") -> None:
+        self._ctrl_panel.apply_theme(theme)
+        self._status_panel.apply_theme(theme)
+        self._voice_bar.apply_theme(theme)
+
+    @property
+    def voice_bar(self) -> HUDVoiceBar:
+        return self._voice_bar
+
+
+# ── OverlayWindow ─────────────────────────────────────────────────────────
+
+def _hud_size() -> tuple[int, int]:
+    """Compute responsive HUD dimensions based on primary screen."""
+    screens = QGuiApplication.screens()
+    screen = screens[0] if screens else None
+    if screen:
+        geom = screen.availableGeometry()
+        sw, sh = geom.width(), geom.height()
+    else:
+        sw, sh = 1920, 1080
+    w = max(1100, min(1400, int(sw * 0.82)))
+    h = max(650,  min(850,  int(sh * 0.78)))
+    return w, h
+
+
+def _apply_acrylic(hwnd: int, color_hex: str) -> None:
+    """Apply Windows acrylic/blur behind the window (best-effort)."""
+    if platform.system() != "Windows":
+        return
+    try:
+        from ctypes import windll, byref, c_int
+        from ctypes.wintypes import DWORD
+
+        class ACCENT_POLICY(ctypes.Structure):
+            _fields_ = [
+                ("AccentState",   c_int),
+                ("AccentFlags",   c_int),
+                ("GradientColor", DWORD),
+                ("AnimationId",   c_int),
+            ]
+
+        class WINDOWCOMPOSITIONATTRIBDATA(ctypes.Structure):
+            _fields_ = [
+                ("Attribute",  c_int),
+                ("Data",       ctypes.POINTER(ACCENT_POLICY)),
+                ("SizeOfData", ctypes.c_size_t),
+            ]
+
+        col = QColor(color_hex)
+        r, g, b, a = col.red(), col.green(), col.blue(), int(0.88 * 255)
+        gradient_color = (a << 24) | (b << 16) | (g << 8) | r
+
+        accent = ACCENT_POLICY(3, 0, gradient_color, 0)  # 3 = ACCENT_ENABLE_ACRYLICBLURBEHIND
+        data = WINDOWCOMPOSITIONATTRIBDATA(19, byref(accent), ctypes.sizeof(accent))
+        windll.user32.SetWindowCompositionAttribute(hwnd, byref(data))
+    except Exception:
+        pass  # not critical
+
 
 class OverlayWindow(QWidget):
     """
-    Spidy's glassmorphism floating overlay window.
+    Spidy HUD Overlay (Milestone 17.2).
+
+    Futuristic full-HUD command center with:
+    - Responsive sizing (75-90% of screen)
+    - Central AI core as the dominant visual
+    - Surrounding telemetry modules
+    - Floating conversation cards
+    - Futuristic confirmation panel
+    - Boot/close animation sequence
+
+    Public API (backward-compatible with M17.1)
+    -------------------------------------------
+    set_state(state: str)
+    add_message(role: str, text: str)
+    update_waveform(amplitudes: list[float])
+    show_notification(title, msg, level)
+    update_task_progress(goal, steps)
+    show_confirmation(task_id, goal_id, description, prompt)
+    hide_confirmation()
+    apply_theme(theme)
+    show_animated()
+    hide_animated()
 
     Signals
     -------
-    mic_button_clicked   User clicked the microphone button
-    settings_requested   User pressed settings button (future)
-    overlay_closed       Window close button pressed
+    mic_button_clicked
+    overlay_closed
     """
 
     mic_button_clicked = Signal()
-    settings_requested = Signal()
-    overlay_closed = Signal()
+    overlay_closed     = Signal()
 
     def __init__(
         self,
         theme: "Theme",
-        *,
-        width: int = 400,
-        height: int = 580,
-        edge: str = "top-right",
+        width: int = 0,       # 0 = auto-responsive
+        height: int = 0,
+        edge: str = "center",
         always_on_top: bool = True,
         animate: bool = True,
-        parent: QWidget | None = None,
     ) -> None:
-        super().__init__(parent)
+        super().__init__(None)
 
-        self._theme = theme
-        self._edge = edge
+        # Responsive size
+        auto_w, auto_h = _hud_size()
+        self._hud_w = width  if width  > 0 else auto_w
+        self._hud_h = height if height > 0 else auto_h
         self._animate = animate
-        self._state = UIState.IDLE
-        self._glow_phase = 0.0
-        self._is_wake_ready = False
 
-        # ── Window flags ──────────────────────────────────────────────
+        # Window flags: frameless, on top, translucent
         flags = (
-            Qt.WindowType.FramelessWindowHint |
-            Qt.WindowType.Tool              # No taskbar entry
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowStaysOnTopHint
+            | Qt.WindowType.Tool
         )
-        if always_on_top:
-            flags |= Qt.WindowType.WindowStaysOnTopHint
         self.setWindowFlags(flags)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
-        self.setWindowTitle("Spidy")
-        self.setFixedSize(width, height)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self.setFixedSize(self._hud_w, self._hud_h)
 
-        # ── Animations ────────────────────────────────────────────────
-        self._opacity_effect = QGraphicsOpacityEffect(self)
-        self._opacity_effect.setOpacity(0.0)
-        self.setGraphicsEffect(self._opacity_effect)
+        # Center on screen
+        screens = QGuiApplication.screens()
+        if screens:
+            sg = screens[0].availableGeometry()
+            self.move(
+                sg.x() + (sg.width()  - self._hud_w) // 2,
+                sg.y() + (sg.height() - self._hud_h) // 2,
+            )
 
-        self._fade_anim = QPropertyAnimation(self._opacity_effect, b"opacity")
-        self._fade_anim.setDuration(_FADE_MS)
-        self._fade_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        # Window opacity: start invisible for boot animation.
+        # NOTE: We intentionally do NOT use QGraphicsOpacityEffect here.
+        # QGraphicsOpacityEffect allocates an intermediate offscreen buffer with
+        # its own internal QPainter.  When our custom paintEvent() then creates
+        # a second QPainter on the same paint device, Qt prints:
+        #   "QPainter::begin: A paint device can only be painted by one painter"
+        # Using setWindowOpacity() avoids this conflict entirely.
+        self.setWindowOpacity(0.0)
 
-        self._slide_anim = QPropertyAnimation(self, b"pos")
-        self._slide_anim.setDuration(_SLIDE_MS)
-        self._slide_anim.setEasingCurve(QEasingCurve.Type.OutBack)
-
-        # Edge glow animation (wake-ready state)
-        self._glow_timer = QTimer(self)
-        self._glow_timer.setInterval(_EDGE_GLOW_MS)
-        self._glow_timer.timeout.connect(self._tick_glow)
-
-        # ── Build UI ──────────────────────────────────────────────────
-        self._build_ui(theme)
-        self._apply_windows_blur()
-
-        # Position on screen
-        self._reposition()
-
-    # ── Public API ────────────────────────────────────────────────────────
-
-    @Slot()
-    def show_animated(self) -> None:
-        """Slide and fade the overlay into view."""
-        if self._animate:
-            screen = QGuiApplication.primaryScreen().geometry()
-            end_pos = self._calc_position(screen)
-            start_pos = self._calc_start_pos(screen, end_pos)
-
-            # Start from off-screen
-            self.move(start_pos)
-            self.show()
-
-            self._slide_anim.setStartValue(start_pos)
-            self._slide_anim.setEndValue(end_pos)
-            self._slide_anim.start()
-
-            self._fade_anim.setStartValue(0.0)
-            self._fade_anim.setEndValue(1.0)
-            self._fade_anim.start()
-        else:
-            self._reposition()
-            self.show()
-            self._opacity_effect.setOpacity(1.0)
-
-    @Slot()
-    def hide_animated(self) -> None:
-        """Fade the overlay out."""
-        if self._animate:
-            self._fade_anim.setStartValue(1.0)
-            self._fade_anim.setEndValue(0.0)
-            # Disconnect any previous finished→hide connection before adding a
-            # new one.  Without this, rapid repeated calls to hide_animated()
-            # stack up connections and call hide() multiple times, producing
-            # "Painter not active" warnings on the second (no-op) call.
-            try:
-                self._fade_anim.finished.disconnect(self.hide)
-            except RuntimeError:
-                pass  # Not connected — that's fine
-            self._fade_anim.finished.connect(self.hide)
-            self._fade_anim.start()
-        else:
-            self.hide()
-
-    @Slot()
-    def show_for_wake_word(self) -> None:
-        """
-        Show the overlay when a wake word is detected.
-
-        This slot is prepared for future integration with the VoiceEngine.
-        When the wake word "Hey Spidy" is detected, connect:
-            voice_engine.wake_word_detected → overlay.show_for_wake_word
-        """
-        self.show_animated()
-        self.set_state(UIState.WAKE_READY)
-
-    @Slot(str)
-    def set_state(self, state: UIState | str) -> None:
-        """Transition the overlay to a new visual state."""
-        if isinstance(state, str):
-            try:
-                state = UIState(state)
-            except ValueError:
-                return
-
-        self._state = state
-        self._update_state_widgets(state)
-
-    @Slot(str, str)
-    def add_message(self, role: str, text: str) -> None:
-        """Add a message bubble to the chat view."""
-        msg = ChatMessage(role=role, text=text)
-        self._chat_view.add_message(msg)
-
-    @Slot(str, str, str, int)
-    def show_notification(
-        self, title: str, body: str, level: str = "info", duration_ms: int = 4000
-    ) -> None:
-        """Show a toast notification."""
-        self._notif_mgr.show(title, body, level, duration_ms)
-
-    @Slot(list)
-    def update_waveform(self, amplitudes: list) -> None:
-        """Feed real-time audio amplitude data to the waveform widget."""
-        self._waveform.set_amplitudes(amplitudes)
-
-    @Slot(str)
-    def apply_theme(self, theme: "Theme") -> None:
-        """Re-style all widgets with the new theme."""
+        # Build layout
         self._theme = theme
-        self._header.apply_theme(theme)
-        self._chat_view.apply_theme(theme)
-        self._waveform.apply_theme(theme)
-        self._mic_button.apply_theme(theme)
-        self._indicator.apply_theme(theme)
-        self._notif_mgr.apply_theme(theme)
+        self._build_layout()
+        self._apply_theme_internal(theme)
+
+        # Boot scale tracking (for core)
+        self._boot_phase = 0
+        self._boot_timer = QTimer(self)
+        self._boot_timer.setInterval(16)  # ~60fps for animation
+        self._boot_timer.timeout.connect(self._boot_tick)
+
+        # Try acrylic
+        QTimer.singleShot(100, self._setup_acrylic)
+
+    # ---- Build Layout -------------------------------------------------------
+
+    def _build_layout(self) -> None:
+        main = QVBoxLayout(self)
+        main.setContentsMargins(8, 8, 8, 8)
+        main.setSpacing(6)
+
+        # Header
+        self._header = _HUDHeader()
+        main.addWidget(self._header, 0)
+
+        # Middle row: left | center | right
+        middle = QHBoxLayout()
+        middle.setSpacing(8)
+        middle.setContentsMargins(0, 0, 0, 0)
+
+        self._left_panel = _HUDLeftPanel()
+        middle.addWidget(self._left_panel, 0)
+
+        # Center: core + chat overlay stacked
+        self._center_stack = QWidget()
+        self._center_stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._center_stack.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        middle.addWidget(self._center_stack, 1)
+
+        self._right_panel = _HUDRightPanel()
+        middle.addWidget(self._right_panel, 0)
+
+        # Set initial panel widths based on window size
+        lw, rw = self._compute_side_widths(self._hud_w)
+        self._left_panel.setFixedWidth(lw)
+        self._right_panel.setFixedWidth(rw)
+
+        main.addLayout(middle, 1)
+
+        # Footer
+        self._footer = _HUDFooter()
+        main.addWidget(self._footer, 0)
+
+        # Core widget inside center stack (resized in resizeEvent)
+        self._core = SpidyCoreWidget(self._center_stack)
+
+        # Chat overlay (positioned over lower center)
+        self._chat_overlay = HUDChatOverlay(self._center_stack)
+
+        # Confirmation overlay (centered over center stack)
+        self._confirmation_card = HUDConfirmation(self._center_stack)
+        self._confirmation_card.hide()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Update side panel widths proportionally when window is resized
+        lw, rw = self._compute_side_widths(self.width())
+        self._left_panel.setFixedWidth(lw)
+        self._right_panel.setFixedWidth(rw)
+        self._layout_center_children()
+
+    @staticmethod
+    def _compute_side_widths(total_w: int) -> tuple[int, int]:
+        """Compute left/right panel widths proportional to window width."""
+        left_w  = max(152, min(210, int(total_w * 0.128)))
+        right_w = max(172, min(230, int(total_w * 0.145)))
+        return left_w, right_w
+
+    def _layout_center_children(self) -> None:
+        s = self._center_stack
+        w, h = s.width(), s.height()
+
+        # Core: square, taking 80% of center height centered
+        core_size = min(w, int(h * 0.88))
+        cx = (w - core_size) // 2
+        cy = (h - core_size) // 2
+        self._core.setGeometry(cx, cy, core_size, core_size)
+
+        # Chat: lower 35% of center
+        chat_h = int(h * 0.35)
+        self._chat_overlay.setGeometry(0, h - chat_h, w, chat_h)
+
+        # Confirmation: middle 60% centered
+        conf_w = int(w * 0.70)
+        conf_h = int(h * 0.52)
+        self._confirmation_card.setGeometry(
+            (w - conf_w) // 2, (h - conf_h) // 2, conf_w, conf_h
+        )
+
+    # ---- Public API ---------------------------------------------------------
+
+    def set_state(self, state: str) -> None:
+        self._core.set_state(state)
+        self._header.set_state(state)
+        self._footer.voice_bar.set_state(state)
+        self._left_panel.set_mic_state(state == "listening")
+
+        # Task console visibility
+        show_tasks = state == "working"
+        self._right_panel.show_task_console(show_tasks)
+
+    def add_message(self, role: str, text: str) -> None:
+        self._chat_overlay.add_message(role, text)
+
+    def update_waveform(self, amplitudes) -> None:
+        if amplitudes:
+            amp = max(amplitudes) if hasattr(amplitudes, "__iter__") else float(amplitudes)
+        else:
+            amp = 0.0
+        self._core.set_amplitude(amp)
+        self._footer.voice_bar.set_amplitude(amp)
+
+    def show_notification(self, title: str, msg: str, level: str = "info") -> None:
+        # Notifications handled by NotificationManager in app.py
+        pass
+
+    def update_task_progress(self, goal: str, steps) -> None:
+        step_objs: list[TaskStep] = []
+        for s in (steps or []):
+            if isinstance(s, dict):
+                step_objs.append(TaskStep(s.get("description", ""), s.get("status", "pending")))
+            elif hasattr(s, "description"):
+                step_objs.append(s)
+            elif isinstance(s, (list, tuple)) and len(s) == 2:
+                step_objs.append(TaskStep(s[0], s[1]))
+        self._right_panel.update_task(goal, step_objs)
+
+    def show_confirmation(
+        self, task_id: str, goal_id: str, description: str, prompt: str = ""
+    ) -> None:
+        self._confirmation_card.show_confirmation(task_id, goal_id, description, prompt)
+
+    def hide_confirmation(self) -> None:
+        self._confirmation_card.hide_confirmation()
+
+    def apply_theme(self, theme: "Theme") -> None:
+        self._theme = theme
+        self._apply_theme_internal(theme)
         self.update()
 
-    # ── UI building ───────────────────────────────────────────────────────
+    # ---- Animation ----------------------------------------------------------
 
-    def _build_ui(self, theme: "Theme") -> None:
-        root = QVBoxLayout(self)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(0)
+    def show_animated(self) -> None:
+        if not self._animate:
+            self.setWindowOpacity(1.0)
+            self.show()
+            return
+        self.setWindowOpacity(0.0)
+        self.show()
+        self._boot_phase = 0
+        self._core.set_boot_scale(0.05)
+        self._boot_timer.start()
 
-        # ── Header ────────────────────────────────────────────────────
-        self._header = _HeaderBar(theme, self)
-        self._header.minimize_clicked.connect(self.hide_animated)
-        self._header.close_clicked.connect(self._on_close_requested)
-        root.addWidget(self._header)
+    def hide_animated(self) -> None:
+        if not self._animate:
+            self.hide()
+            self.overlay_closed.emit()
+            return
+        anim = QPropertyAnimation(self, b"windowOpacity", self)
+        anim.setStartValue(1.0)
+        anim.setEndValue(0.0)
+        anim.setDuration(400)
+        anim.setEasingCurve(QEasingCurve.Type.InCubic)
+        anim.finished.connect(self._on_hide_done)
+        anim.start()
 
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"color: {theme.colors.border};")
-        sep.setFixedHeight(1)
-        root.addWidget(sep)
+    def _boot_tick(self) -> None:
+        """Drives the multi-stage boot animation (~60fps via 16ms timer)."""
+        self._boot_phase += 1
+        p = self._boot_phase
 
-        # ── Chat area ─────────────────────────────────────────────────
-        self._chat_view = ChatView(self)
-        self._chat_view.apply_theme(theme)
-        root.addWidget(self._chat_view, stretch=1)
+        if p <= 15:  # fade in window (0–240ms)
+            self.setWindowOpacity(p / 15.0 * 0.85)
+        elif p <= 30:  # core expands (240–480ms)
+            scale = (p - 15) / 15.0
+            ease = 1 - (1 - scale) ** 3  # ease-out cubic
+            self._core.set_boot_scale(ease)
+            self.setWindowOpacity(0.85 + 0.15 * ease)
+        elif p <= 40:  # settle
+            self._core.set_boot_scale(1.0)
+            self.setWindowOpacity(1.0)
+            self._boot_timer.stop()
+            log.debug("HUD boot animation complete")
 
-        # ── Waveform (visible only during LISTENING) ──────────────────
-        self._waveform = WaveformWidget(self)
-        self._waveform.apply_theme(theme)
-        self._waveform.setFixedHeight(56)
-        self._waveform.setVisible(False)
-        root.addWidget(self._waveform)
+    def _on_hide_done(self) -> None:
+        self.hide()
+        self.overlay_closed.emit()
 
-        # ── Speaking/thinking indicator ───────────────────────────────
-        self._indicator = SpeakingIndicator(self)
-        self._indicator.apply_theme(theme)
-        self._indicator.setVisible(False)
-        root.addWidget(self._indicator)
-
-        # ── Bottom bar ────────────────────────────────────────────────
-        bottom = QWidget()
-        bottom.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        bottom.setFixedHeight(72)
-        bottom_layout = QHBoxLayout(bottom)
-        bottom_layout.setContentsMargins(8, 8, 8, 8)
-        bottom_layout.setSpacing(12)
-
-        self._mic_button = MicrophoneButton(self)
-        self._mic_button.apply_theme(theme)
-        self._mic_button.clicked.connect(self.mic_button_clicked.emit)
-        bottom_layout.addWidget(self._mic_button)
-
-        self._status_label = QLabel("Ready")
-        self._status_label.setFont(
-            QFont(theme.fonts.family_primary, theme.fonts.size_sm)
-        )
-        self._status_label.setStyleSheet(f"color: {theme.colors.text_muted};")
-        self._status_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
-        )
-        bottom_layout.addWidget(self._status_label)
-
-        root.addWidget(bottom)
-
-        # Notification manager
-        self._notif_mgr = NotificationManager(
-            self,
-            bg_color=theme.colors.bg_secondary,
-            text_color=theme.colors.text_primary,
-            font_family=theme.fonts.family_primary,
-        )
-
-    def _update_state_widgets(self, state: UIState) -> None:
-        """Show/hide/animate widgets according to the new state."""
-        # Waveform
-        show_waveform = state == UIState.LISTENING
-        self._waveform.setVisible(show_waveform)
-        self._waveform.set_active(show_waveform)
-
-        # Speaking/thinking indicator
-        show_indicator = state in (UIState.THINKING, UIState.SPEAKING)
-        self._indicator.setVisible(show_indicator)
-        self._indicator.set_active(show_indicator)
-
-        # Mic button state
-        mic_state_map = {
-            UIState.IDLE: "idle",
-            UIState.WAKE_READY: "idle",
-            UIState.LISTENING: "listening",
-            UIState.THINKING: "thinking",
-            UIState.SPEAKING: "speaking",
-            UIState.ERROR: "disabled",
-        }
-        self._mic_button.set_state(mic_state_map.get(state, "idle"))
-
-        # Status label
-        label_map = {
-            UIState.IDLE: "Ready",
-            UIState.WAKE_READY: "Say 'Hey Spidy'…",
-            UIState.LISTENING: "Listening…",
-            UIState.THINKING: "Thinking…",
-            UIState.SPEAKING: "Speaking…",
-            UIState.ERROR: "Something went wrong",
-        }
-        self._status_label.setText(label_map.get(state, ""))
-        self._header.set_state_label(
-            "" if state == UIState.IDLE else label_map.get(state, "")
-        )
-
-        # Edge glow (wake-ready)
-        self._is_wake_ready = state == UIState.WAKE_READY
-        if self._is_wake_ready and not self._glow_timer.isActive():
-            self._glow_timer.start()
-        elif not self._is_wake_ready:
-            self._glow_timer.stop()
-            self._glow_phase = 0.0
-
-        self.update()
-
-    # ── Painting ──────────────────────────────────────────────────────────
+    # ---- Painting (HUD frame) -----------------------------------------------
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        if not painter.isActive():
-            return
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p = QPainter(self)
+        if not p.isActive(): return
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
 
         w, h = self.width(), self.height()
-        r = self._theme.geometry.border_radius
-        bg = QColor(self._theme.colors.bg_primary)
-        bg.setAlphaF(self._theme.overlay_opacity)
-        border = QColor(self._theme.colors.border)
 
-        # Background
+        # Deep dark background
+        bg = QColor("#060D1A")
+        bg.setAlphaF(0.94)
+        p.setBrush(QBrush(bg))
+        p.setPen(Qt.PenStyle.NoPen)
         path = QPainterPath()
-        path.addRoundedRect(0, 0, w, h, r, r)
-        painter.fillPath(path, QBrush(bg))
+        path.addRoundedRect(QRectF(0, 0, w, h), 12, 12)
+        p.drawPath(path)
 
-        # Border
-        painter.setPen(QPen(border, self._theme.geometry.border_width))
-        painter.drawPath(path)
+        # Glowing cyan edge
+        for i, alpha in enumerate([0.55, 0.30, 0.12]):
+            pen_col = QColor("#00E5FF")
+            pen_col.setAlphaF(alpha)
+            p.setPen(QPen(pen_col, 1.0 - i * 0.25))
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            inset = i
+            p.drawRoundedRect(QRectF(inset, inset, w - inset*2, h - inset*2), 12 - inset, 12 - inset)
 
-        # Wake-ready edge glow
-        if self._is_wake_ready:
-            glow_color = QColor(self._theme.colors.wake_glow)
-            glow_alpha = 0.15 + 0.35 * math.sin(self._glow_phase)
-            glow_color.setAlphaF(max(0.0, min(1.0, glow_alpha)))
-            glow_pen = QPen(glow_color, 3)
-            painter.setPen(glow_pen)
-            painter.drawPath(path)
+        # Subtle grid lines (horizontal)
+        grid_col = QColor("#00E5FF")
+        grid_col.setAlphaF(0.04)
+        p.setPen(QPen(grid_col, 0.5))
+        for gy in range(0, h, 30):
+            p.drawLine(QPointF(8, gy), QPointF(w - 8, gy))
 
-        painter.end()
+        p.end()
 
-    # ── Positioning ───────────────────────────────────────────────────────
+    # ---- Internal -----------------------------------------------------------
 
-    def _reposition(self) -> None:
-        screen = QGuiApplication.primaryScreen().geometry()
-        pos = self._calc_position(screen)
-        self.move(pos)
+    def _apply_theme_internal(self, theme: "Theme") -> None:
+        self._core.apply_theme(theme)
+        self._header.apply_theme(theme)
+        self._left_panel.apply_theme(theme)
+        self._right_panel.apply_theme(theme)
+        self._footer.apply_theme(theme)
+        self._chat_overlay.apply_theme(theme)
+        self._confirmation_card.apply_theme(theme)
 
-    def _calc_position(self, screen: QRect) -> QPoint:
-        margin = self._theme.geometry.margin_edge
-        w, h = self.width(), self.height()
-        positions = {
-            "top-right":    QPoint(screen.right() - w - margin, screen.top() + margin + 36),
-            "top-left":     QPoint(screen.left() + margin, screen.top() + margin + 36),
-            "bottom-right": QPoint(screen.right() - w - margin, screen.bottom() - h - margin - 36),
-            "bottom-left":  QPoint(screen.left() + margin, screen.bottom() - h - margin - 36),
-        }
-        return positions.get(self._edge, positions["top-right"])
-
-    def _calc_start_pos(self, screen: QRect, end_pos: QPoint) -> QPoint:
-        """Off-screen start position for slide animation."""
-        w = self.width()
-        if "right" in self._edge:
-            return QPoint(screen.right() + 20, end_pos.y())
-        return QPoint(screen.left() - w - 20, end_pos.y())
-
-    # ── Windows acrylic blur ──────────────────────────────────────────────
-
-    def _apply_windows_blur(self) -> None:
-        """Apply real acrylic blur on Windows 10/11."""
-        if sys.platform != "win32":
-            return
+    def _setup_acrylic(self) -> None:
         try:
-            import ctypes
-            from ctypes import windll, c_int, byref, sizeof
-
-            class _ACCENT_POLICY(ctypes.Structure):
-                _fields_ = [
-                    ("AccentState", c_int),
-                    ("AccentFlags", c_int),
-                    ("GradientColor", c_int),
-                    ("AnimationId", c_int),
-                ]
-
-            class _WCAD(ctypes.Structure):
-                _fields_ = [
-                    ("Attribute", c_int),
-                    ("Data", ctypes.POINTER(c_int)),
-                    ("SizeOfData", ctypes.c_size_t),
-                ]
-
-            ACCENT_ENABLE_ACRYLICBLURBEHIND = 4
-            WCA_ACCENT_POLICY = 19
-
-            accent = _ACCENT_POLICY()
-            accent.AccentState = ACCENT_ENABLE_ACRYLICBLURBEHIND
-            # ABGR tint: 80% transparent very dark blue
-            accent.GradientColor = 0xCC0D0E1A
-
-            data = _WCAD()
-            data.Attribute = WCA_ACCENT_POLICY
-            data.Data = ctypes.cast(byref(accent), ctypes.POINTER(c_int))
-            data.SizeOfData = ctypes.sizeof(accent)
-
-            windll.user32.SetWindowCompositionAttribute(
-                int(self.winId()), byref(data)
-            )
+            hwnd = int(self.winId())
+            _apply_acrylic(hwnd, "#06091A")
         except Exception:
-            pass  # Silently ignore on unsupported configs
+            pass
 
-    # ── Internal ──────────────────────────────────────────────────────────
-
-    def _tick_glow(self) -> None:
-        self._glow_phase = (self._glow_phase + 0.12) % (math.pi * 2)
-        self.update()
-
-    def _on_close_requested(self) -> None:
-        self.hide_animated()
-        self.overlay_closed.emit()
-
-    def closeEvent(self, event: QCloseEvent) -> None:
-        self.overlay_closed.emit()
-        event.accept()
+    def keyPressEvent(self, event) -> None:
+        if event.key() == Qt.Key.Key_Escape:
+            self.hide_animated()
+        super().keyPressEvent(event)

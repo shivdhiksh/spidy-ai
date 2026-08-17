@@ -124,12 +124,26 @@ class TestGoalActionCoverage:
         assert not missing, f"Desktop actions missing from GOAL_ACTIONS: {missing}"
 
     def test_all_browser_actions_are_goals(self):
+        # P1-2 fix: search_web has moved to CHAT_ACTIONS.
+        # All other explicit browser-engine actions still require goal routing.
         browser_actions = {
-            "search_youtube", "search_web", "search_bing",
+            "search_youtube", "search_bing",
             "open_url", "open_browser_and_search", "read_webpage",
         }
         missing = browser_actions - GOAL_ACTIONS
         assert not missing, f"Browser actions missing from GOAL_ACTIONS: {missing}"
+
+    def test_search_web_not_in_goal_actions(self):
+        """P1-2 regression guard: search_web must NOT be in GOAL_ACTIONS."""
+        assert "search_web" not in GOAL_ACTIONS, (
+            "search_web must be in CHAT_ACTIONS, not GOAL_ACTIONS, after P1-2 fix."
+        )
+
+    def test_search_web_in_chat_actions(self):
+        """P1-2: search_web must be in CHAT_ACTIONS for the fast LLM-direct path."""
+        assert "search_web" in CHAT_ACTIONS, (
+            "search_web must be in CHAT_ACTIONS after P1-2 fix."
+        )
 
     def test_conversational_actions_not_in_goals(self):
         """Greet/farewell/chat must never be in GOAL_ACTIONS."""

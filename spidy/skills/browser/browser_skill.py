@@ -669,7 +669,7 @@ class BrowserSkill(BaseSkill):
         agent = self._get_or_create_agent()
         import urllib.parse
         url = f"https://www.bing.com/search?q={urllib.parse.quote_plus(query)}"
-        info = await agent.navigate(url, new_tab=new_tab)
+        info = await agent.open_url(url, new_tab=new_tab)
         from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
         await self._emit_event_obj(SearchResultsEvent(
             engine="bing", query=query, results_url=info.url,
@@ -694,7 +694,7 @@ class BrowserSkill(BaseSkill):
         agent = self._get_or_create_agent()
         import urllib.parse
         url = f"https://duckduckgo.com/?q={urllib.parse.quote_plus(query)}"
-        info = await agent.navigate(url, new_tab=new_tab)
+        info = await agent.open_url(url, new_tab=new_tab)
         from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
         await self._emit_event_obj(SearchResultsEvent(
             engine="duckduckgo", query=query, results_url=info.url,
@@ -719,7 +719,7 @@ class BrowserSkill(BaseSkill):
         agent = self._get_or_create_agent()
         import urllib.parse
         url = f"https://en.wikipedia.org/w/index.php?search={urllib.parse.quote_plus(query)}"
-        info = await agent.navigate(url, new_tab=new_tab)
+        info = await agent.open_url(url, new_tab=new_tab)
         from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
         await self._emit_event_obj(SearchResultsEvent(
             engine="wikipedia", query=query, results_url=info.url,
@@ -744,7 +744,7 @@ class BrowserSkill(BaseSkill):
         agent = self._get_or_create_agent()
         import urllib.parse
         url = f"https://www.google.com/maps/search/{urllib.parse.quote_plus(query)}"
-        info = await agent.navigate(url, new_tab=new_tab)
+        info = await agent.open_url(url, new_tab=new_tab)
         from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
         await self._emit_event_obj(SearchResultsEvent(
             engine="maps", query=query, results_url=info.url,

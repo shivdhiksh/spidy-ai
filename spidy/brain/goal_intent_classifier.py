@@ -79,9 +79,12 @@ GOAL_ACTIONS: frozenset[str] = frozenset({
     "read_file",
 
     # Browser & web
+    # NOTE: "search_web" has been intentionally moved to CHAT_ACTIONS (P1-2).
+    # It is a generic/unresolved search intent that should be answered via the
+    # fast LLM-direct path in brain.process(), not via AutonomousAgent planning.
+    # Explicit named-engine actions below DO trigger browser automation.
     "search_youtube",
     "search_google",
-    "search_web",
     "search_bing",
     "search_duckduckgo",
     "search_wikipedia",
@@ -133,8 +136,45 @@ CHAT_ACTIONS: frozenset[str] = frozenset({
     "set_reminder",
     "get_clipboard",
     "get_time",
+    # P1-2: search_web moved here from GOAL_ACTIONS — it is a generic/unresolved
+    # search intent.  The Brain pipeline's DecisionEngine routes it to LLM_DIRECT
+    # or to BrowserSkill in a single step via brain.process(), which is far faster
+    # than the AutonomousAgent multi-step planning loop.
+    "search_web",
 })
 
+# ─── Factual-question fast-path ───────────────────────────────────────────────
+#
+# P1-3: Interrogative utterance prefixes that almost always express a factual
+# question best answered by the LLM directly (brain.process → LLM_DIRECT).
+# These are checked in GoalIntentClassifier.classify() before the action-set
+# lookup as a defence-in-depth measure, so that even if a future code change
+# were to re-introduce search_web in GOAL_ACTIONS, simple factual questions
+# would still bypass the AutonomousAgent.
+#
+# Important safety valve: the fast-path is NOT applied when the classifier
+# reports a clearly non-search GOAL_ACTION with high confidence (≥ 0.8), so
+# that utterances like "what is the volume set to" that fire set_volume, or
+# imperative-disguised-as-question patterns that map to real desktop actions
+# are still executed correctly.
+#
+_FACTUAL_QUESTION_PREFIXES: frozenset[str] = frozenset({
+    "what is", "what are", "what was", "what were",
+    "who is", "who are", "who was",
+    "where is", "where are",
+    "when is", "when did", "when was",
+    "why is", "why are", "why does",
+    "how does", "how do",
+})
+
+# Search-family actions where the fast-path CAN still override even at high
+# confidence, because an LLM-direct answer is always faster and more appropriate
+# for a factual question than launching browser automation.
+_SEARCH_ACTIONS: frozenset[str] = frozenset({
+    "search_web", "search_google", "search_bing",
+    "search_duckduckgo", "search_wikipedia", "search_maps",
+    "search_youtube", "open_browser_and_search",
+})
 
 class GoalIntentClassifier:
     """
@@ -175,6 +215,32 @@ class GoalIntentClassifier:
             return "chat"
 
         action = intent.action
+        raw_utterance = intent.raw_utterance
+        raw = raw_utterance.lower().strip() if isinstance(raw_utterance, str) else ""
+
+        # ── P1-3: Factual-question fast-path ──────────────────────────────────
+        # If the utterance starts with an interrogative prefix AND the classified
+        # action is either a search action OR not a clearly high-confidence
+        # GOAL_ACTION (e.g. launch_app, create_folder), route to chat so the
+        # LLM can answer directly without spawning the AutonomousAgent.
+        if any(raw.startswith(p) for p in _FACTUAL_QUESTION_PREFIXES):
+            # Only apply fast-path when:
+            #   (a) The action is a search/web action (always fast-path), OR
+            #   (b) The action is NOT in GOAL_ACTIONS (unknown → chat anyway), OR
+            #   (c) The action IS in GOAL_ACTIONS but confidence < 0.8 (uncertain)
+            # Do NOT apply when the action is a clearly recognized non-search
+            # GOAL_ACTION at high confidence (e.g. "what is the volume" → set_volume)
+            is_search = action in _SEARCH_ACTIONS
+            is_certain_goal = (action in GOAL_ACTIONS) and (intent.confidence >= 0.8)
+            should_fast_path = is_search or not is_certain_goal
+            if should_fast_path:
+                log.debug(
+                    "GoalIntentClassifier: factual-question fast-path "
+                    "('{a}', conf={c:.0%}) → chat",
+                    a=action,
+                    c=intent.confidence,
+                )
+                return "chat"
 
         # Explicit goal action
         if action in GOAL_ACTIONS:

@@ -1,6 +1,6 @@
 """
-ExecutionLoop — Autonomous Agent Execution Engine (Milestone 13)
-================================================================
+ExecutionLoop — Autonomous Agent Execution Engine (Milestone 16 upgrade)
+=========================================================================
 The core loop that drives autonomous goal execution.
 
 Pipeline (per-goal)
@@ -8,32 +8,47 @@ Pipeline (per-goal)
   tasks = TaskDecomposer.decompose(goal)
   for task in tasks:
       if ctx.cancelled: break
-      ProgressTracker.advance(task)
-      response = Brain.process(task.utterance)
-      decision, reason = ReflectionEngine.reflect(task, response)
-      match decision:
-          CONTINUE    → mark task complete, next
-          RETRY       → retry task (up to max_retries)
-          ALTERNATIVE → try alternative utterance, then CONTINUE or ABORT
-          ASK_USER    → publish clarification event, pause (best-effort)
-          ABORT       → fail the goal
+
+      1. TaskAuthorityChecker.check(task)  [NEW M16]
+         → CONFIRM/CRITICAL → publish AgentConfirmationRequiredEvent, skip
+         → SAFE/AWARE       → proceed
+
+      2. Brain.process(task.utterance)
+
+      3. TaskObserver.observe(task, response_text)  [NEW M16]
+
+      4. ReflectionEngine.reflect(task, response_text, success)
+
+      5. TaskEvaluator.evaluate(observation, reflection_decision)  [NEW M16]
+         → outcome.success → mark COMPLETED
+         → outcome.should_replan → Replanner.replan() → revise remaining
+         → otherwise → RETRY / ABORT as before
+
+  GoalVerifier.verify(goal, observations)  [NEW M16]
 
 Design
 ------
-- The loop calls Brain.process() for each task — all Brain capabilities
-  (skills, LLM, retry, proactive checks) remain fully active.
-- Each task result goes through ReflectionEngine before proceeding.
-- Cancellation is checked at the top of every task iteration.
-- Self-recovery: ALTERNATIVE tries a rephrased utterance before giving up.
+- Observer, Evaluator, Replanner, AuthorityChecker are all optional (None-safe).
+  When not configured, the loop behaves identically to M13.
+- Cancellation is checked at the top of every task iteration AND after each
+  Brain.process() call (long-running tasks respect mid-task cancellation).
+- All [AGENT] structured log tags are emitted via AgentTaskLogger.
+- Self-recovery: ALTERNATIVE tries a rephrased utterance before replanning.
 - Natural progress events are published via ProgressTracker.
 
 Usage
 -----
     loop = ExecutionLoop(
         brain=brain,
+        goal_manager=goal_manager,
         reflection=reflection_engine,
         tracker=progress_tracker,
         bus=bus,
+        observer=observer,
+        evaluator=evaluator,
+        replanner=replanner,
+        authority=authority_checker,
+        task_log=task_logger,
     )
     completed_goal = await loop.run(goal, tasks, ctx)
 """
@@ -55,8 +70,13 @@ from spidy.agent.types import (
 from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
+    from spidy.agent.authority import AuthorityLevel, TaskAuthorityChecker
+    from spidy.agent.evaluator import TaskEvaluator
     from spidy.agent.goal_manager import GoalManager
+    from spidy.agent.observer import Observation, TaskObserver
     from spidy.agent.progress_tracker import ProgressTracker
+    from spidy.agent.replanner import Replanner
+    from spidy.agent.task_logger import AgentTaskLogger
     from spidy.brain.brain import Brain
     from spidy.core.event_bus import EventBus
 
@@ -82,6 +102,16 @@ class ExecutionLoop:
         ProgressTracker for publishing progress events.
     bus:
         EventBus for publishing task lifecycle events.
+    observer:
+        Optional TaskObserver for environment inspection (M16).
+    evaluator:
+        Optional TaskEvaluator for structured outcome evaluation (M16).
+    replanner:
+        Optional Replanner for plan revision on soft failures (M16).
+    authority:
+        Optional TaskAuthorityChecker to gate destructive tasks (M16).
+    task_log:
+        Optional AgentTaskLogger for structured [AGENT] log lines (M16).
     inter_task_delay:
         Seconds to wait between task executions.
     """
@@ -93,6 +123,11 @@ class ExecutionLoop:
         reflection: ReflectionEngine,
         tracker: "ProgressTracker",
         bus: "EventBus",
+        observer: "TaskObserver | None" = None,
+        evaluator: "TaskEvaluator | None" = None,
+        replanner: "Replanner | None" = None,
+        authority: "TaskAuthorityChecker | None" = None,
+        task_log: "AgentTaskLogger | None" = None,
         inter_task_delay: float = _INTER_TASK_DELAY,
     ) -> None:
         self._brain = brain
@@ -100,6 +135,11 @@ class ExecutionLoop:
         self._reflection = reflection
         self._tracker = tracker
         self._bus = bus
+        self._observer = observer
+        self._evaluator = evaluator
+        self._replanner = replanner
+        self._authority = authority
+        self._task_log = task_log
         self._inter_task_delay = inter_task_delay
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -109,9 +149,9 @@ class ExecutionLoop:
         goal: GoalRecord,
         tasks: list[TaskRecord],
         ctx: ExecutionContext,
-    ) -> GoalRecord:
+    ) -> tuple[GoalRecord, list["Observation"]]:
         """
-        Execute all tasks for a goal and return the final GoalRecord.
+        Execute all tasks for a goal and return (final GoalRecord, observations).
 
         Parameters
         ----------
@@ -124,8 +164,9 @@ class ExecutionLoop:
 
         Returns
         -------
-        GoalRecord
-            The updated GoalRecord in a terminal state.
+        tuple[GoalRecord, list[Observation]]
+            The updated GoalRecord in a terminal state, plus all observations
+            collected during execution (for final verification).
         """
         total = len(tasks)
         self._tracker.start(
@@ -135,24 +176,52 @@ class ExecutionLoop:
         )
 
         log.info(
-            "ExecutionLoop: starting | goal='{desc}' | {n} tasks",
+            "[AGENT] ExecutionLoop: starting | goal='{desc}' | {n} tasks",
             desc=goal.description[:80],
             n=total,
         )
 
-        for idx, task in enumerate(tasks):
+        observations: list["Observation"] = []
+
+        # tasks is a mutable reference — replanning can replace remaining entries
+        task_list = list(tasks)
+        idx = 0
+
+        while idx < len(task_list):
+            task = task_list[idx]
+
             # ── Cancellation check ─────────────────────────────────────────
             if ctx.cancelled:
-                log.info("ExecutionLoop: cancelled before task {i}", i=idx)
-                return await self._goal_manager.cancel_goal(goal.goal_id)
+                log.info("[AGENT] ExecutionLoop: cancelled before task {i}", i=idx)
+                return await self._goal_manager.cancel_goal(goal.goal_id), observations
 
-            # ── Execute task with reflection ───────────────────────────────
-            updated_task = await self._execute_task(
+            # ── Execute task with full pipeline ────────────────────────────
+            updated_task, obs, replanned_remaining = await self._execute_task(
                 task=task,
                 task_index=idx,
-                total_tasks=total,
+                total_tasks=len(task_list),
                 ctx=ctx,
+                goal_description=goal.description,
+                remaining_tasks=task_list[idx + 1:],
             )
+
+            if obs is not None:
+                observations.append(obs)
+
+            # ── Handle replanning ──────────────────────────────────────────
+            if replanned_remaining is not None:
+                if not replanned_remaining:
+                    # Replanner says recovery is impossible → abort
+                    goal = await self._goal_manager.update_task(goal.goal_id, updated_task)
+                    error_msg = f"Task '{updated_task.description}' failed and recovery is impossible."
+                    return await self._goal_manager.fail_goal(goal.goal_id, error=error_msg), observations
+
+                # Replace tail of task_list with replanned tasks
+                task_list = task_list[:idx + 1] + replanned_remaining
+                log.info(
+                    "[AGENT] ExecutionLoop: task list revised — now {n} total tasks",
+                    n=len(task_list),
+                )
 
             # ── Update task in goal record ─────────────────────────────────
             goal = await self._goal_manager.update_task(goal.goal_id, updated_task)
@@ -161,22 +230,43 @@ class ExecutionLoop:
             if updated_task.state == TaskState.FAILED:
                 await self._tracker.publish_failed(updated_task.error)
                 error_msg = (
-                    f"Task '{updated_task.description}' failed: {updated_task.error or updated_task.result_message}"
+                    f"Task '{updated_task.description}' failed: "
+                    f"{updated_task.error or updated_task.result_message}"
                 )
-                return await self._goal_manager.fail_goal(goal.goal_id, error=error_msg)
+                return await self._goal_manager.fail_goal(goal.goal_id, error=error_msg), observations
+
+            # ── Early-exit: terminal task succeeded — goal is achieved ──────
+            if updated_task.terminal and updated_task.state == TaskState.COMPLETED:
+                remaining = task_list[idx + 1:]
+                if remaining:
+                    log.info(
+                        "[AGENT] ExecutionLoop: terminal task succeeded — "
+                        "skipping {n} remaining task(s) and completing goal.",
+                        n=len(remaining),
+                    )
+                    for remaining_task in remaining:
+                        skipped = remaining_task.mark_skipped(
+                            "Goal achieved by a prior terminal task."
+                        )
+                        goal = await self._goal_manager.update_task(
+                            goal.goal_id, skipped
+                        )
+                break  # exit the task loop — goal completion follows below
 
             # ── Brief pause between tasks ──────────────────────────────────
-            if idx < total - 1 and self._inter_task_delay > 0:
+            if idx < len(task_list) - 1 and self._inter_task_delay > 0:
                 await asyncio.sleep(self._inter_task_delay)
+
+            idx += 1
 
         # ── All tasks done ─────────────────────────────────────────────────
         await self._tracker.publish_completed()
         summary = self._build_completion_summary(goal)
         log.info(
-            "ExecutionLoop: goal complete | '{desc}'",
+            "[AGENT] ExecutionLoop: goal complete | '{desc}'",
             desc=goal.description[:80],
         )
-        return await self._goal_manager.complete_goal(goal.goal_id, summary=summary)
+        return await self._goal_manager.complete_goal(goal.goal_id, summary=summary), observations
 
     # ── Internal task execution ────────────────────────────────────────────
 
@@ -186,26 +276,60 @@ class ExecutionLoop:
         task_index: int,
         total_tasks: int,
         ctx: ExecutionContext,
-    ) -> TaskRecord:
+        goal_description: str = "",
+        remaining_tasks: list[TaskRecord] | None = None,
+    ) -> tuple[TaskRecord, "Observation | None", list[TaskRecord] | None]:
         """
-        Execute a single task with reflection-driven retry.
+        Execute a single task with reflection-driven retry and optional
+        observation/evaluation/replanning.
 
-        Returns the TaskRecord in a terminal state (COMPLETED, FAILED, or SKIPPED).
+        Returns
+        -------
+        tuple[TaskRecord, Observation | None, list[TaskRecord] | None]
+            - updated TaskRecord in a terminal state
+            - Observation (or None if skipped)
+            - replanned remaining tasks (None = no replanning, [] = abort)
         """
+        from spidy.agent.observer import Observation as ObsType
+
         max_attempts = ctx.max_task_retries + 1
+        observation: "Observation | None" = None
+
+        # ── Authority check BEFORE execution (M16) ─────────────────────────
+        authority_label = "T0/SAFE"
+        if self._authority is not None:
+            authority_label = self._authority.level_label(task)
+            if self._authority.requires_confirmation(task):
+                if self._task_log:
+                    self._task_log.confirmation_required(task, authority_label)
+                await self._publish_confirmation_required(task, authority_label)
+                # Skip task — user must re-issue after confirming
+                skipped = task.mark_skipped(
+                    f"Requires confirmation (authority={authority_label}). "
+                    "Please confirm and reissue the command."
+                )
+                if self._task_log:
+                    self._task_log.task_skipped(task, task_index, total_tasks,
+                                                f"Confirmation required: {authority_label}")
+                return skipped, None, None
 
         for attempt in range(1, max_attempts + 1):
             if ctx.cancelled:
-                return task.mark_skipped("Cancelled by user.")
+                return task.mark_skipped("Cancelled by user."), None, None
 
             # Mark as running
             running_task = task.mark_running()
+
+            # ── [AGENT] Task started log ───────────────────────────────────
+            if self._task_log:
+                self._task_log.task_started(running_task, task_index, total_tasks, authority_label)
 
             # Publish task started event
             await self._publish_task_started(
                 task=running_task,
                 task_index=task_index,
                 total_tasks=total_tasks,
+                authority_level=authority_label,
             )
             await self._tracker.advance(
                 task_index=task_index,
@@ -213,7 +337,7 @@ class ExecutionLoop:
             )
 
             log.info(
-                "ExecutionLoop: task {i}/{n} attempt {a}: '{desc}'",
+                "[AGENT] ExecutionLoop: task {i}/{n} attempt {a}: '{desc}'",
                 i=task_index + 1,
                 n=total_tasks,
                 a=attempt,
@@ -224,7 +348,23 @@ class ExecutionLoop:
             utterance = running_task.utterance
             response_text, result_success = await self._call_brain(utterance, ctx.session_id)
 
-            # ── ReflectionEngine evaluation ────────────────────────────────
+            # Check cancellation after Brain returns (long-running tasks)
+            if ctx.cancelled:
+                return task.mark_skipped("Cancelled mid-task."), None, None
+
+            # ── TaskObserver (M16) ─────────────────────────────────────────
+            observation = None
+            if self._observer is not None:
+                observation = await self._observer.observe(
+                    task=running_task,
+                    response_text=response_text,
+                    skip_for_terminal=task.terminal and attempt == 1,
+                )
+                if self._task_log:
+                    self._task_log.observation(running_task, observation)
+                await self._publish_observation(running_task, observation)
+
+            # ── ReflectionEngine ───────────────────────────────────────────
             running_task_with_attempt = TaskRecord(
                 task_id=task.task_id,
                 goal_id=task.goal_id,
@@ -242,7 +382,7 @@ class ExecutionLoop:
             )
 
             log.debug(
-                "ReflectionEngine: [{decision}] {reason}",
+                "[AGENT] ReflectionEngine: [{decision}] {reason}",
                 decision=decision.value,
                 reason=reason,
             )
@@ -254,12 +394,57 @@ class ExecutionLoop:
                 reason=reason,
             )
 
+            # ── TaskEvaluator (M16) ────────────────────────────────────────
+            if self._evaluator is not None and observation is not None:
+                outcome = self._evaluator.evaluate(
+                    task=running_task_with_attempt,
+                    observation=observation,
+                    reflection_decision=decision,
+                    reflection_reason=reason,
+                    response_text=response_text,
+                )
+                self._evaluator.log_outcome(running_task_with_attempt, outcome)
+                if self._task_log:
+                    self._task_log.evaluation(running_task_with_attempt, outcome)
+                await self._publish_evaluation(running_task_with_attempt, outcome)
+
+                # ── Replanning path (M16) ──────────────────────────────────
+                if outcome.should_replan and self._replanner is not None:
+                    can = self._replanner.can_replan(task.goal_id)
+                    if can:
+                        if self._task_log:
+                            self._task_log.replanning(
+                                attempt=self._replanner._replan_counts.get(task.goal_id, 0) + 1,
+                                max_attempts=self._replanner._max_attempts,
+                                reason=outcome.replan_hint or reason,
+                            )
+                        await self._publish_replanning(running_task, outcome)
+                        revised = await self._replanner.replan(
+                            goal_description=goal_description,
+                            goal_id=task.goal_id,
+                            failed_task=running_task_with_attempt,
+                            observation=observation,
+                            remaining_tasks=remaining_tasks or [],
+                            replan_hint=outcome.replan_hint,
+                            llm_client=self._brain._llm,  # noqa: SLF001 — needed for replanning
+                        )
+                        failed_task = running_task_with_attempt.mark_failed(
+                            error=reason, message=response_text
+                        )
+                        await self._publish_task_failed(task=failed_task, will_retry=False)
+                        return failed_task, observation, revised
+
+                # Use evaluator's decision as canonical
+                decision = outcome.reflection_decision
+
             # ── Act on decision ────────────────────────────────────────────
             if decision == ReflectionDecision.CONTINUE:
                 completed = running_task_with_attempt.mark_completed(response_text)
+                if self._task_log:
+                    self._task_log.task_success(completed, task_index, total_tasks)
                 await self._publish_task_completed(completed, task_index, total_tasks)
                 await self._tracker.task_done(task_index, task.description)
-                return completed
+                return completed, observation, None
 
             elif decision == ReflectionDecision.RETRY:
                 if attempt < max_attempts:
@@ -267,14 +452,17 @@ class ExecutionLoop:
                         task=running_task_with_attempt,
                         will_retry=True,
                     )
-                    log.debug("Retrying task in 1s...")
+                    if self._task_log:
+                        self._task_log.task_failed(
+                            running_task_with_attempt, task_index, total_tasks,
+                            reason, will_retry=True,
+                        )
+                    log.debug("[AGENT] Retrying task in 1s...")
                     await asyncio.sleep(1.0)
-                    # Update task with failed attempt for next loop
                     task = running_task_with_attempt.mark_failed(
                         error=f"Attempt {attempt} failed",
                         message=response_text,
                     )
-                    # Reset to pending-like state for retry
                     task = TaskRecord(
                         task_id=task.task_id,
                         goal_id=task.goal_id,
@@ -291,33 +479,43 @@ class ExecutionLoop:
                     running_task_with_attempt
                 )
                 log.info(
-                    "ExecutionLoop: trying alternative: '{alt}'",
+                    "[AGENT] ExecutionLoop: trying alternative: '{alt}'",
                     alt=alt_utterance[:80],
                 )
                 alt_response, alt_success = await self._call_brain(alt_utterance, ctx.session_id)
                 if alt_success or (alt_response and len(alt_response) > 8):
                     completed = running_task_with_attempt.mark_completed(alt_response)
+                    if self._task_log:
+                        self._task_log.task_success(completed, task_index, total_tasks)
                     await self._publish_task_completed(completed, task_index, total_tasks)
                     await self._tracker.task_done(task_index, task.description)
-                    return completed
+                    return completed, observation, None
                 # Alternative also failed — fall through to ABORT
 
             elif decision == ReflectionDecision.ASK_USER:
-                # Publish clarification event and skip (best-effort; can't block loop)
                 await self._publish_clarification(running_task, ctx)
-                # Treat as skipped (user can follow up with a new command)
-                return running_task_with_attempt.mark_skipped("Awaiting user clarification.")
+                skipped = running_task_with_attempt.mark_skipped("Awaiting user clarification.")
+                if self._task_log:
+                    self._task_log.task_skipped(skipped, task_index, total_tasks,
+                                                "Awaiting user clarification")
+                return skipped, observation, None
 
             # ── ABORT or all retries exhausted ─────────────────────────────
             failed = running_task_with_attempt.mark_failed(
                 error=reason,
                 message=response_text,
             )
+            if self._task_log:
+                self._task_log.task_failed(failed, task_index, total_tasks, reason)
             await self._publish_task_failed(task=failed, will_retry=False)
-            return failed
+            return failed, observation, None
 
         # Exhausted all attempts without return — mark failed
-        return task.mark_failed(error=f"All {max_attempts} attempts exhausted.")
+        final_failed = task.mark_failed(error=f"All {max_attempts} attempts exhausted.")
+        if self._task_log:
+            self._task_log.task_failed(final_failed, task_index, total_tasks,
+                                       f"All {max_attempts} attempts exhausted.")
+        return final_failed, observation, None
 
     # ── Brain integration ──────────────────────────────────────────────────
 
@@ -333,11 +531,10 @@ class ExecutionLoop:
         """
         try:
             response_text = await self._brain.process(utterance, session_id=session_id)
-            # Determine success heuristically from response
             success = bool(response_text and len(response_text.strip()) > 4)
             return response_text, success
         except Exception as exc:  # noqa: BLE001
-            log.error("ExecutionLoop: Brain.process() raised: {exc}", exc=exc)
+            log.error("[AGENT] ExecutionLoop: Brain.process() raised: {exc}", exc=exc)
             return f"An error occurred: {exc}", False
 
     # ── Event publishers ───────────────────────────────────────────────────
@@ -347,6 +544,7 @@ class ExecutionLoop:
         task: TaskRecord,
         task_index: int,
         total_tasks: int,
+        authority_level: str = "safe",
     ) -> None:
         from spidy.agent.events import TaskStartedEvent
         try:
@@ -357,6 +555,7 @@ class ExecutionLoop:
                 task_index=task_index,
                 total_tasks=total_tasks,
                 attempt=task.attempt,
+                authority_level=authority_level,
                 session_id="",
             ))
         except Exception:  # noqa: BLE001
@@ -428,6 +627,87 @@ class ExecutionLoop:
                 task_id=task.task_id,
                 question=task.result_message or "Could you clarify what you need?",
                 session_id=ctx.session_id,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _publish_observation(
+        self,
+        task: TaskRecord,
+        observation: "Observation",
+    ) -> None:
+        from spidy.agent.events import AgentObservationEvent
+        try:
+            await self._bus.publish(AgentObservationEvent(
+                goal_id=task.goal_id,
+                task_id=task.task_id,
+                task_description=task.description,
+                method=observation.method,
+                summary=observation.summary,
+                success_signal=observation.success_signal,
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _publish_evaluation(
+        self,
+        task: TaskRecord,
+        outcome: "object",
+    ) -> None:
+        from spidy.agent.events import AgentEvaluationEvent
+        try:
+            await self._bus.publish(AgentEvaluationEvent(
+                goal_id=task.goal_id,
+                task_id=task.task_id,
+                task_description=task.description,
+                success=getattr(outcome, "success", False),
+                confidence=getattr(outcome, "confidence", type("C", (), {"value": "unknown"})()).value
+                           if hasattr(getattr(outcome, "confidence", None), "value")
+                           else str(getattr(outcome, "confidence", "unknown")),
+                should_replan=getattr(outcome, "should_replan", False),
+                reason=getattr(outcome, "reason", ""),
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _publish_replanning(
+        self,
+        task: TaskRecord,
+        outcome: "object",
+    ) -> None:
+        from spidy.agent.events import AgentReplanningEvent
+        try:
+            replanner = self._replanner
+            current_count = replanner._replan_counts.get(task.goal_id, 0) + 1 if replanner else 1
+            max_att = replanner._max_attempts if replanner else 2
+            await self._bus.publish(AgentReplanningEvent(
+                goal_id=task.goal_id,
+                failed_task_id=task.task_id,
+                failed_task_description=task.description,
+                attempt=current_count,
+                max_attempts=max_att,
+                reason=getattr(outcome, "replan_hint", "") or getattr(outcome, "reason", ""),
+            ))
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _publish_confirmation_required(
+        self,
+        task: TaskRecord,
+        authority_label: str,
+    ) -> None:
+        from spidy.agent.events import AgentConfirmationRequiredEvent
+        try:
+            await self._bus.publish(AgentConfirmationRequiredEvent(
+                goal_id=task.goal_id,
+                task_id=task.task_id,
+                task_description=task.description,
+                utterance=task.utterance,
+                authority_level=authority_label,
+                prompt=(
+                    f"I need your permission to: {task.description}. "
+                    f"This is a {authority_label} action. Do you confirm?"
+                ),
             ))
         except Exception:  # noqa: BLE001
             pass

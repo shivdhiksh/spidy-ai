@@ -379,8 +379,16 @@ class TestWebSearchIntents:
 
     @pytest.mark.asyncio
     async def test_what_is(self, classifier):
+        # P0-1 fix: "what is" no longer maps to search_web.
+        # Factual questions fall through to chat (LLM-direct path).
         intent = await classifier.classify("what is recursion in programming")
-        assert intent.action == "search_web"
+        assert intent.action in ("chat", "calculate"), (
+            f"Expected 'chat' or 'calculate', got {intent.action!r}. "
+            "'what is' must NOT route to search_web after P0-1 fix."
+        )
+        assert intent.action != "search_web", (
+            "'what is X' must NOT route to search_web after P0-1 fix."
+        )
 
 
 class TestGreetingIntents:

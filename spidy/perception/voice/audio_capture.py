@@ -48,7 +48,11 @@ class CaptureMode(Enum):
     """Operating mode of the capture engine."""
     DETECTING = auto()   # Feed chunks to wake word callback
     RECORDING = auto()   # Buffer chunks for STT
-    IDLE = auto()        # Neither (between transitions)
+    IDLE = auto()        # Neither (between transitions / legacy mute)
+    BARGE_IN = auto()    # Feed chunks to barge-in interruption detector only
+                         # Used during TTS playback so the user can say "Spidy stop".
+                         # Neither the wake-word model nor the main STT buffer receive
+                         # these chunks — only the lightweight BargeInDetector does.
 
 
 class AudioCaptureEngine:
@@ -78,12 +82,17 @@ class AudioCaptureEngine:
         input_device: int | None = None,
         on_wake_chunk: AudioCallback | None = None,
         on_record_chunk: AudioCallback | None = None,
+        on_barge_in_chunk: AudioCallback | None = None,
+        mic_gain: float = 1.0,
     ) -> None:
         self._sample_rate = sample_rate
         self._chunk_size = chunk_size
         self._input_device = input_device
         self._on_wake_chunk = on_wake_chunk
         self._on_record_chunk = on_record_chunk
+        self._on_barge_in_chunk = on_barge_in_chunk
+        self._mic_gain = float(mic_gain)  # Software amplification factor (applied before OWW/STT)
+        self._low_signal_warned = False   # One-shot warning for very quiet mic
 
         self._mode = CaptureMode.IDLE
         self._mode_lock = threading.Lock()
@@ -186,13 +195,67 @@ class AudioCaptureEngine:
             if self._input_device is not None:
                 stream_kwargs["device"] = self._input_device
 
+            # [DIAG-6] Log exactly which device sounddevice will open.
+            try:
+                device_info = sd.query_devices(
+                    self._input_device, kind="input"
+                )
+                log.info(
+                    "[VOICE DIAG-6] Opening microphone: index={idx} | "
+                    "name='{name}' | channels={ch} | rate={sr}",
+                    idx=self._input_device if self._input_device is not None
+                        else sd.default.device[0],
+                    name=device_info.get("name", "?"),
+                    ch=device_info.get("max_input_channels", "?"),
+                    sr=int(device_info.get("default_samplerate", 0)),
+                )
+            except Exception as _dev_exc:  # noqa: BLE001
+                log.warning(
+                    "[VOICE DIAG-6] Could not query device info: {e}",
+                    e=_dev_exc,
+                )
+
             with sd.InputStream(**stream_kwargs) as stream:
+                log.info(
+                    "[VOICE DIAG-6b] sd.InputStream opened successfully — "
+                    "audio capture is ACTIVE. mic_gain={g}x",
+                    g=self._mic_gain,
+                )
+                _chunk_counter = 0
+                _rms_accum = 0.0
                 while not self._stop_event.is_set():
                     audio_chunk, overflowed = stream.read(self._chunk_size)
                     if overflowed:
                         log.debug("Audio buffer overflow — some samples dropped.")
 
                     audio_flat = audio_chunk.flatten()
+
+                    # ── Software microphone gain ──────────────────────────────
+                    if self._mic_gain != 1.0:
+                        audio_flat = np.clip(
+                            audio_flat * self._mic_gain, -1.0, 1.0
+                        )
+
+                    # ── Periodic low-signal warning (every 500 chunks ≈ 40s) ─
+                    _chunk_counter += 1
+                    _rms_accum += float(np.sqrt(np.mean(audio_flat ** 2)))
+                    if _chunk_counter % 500 == 0:
+                        avg_rms = _rms_accum / 500
+                        _rms_accum = 0.0
+                        if avg_rms < 0.005 and not self._low_signal_warned:
+                            self._low_signal_warned = True
+                            log.warning(
+                                "[VOICE] Microphone signal is very weak "
+                                "(avg RMS={r:.5f} over last 500 chunks). "
+                                "Wake word detection may fail. "
+                                "Increase Windows mic volume or set "
+                                "voice.audio.mic_gain in config (currently {g}x).",
+                                r=avg_rms,
+                                g=self._mic_gain,
+                            )
+                        elif avg_rms >= 0.005:
+                            self._low_signal_warned = False  # reset if signal recovers
+
                     self._dispatch(audio_flat)
 
         except Exception as exc:  # noqa: BLE001
@@ -214,3 +277,10 @@ class AudioCaptureEngine:
                 self._on_record_chunk(chunk)
             except Exception as exc:  # noqa: BLE001
                 log.debug("record chunk callback error: {exc}", exc=exc)
+
+        elif mode == CaptureMode.BARGE_IN and self._on_barge_in_chunk:
+            try:
+                self._on_barge_in_chunk(chunk)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("barge-in chunk callback error: {exc}", exc=exc)
+        # IDLE → chunk is discarded (no callback called)

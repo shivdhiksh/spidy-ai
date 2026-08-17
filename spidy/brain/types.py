@@ -199,6 +199,7 @@ class ToolResult:
     data: Any = None                # Structured result (e.g. file list)
     error: str = ""                 # Error message if success=False
     step_type: str = ""             # Which step type produced this
+    non_retryable: bool = False     # P1-1: True for deterministic programming errors; skip retries
 
     @classmethod
     def ok(

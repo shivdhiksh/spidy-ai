@@ -14,7 +14,7 @@ from spidy.ui.state import UIState, UIStateMachine, UIStateTransitionError
 class TestUIState:
     def test_all_states_exist(self):
         states = {s.value for s in UIState}
-        assert states == {"idle", "wake_ready", "listening", "thinking", "speaking", "error"}
+        assert states == {"idle", "wake_ready", "listening", "thinking", "speaking", "working", "error"}
 
     def test_str_representation(self):
         assert str(UIState.IDLE) == "idle"

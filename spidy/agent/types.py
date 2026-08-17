@@ -116,6 +116,12 @@ class TaskRecord:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    terminal: bool = False
+    """If True, the ExecutionLoop will stop after this task succeeds and
+    complete the goal immediately, skipping any remaining tasks.
+    Set by the TaskDecomposer for decisive single-action tasks (e.g. launch_app)
+    or by the LLM when it marks a step as the final objective.
+    """
 
     def mark_running(self) -> "TaskRecord":
         """Return a new TaskRecord in RUNNING state."""
@@ -128,6 +134,7 @@ class TaskRecord:
             attempt=self.attempt + 1,
             started_at=datetime.now(timezone.utc),
             extra=self.extra,
+            terminal=self.terminal,
         )
 
     def mark_completed(self, message: str) -> "TaskRecord":
@@ -144,6 +151,7 @@ class TaskRecord:
             started_at=self.started_at,
             completed_at=datetime.now(timezone.utc),
             extra=self.extra,
+            terminal=self.terminal,
         )
 
     def mark_failed(self, error: str, message: str = "") -> "TaskRecord":
@@ -161,6 +169,7 @@ class TaskRecord:
             started_at=self.started_at,
             completed_at=datetime.now(timezone.utc),
             extra=self.extra,
+            terminal=self.terminal,
         )
 
     def mark_skipped(self, reason: str = "") -> "TaskRecord":
@@ -176,6 +185,7 @@ class TaskRecord:
             started_at=self.started_at,
             completed_at=datetime.now(timezone.utc),
             extra=self.extra,
+            terminal=self.terminal,
         )
 
 

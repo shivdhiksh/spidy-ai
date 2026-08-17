@@ -1,0 +1,10 @@
+{
+  "microphone_index": null,
+  "speech_rate": 1.0,
+  "voice": "en_US-ryan-high",
+  "volume": 1.0,
+  "wake_word_enabled": true,
+  "conversation_timeout": 30.0,
+  "vad_sensitivity": 2,
+  "wake_word": "hey spidy"
+}

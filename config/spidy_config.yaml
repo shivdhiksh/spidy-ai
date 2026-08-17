@@ -43,9 +43,21 @@ voice:
   # Wake Word
   wake_word:
     enabled: true
-    model: "hey_jarvis"           # Closest available; "hey_spidy" TBD
-    threshold: 0.5                # Detection confidence threshold (0.0–1.0)
-    chunk_size: 1280              # Audio frames per chunk (16kHz)
+    model: "hey_jarvis"           # Model name. See _MODEL_MAP in openwakeword.py for valid values.
+                                  # Proven: hey_jarvis_v0.1 scored 0.4473 (diagnostics) and
+                                  # 0.3073 (production). Community models (jarvis_v1/v2) are
+                                  # 200KB heads only — NOT clearly better. Do not switch.
+    threshold: 0.35               # Detection confidence threshold (0.0-1.0).
+                                  # Production scored 0.3073 with threshold=0.4 — was 0.07 short.
+                                  # Lowered to 0.35: clear "Hey Jarvis" at normal volume will fire.
+                                  # Raise to 0.45 if false positives occur in your environment.
+    chunk_size: 1280              # Audio frames per chunk (16kHz, 80ms)
+    custom_model_path: null       # Path to a custom .onnx wake word model file.
+                                  # Set this to use a trained "Hey Spidy" model when ready.
+                                  # Example: "assets/models/wake_word/hey_spidy.onnx"
+                                  # When set, bypasses model: field and _MODEL_MAP entirely.
+                                  # score_key will be the model filename stem (e.g. "hey_spidy").
+
 
   # Speech Recognition
   stt:
@@ -69,6 +81,68 @@ voice:
     output_device: null           # null = system default
     sample_rate: 16000
     channels: 1
+    mic_gain: 8.0                 # Software microphone amplification (applied before OWW/STT).
+                                  # Increase if wake word is never detected. Decrease if audio clips.
+                                  # Diagnostic: run diag_audio_deep.py — if peak_i16 < 2000 while
+                                  # speaking, raise this value. Typical range: 1.0 (already loud)
+                                  # to 16.0 (very quiet mic). Set to 1.0 to disable.
+
+  # Continuous Conversation Session
+  # ----------------------------------
+  session:
+    continuous_mode: true             # Stay listening between turns (no repeat wake word needed).
+    conversation_timeout_seconds: 60  # Close session after N seconds of inactivity.
+    max_turns_per_session: 50
+    measure_latency: true             # Log voice pipeline timing (first-word, STT, Brain, TTS).
+
+    # Post-ack audio buffer flush (prevents ack-echo contamination of STT).
+    # After "Yes Shiva." plays, the capture buffer is cleared for this many
+    # milliseconds before mic is opened for the user's command.
+    # Set to 0 to disable (headphone setups have negligible echo).
+    post_ack_flush_ms: 100
+
+    # Transcript deduplication window (prevents stale audio re-processed as new command).
+    # If the same transcript arrives again within this interval (seconds), it is
+    # silently dropped. Two separate identical commands separated by more than this
+    # interval are both processed normally.
+    # Set to 0.0 to disable.
+    transcript_dedup_window_seconds: 1.5
+
+  # Barge-in Interruption Detector
+  # --------------------------------
+  # While Spidy is speaking (TTS), a lightweight separate STT path stays active
+  # so the user can say "Spidy stop" and immediately halt speech.
+  # Uses a dedicated tiny.en model (separate from the main base.en STT) to avoid
+  # model contention.  Measured latency: ~1.4 s worst case (0.8 s accumulate +
+  # 671 ms tiny.en inference).
+  barge_in:
+    enabled: true                 # Master switch. Set false to revert to IDLE (mic muted during TTS).
+    model: "tiny.en"              # faster-whisper model for barge-in STT.
+                                  # tiny.en: 671 ms warm / ~180 MB.  base.en: 899 ms / 354 MB.
+                                  # Do NOT change to base.en — that model is busy with main STT.
+    window_seconds: 0.8           # Audio window length (seconds) accumulated before running STT.
+                                  # Range: 0.4–2.0. Lower = faster detection, slightly less accurate.
+                                  # Default 0.8 s gives good stop-command accuracy.
+    min_rms_threshold: 0.015      # Energy gate: chunks below this RMS are discarded (speaker bleed).
+                                  # Raise if Piper echo falsely triggers detection (~0.03–0.05).
+                                  # Lower if your mic is very quiet and stop commands are missed (~0.005).
+
+  # TTS Text Pre-Processing Filter
+  # ---------------------------------
+  # Applied ONLY to the text sent to the TTS engine.
+  # The original response is never modified and is always shown in the UI/chat.
+  # Removes markdown, code blocks, headers, and list markers so Spidy speaks
+  # natural prose instead of reading raw markdown aloud.
+  #
+  # Impact (measured): A 480-char code response (spoken: ~46s) becomes a
+  # 72-char acknowledgement (spoken: ~7s) — a 6x reduction in TTS duration.
+  tts_filter:
+    enabled: true                 # Master switch. Set false to disable all filtering (raw LLM text to TTS).
+    code_block_replacement: "I've written the code. You can see it in the chat."
+                                  # Spoken phrase that replaces each fenced code block (```...```).
+                                  # Keep short (<= 10 words) for natural speech flow.
+                                  # Set to "" to silently drop code blocks with no spoken replacement.
+    url_replacement: "the link"   # Replacement for bare URLs (https://...).
 
 # --------------------------------------------------------------------------- #
 # Context Observer (Milestone 2)                                               #
@@ -114,6 +188,47 @@ reasoning:
   max_tokens: 1024
   timeout_seconds: 30
   system_prompt_path: "config/system_prompt.txt"
+
+# --------------------------------------------------------------------------- #
+# Multi-Provider LLM                                                          #
+# --------------------------------------------------------------------------- #
+# Spidy tries providers in order. If a provider fails (timeout, quota, HTTP  #
+# error, network failure) it automatically falls back to the next one.       #
+#                                                                             #
+# Priority with NVIDIA_API_KEY present:                                       #
+#   1. NVIDIA NIM  — primary for ALL LLM requests (chat, code, reasoning...) #
+#   2. Ollama      — local fallback when NVIDIA is unavailable                #
+#                                                                             #
+# Without NVIDIA_API_KEY: only Ollama is used (existing behaviour unchanged). #
+#                                                                             #
+# SECURITY:                                                                   #
+#   NEVER put your API key here. Leave api_key: "" and set the env var:       #
+#   Windows:  $env:NVIDIA_API_KEY = "nvapi-..."                               #
+#   .env file: NVIDIA_API_KEY=nvapi-...   (file is git-ignored)               #
+# --------------------------------------------------------------------------- #
+llm:
+  auto_fallback: true             # Automatically try next provider on failure
+  failure_threshold: 3            # Skip provider after N consecutive failures
+
+  providers:
+    # ── Primary: NVIDIA NIM ──────────────────────────────────────────────── #
+    - name: nvidia
+      enabled: true               # Set false to disable NVIDIA even with key
+      model: "meta/llama-3.1-8b-instruct"  # Fast, capable NIM model
+      base_url: "https://integrate.api.nvidia.com/v1"
+      api_key: ""                 # LEAVE EMPTY — use NVIDIA_API_KEY env var
+      temperature: 0.7
+      max_tokens: 1024
+      timeout_seconds: 60         # NIM cloud calls may be slower than Ollama
+
+    # ── Fallback: Ollama (local) ─────────────────────────────────────────── #
+    - name: ollama
+      enabled: true
+      model: "llama3.2:3b"
+      base_url: "http://localhost:11434"
+      temperature: 0.7
+      max_tokens: 1024
+      timeout_seconds: 30
 
 # --------------------------------------------------------------------------- #
 # Memory Engine                                                               #

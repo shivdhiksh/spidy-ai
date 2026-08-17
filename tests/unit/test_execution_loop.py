@@ -41,6 +41,7 @@ def make_brain_mock(response_text: str = "Done!", fail: bool = False) -> MagicMo
     else:
         brain.process = AsyncMock(return_value=response_text)
     brain.session_id = "test-session"
+    brain._llm = None  # Required by ExecutionLoop replanning path
     return brain
 
 
@@ -93,7 +94,7 @@ class TestHappyPath:
         goal = await setup_goal(mgr, tasks)
         ctx = ExecutionContext(goal=goal, session_id="s1")
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         assert result.state == GoalState.COMPLETED
 
@@ -105,7 +106,7 @@ class TestHappyPath:
         goal = await setup_goal(mgr, tasks)
         ctx = ExecutionContext(goal=goal, session_id="s1")
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         assert result.state == GoalState.COMPLETED
 
@@ -117,7 +118,7 @@ class TestHappyPath:
         goal = await setup_goal(mgr, tasks)
         ctx = ExecutionContext(goal=goal, session_id="s1")
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         assert result.completed_task_count == 3
 
@@ -141,7 +142,7 @@ class TestHappyPath:
         goal = await setup_goal(mgr, tasks)
         ctx = ExecutionContext(goal=goal, session_id="s1")
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         assert result.summary
         assert isinstance(result.summary, str)
@@ -162,7 +163,7 @@ class TestCancellation:
         ctx = ExecutionContext(goal=goal, session_id="s1")
         ctx.cancel()  # Cancel before starting
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         assert result.state == GoalState.CANCELLED
 
@@ -196,7 +197,7 @@ class TestFailurePaths:
         goal = await setup_goal(mgr, tasks)
         ctx = ExecutionContext(goal=goal, session_id="s1", max_task_retries=0)
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         # With no retries and explicit failure language, goal should fail
         assert result.state in (GoalState.FAILED, GoalState.COMPLETED)
@@ -222,7 +223,7 @@ class TestFailurePaths:
         goal = await setup_goal(mgr, tasks)
         ctx = ExecutionContext(goal=goal, session_id="s1", max_task_retries=0)
 
-        result = await loop.run(goal, tasks, ctx)
+        result, _obs = await loop.run(goal, tasks, ctx)
 
         # The first task should have completed; the loop should have processed both tasks
         assert brain.process.call_count >= 1

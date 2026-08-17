@@ -269,7 +269,8 @@ def _extract_app_name(text: str) -> list[Entity]:
     "open edge and search for python" correctly extract only "edge".
     """
     match = re.search(
-        r"(?:open|launch|start|run|close|quit|exit|switch\s+to|focus)\s+"
+        r"(?:open|launch|start|run|close|quit|exit|switch\s+to|focus"
+        r"|minimize|minimise|maximize|maximise|restore)\s+"
         r"(.+?)(?:\s+and\b|\s+(?:app|application))?$",
         text.lower().strip()
     )
@@ -721,15 +722,19 @@ _RULES: list[_Rule] = [
     ),
 
     # ── Google / generic web search ────────────────────────────────────────
+    # NOTE: Broad factual-question prefixes ("what is", "who is", "how do",
+    # "when did", "where is", "why is", "how to", "how does", "tell me about",
+    # "what are", "why does") have been intentionally removed from this pattern
+    # list (P0-1 fix).  Those interrogatives match virtually every factual
+    # question and would route them to the AutonomousAgent instead of the fast
+    # LLM-direct path, causing ~50 s latency for simple factual queries.
+    # Only explicit search-intent signals remain below.
     _Rule(
         action="search_web",
         patterns=(
             "search the web", "search web for", "search for",
             "google search for", "search google for", "google",
             "look up", "find out about",
-            "what is", "who is", "tell me about",
-            "what are", "how do", "how does", "how to",
-            "when did", "where is", "why does", "why is",
         ),
         entity_extractor=_extract_query,
         confidence=_MED_CONFIDENCE,
@@ -827,9 +832,61 @@ _RULES: list[_Rule] = [
         confidence=_HIGH_CONFIDENCE,
     ),
 
+    # ── Window minimize / maximize / restore (M13.3) ───────────────────────
+    # BUG 3 FIX: These intents were previously unrecognized, falling through
+    # to chat and generating no action.
+    _Rule(
+        action="minimize_window",
+        patterns=(
+            "minimize notepad", "minimise notepad",
+            "minimize edge", "minimise edge",
+            "minimize chrome", "minimise chrome",
+            "minimize firefox", "minimise firefox",
+            "minimize discord", "minimise discord",
+            "minimize spotify", "minimise spotify",
+            "minimize vs code", "minimise vs code",
+            "minimize vscode", "minimise vscode",
+            "minimize calculator", "minimise calculator",
+            "minimize terminal", "minimise terminal",
+            "minimize window", "minimise window",
+        ),
+        entity_extractor=_extract_app_name,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="maximize_window",
+        patterns=(
+            "maximize notepad", "maximise notepad", "restore notepad",
+            "maximize edge", "maximise edge", "restore edge",
+            "maximize chrome", "maximise chrome", "restore chrome",
+            "maximize firefox", "maximise firefox", "restore firefox",
+            "maximize discord", "maximise discord",
+            "maximize spotify", "maximise spotify",
+            "maximize vs code", "maximise vs code", "restore vs code",
+            "maximize vscode", "maximise vscode",
+            "maximize calculator", "maximise calculator", "restore calculator",
+            "maximize window", "maximise window", "restore window",
+        ),
+        entity_extractor=_extract_app_name,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+
+    # ── Focus (add 'focus X' pattern) ─────────────────────────────────────
     _Rule(
         action="bring_app_to_foreground",
         patterns=(
+            "focus notepad", "focus edge", "focus chrome", "focus firefox",
+            "focus discord", "focus spotify", "focus vs code", "focus vscode",
+            "focus calculator", "focus terminal",
+        ),
+        entity_extractor=_extract_app_name,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+
+    _Rule(
+        action="bring_app_to_foreground",
+        patterns=(
+
             # NOTE: "go to" intentionally removed here (M13.2 fix).
             # It was too broad and caused "go to desktop" to misfire.
             "switch to", "bring up", "focus on",

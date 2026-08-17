@@ -136,3 +136,23 @@ class UIMicButtonClickedEvent(Event):
 class UISettingsOpenedEvent(Event):
     """Published when the settings panel is opened."""
     topic = "ui.settings_opened"
+
+
+# ─── Confirmation response events (UI → agent) ───────────────────────────────
+# These are published back into the agent.* namespace so the ExecutionLoop
+# can unblock without any new event infrastructure.
+
+@dataclass
+class UIConfirmationGrantedEvent(Event):
+    """User confirmed a task requiring authority approval."""
+    topic = "agent.confirmation_granted"
+    goal_id: str = ""
+    task_id: str = ""
+
+
+@dataclass
+class UIConfirmationDeniedEvent(Event):
+    """User denied/cancelled a task requiring authority approval."""
+    topic = "agent.confirmation_denied"
+    goal_id: str = ""
+    task_id: str = ""

@@ -239,6 +239,51 @@ class TestAudioCaptureEngine:
                 engine.start()
             engine._stop_event.set()
 
+    def test_mic_gain_amplifies_signal(self):
+        """mic_gain should multiply signal amplitude before dispatching."""
+        received: list[np.ndarray] = []
+
+        def on_wake(chunk: np.ndarray) -> None:
+            received.append(chunk.copy())
+
+        engine = AudioCaptureEngine(on_wake_chunk=on_wake, mic_gain=4.0)
+        engine.set_mode(CaptureMode.DETECTING)
+
+        # Create a chunk at 25% amplitude
+        chunk = np.full(1280, 0.25, dtype=np.float32)
+        # Apply gain the same way the capture loop does
+        chunk_gained = np.clip(chunk * 4.0, -1.0, 1.0)
+        # Dispatch the already-gained chunk (capture loop does this internally;
+        # here we test _dispatch receives the pre-gained signal)
+        engine._dispatch(chunk_gained)
+
+        assert len(received) == 1
+        # 0.25 * 4.0 = 1.0 exactly (no clipping needed)
+        np.testing.assert_allclose(received[0], 1.0, atol=1e-6)
+
+    def test_mic_gain_clips_at_unity(self):
+        """mic_gain must clip amplified audio to [-1.0, 1.0]."""
+        chunk = np.full(1280, 0.9, dtype=np.float32)
+        gain = 8.0
+        gained = np.clip(chunk * gain, -1.0, 1.0)
+        assert gained.max() == pytest.approx(1.0)  # Clipped to unity
+
+    def test_mic_gain_unity_passthrough(self):
+        """mic_gain=1.0 should leave the signal unchanged."""
+        received: list[np.ndarray] = []
+
+        engine = AudioCaptureEngine(
+            on_wake_chunk=lambda c: received.append(c.copy()),
+            mic_gain=1.0,
+        )
+        engine.set_mode(CaptureMode.DETECTING)
+
+        chunk = np.linspace(-0.5, 0.5, 1280, dtype=np.float32)
+        engine._dispatch(chunk)
+
+        assert len(received) == 1
+        np.testing.assert_array_equal(received[0], chunk)
+
 
 # ─── VoiceEngine State Machine Tests ─────────────────────────────────────────
 

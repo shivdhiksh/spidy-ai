@@ -74,7 +74,13 @@ _ACTION_ALIASES: dict[str, str] = {
     "desktop_context_menu": "desktop_context_menu",
     # "open terminal" intent → launch_app (entity extractor sets name=terminal)
     "open_terminal": "launch_app",
+
+    # M13.3 — Window control (BUG 3 FIX)
+    # minimize_window and maximize_window route to AppSkill
+    "minimize_window": "minimize_window",
+    "maximize_window": "maximize_window",
 }
+
 
 
 class Planner:

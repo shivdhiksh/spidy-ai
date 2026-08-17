@@ -35,3 +35,21 @@ aiosqlite>=0.20.0       # Async SQLite for episodic memory (EpisodicMemory)
 # pip install mss                  # Ultra-fast screenshot capture
 # pip install easyocr              # On-screen text extraction (OCR) — ~500 MB models
 # pip install opencv-python        # UI region detection via contour analysis
+
+# Milestone 14 — Voice Companion (all optional, graceful degrade)
+# pip install webrtcvad-wheels     # Enhanced VAD (noise-tolerant) — falls back to energy VAD
+#                                  # Windows-compatible wheel; Linux: pip install webrtcvad
+
+# ── Milestone 1 — Voice Pipeline ──────────────────────────────────────────────
+# Wake word detection (REQUIRED for voice mode)
+openwakeword>=0.6.0         # Wake word detection (hey_jarvis, alexa, etc.)
+                            # After install, download models:
+                            #   py -c "from openwakeword.utils import download_models; download_models(['hey_jarvis'])"
+                            # Requires onnxruntime (already listed above via sounddevice transitive dep)
+                            # NOTE: tflite_runtime is NOT needed — onnxruntime is used automatically
+
+# Speech recognition (REQUIRED for voice mode)
+faster-whisper>=1.0.0       # Fast Whisper STT (CPU int8 by default, CUDA float16 if available)
+
+# Text-to-speech (REQUIRED for voice mode)
+# pip install piper-tts       # Piper TTS — high-quality offline neural TTS

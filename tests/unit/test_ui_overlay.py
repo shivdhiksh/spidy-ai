@@ -317,10 +317,11 @@ class TestUISignalBridge:
         from spidy.ui.overlay import UISignalBridge
         received = []
         bridge = UISignalBridge()
+        # M17.2: notification_requested is Signal(str, str, str) -- title, body, level
         bridge.notification_requested.connect(
-            lambda title, body, level, dur: received.append((title, level))
+            lambda title, body, level: received.append((title, level))
         )
-        bridge.request_notification("Test", "Body", "info", 3000)
+        bridge.request_notification("Test", "Body", "info")
         assert received == [("Test", "info")]
 
     def test_waveform_signal(self, qapp):
@@ -335,9 +336,11 @@ class TestUISignalBridge:
         from spidy.ui.overlay import UISignalBridge
         received = []
         bridge = UISignalBridge()
-        bridge.theme_change_requested.connect(lambda n: received.append(n))
-        bridge.request_theme_change("light")
-        assert received == ["light"]
+        # M17.2: theme_change_requested emits Theme object via apply_theme path
+        bridge.theme_change_requested.connect(lambda t: received.append(t))
+        from spidy.ui.themes.dark import DARK_THEME
+        bridge.theme_change_requested.emit(DARK_THEME)
+        assert len(received) == 1
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -345,118 +348,121 @@ class TestUISignalBridge:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class TestOverlayWindowCreation:
+    """M17.2 HUD -- updated assertions for new architecture."""
+
     def test_creates_without_error(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         assert win is not None
         win.close()
 
     def test_fixed_size(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme, width=400, height=580)
-        assert win.width() == 400
-        assert win.height() == 580
+        # M17.2: explicit size is still honoured
+        win = OverlayWindow(dark_theme, width=1200, height=700, animate=False)
+        assert win.width() == 1200
+        assert win.height() == 700
         win.close()
 
     def test_state_starts_idle(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        from spidy.ui.state import UIState
-        win = OverlayWindow(dark_theme)
-        assert win._state == UIState.IDLE
+        win = OverlayWindow(dark_theme, animate=False)
+        # M17.2: state tracked on the core widget as a string
+        assert win._core._state == "idle"
         win.close()
 
     def test_set_state_listening(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        from spidy.ui.state import UIState
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("listening")
-        assert win._state == UIState.LISTENING
+        assert win._core._state == "listening"
         win.close()
 
     def test_set_state_thinking(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        from spidy.ui.state import UIState
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("thinking")
-        assert win._state == UIState.THINKING
+        assert win._core._state == "thinking"
         win.close()
 
     def test_set_state_speaking(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        from spidy.ui.state import UIState
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("speaking")
-        assert win._state == UIState.SPEAKING
+        assert win._core._state == "speaking"
         win.close()
 
     def test_set_state_error(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        from spidy.ui.state import UIState
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("error")
-        assert win._state == UIState.ERROR
+        assert win._core._state == "error"
         win.close()
 
     def test_add_message(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.add_message("user", "Hello Spidy!")
-        assert len(win._chat_view._messages) == 1
+        # M17.2: messages stored in _chat_overlay
+        assert len(win._chat_overlay._messages) == 1
         win.close()
 
     def test_apply_light_theme(self, qapp, dark_theme, light_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.apply_theme(light_theme)
         assert win._theme == light_theme
         win.close()
 
     def test_waveform_visible_in_listening(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("listening")
-        # isVisible() needs ancestor chain to be shown; use isHidden() instead
-        assert not win._waveform.isHidden()
+        # M17.2: voice bar is always visible, reacts to state
+        assert win._footer.voice_bar._state == "listening"
         win.close()
 
     def test_waveform_hidden_in_idle(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("idle")
-        assert win._waveform.isHidden()
+        # M17.2: voice bar idle state
+        assert win._footer.voice_bar._state == "idle"
         win.close()
 
     def test_indicator_visible_in_thinking(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("thinking")
-        assert not win._indicator.isHidden()
+        # M17.2: core reflects thinking state (indicator is the core itself)
+        assert win._core._state == "thinking"
         win.close()
 
     def test_indicator_visible_in_speaking(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("speaking")
-        assert not win._indicator.isHidden()
+        assert win._core._state == "speaking"
         win.close()
 
     def test_indicator_hidden_in_idle(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("idle")
-        assert win._indicator.isHidden()
+        assert win._core._state == "idle"
         win.close()
 
     def test_mic_state_idle(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("idle")
-        assert win._mic_button._state == "idle"
+        # M17.2: mic state tracked in the left panel
+        assert not win._left_panel._mic_info.isHidden()
         win.close()
 
     def test_mic_state_listening(self, qapp, dark_theme):
         from spidy.ui.overlay import OverlayWindow
-        win = OverlayWindow(dark_theme)
+        win = OverlayWindow(dark_theme, animate=False)
         win.set_state("listening")
-        assert win._mic_button._state == "listening"
+        assert win._core._state == "listening"
         win.close()

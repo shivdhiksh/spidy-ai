@@ -147,7 +147,31 @@ class MemoryManager(MemoryInterface):
         if self._episodic is not None:
             await self._episodic.initialize()
 
-        # SemanticMemory initialises lazily on first store() — no call needed here.
+        # P1-4: SemanticMemory initialises lazily, but loading SentenceTransformer
+        # on the first real request adds 1.5–3 s of blocking latency.  Instead, we
+        # kick off the initialisation in a background thread immediately after
+        # EpisodicMemory is ready.  This is fire-and-forget:
+        #   - It is idempotent (_ensure_initialized is a no-op after first success).
+        #   - If the warmup finishes before the first store()/search() call, the
+        #     first request is instant.
+        #   - If the first request arrives before the warmup finishes,
+        #     _ensure_initialized() runs again synchronously (safe, idempotent).
+        #   - Exceptions are caught and logged; they do not crash Spidy.
+        if self._semantic is not None:
+            import asyncio as _asyncio
+
+            async def _warmup_semantic() -> None:
+                try:
+                    await _asyncio.to_thread(self._semantic._ensure_initialized)  # noqa: SLF001
+                    log.info("SemanticMemory: background warmup complete.")
+                except Exception as exc:  # noqa: BLE001
+                    log.warning(
+                        "SemanticMemory: background warmup failed (non-fatal): {exc}",
+                        exc=exc,
+                    )
+
+            _asyncio.create_task(_warmup_semantic())
+            log.debug("SemanticMemory: background warmup task scheduled.")
 
         self._initialized = True
         log.info(

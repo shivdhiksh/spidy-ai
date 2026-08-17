@@ -191,3 +191,146 @@ class TestLLMDecomposition:
         # Only valid items should pass
         assert len(tasks) >= 1
         assert tasks[0].description == "Good step"
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Terminal flag — heuristic decomposition
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestTerminalFlag:
+    """Verify that the terminal flag is set correctly by the decomposer."""
+
+    @pytest.mark.asyncio
+    async def test_single_app_launch_is_terminal(self) -> None:
+        """Single-step heuristic patterns must produce exactly one terminal task."""
+        d = make_decomposer()
+        for goal in [
+            "open notepad",
+            "open calculator",
+            "open edge",
+            "launch edge",
+            "open chrome",
+            "open vs code",
+            "open discord",
+        ]:
+            tasks = await d.decompose(goal)
+            assert len(tasks) == 1, f"Expected 1 task for {goal!r}, got {len(tasks)}"
+            assert tasks[0].terminal, f"Task for {goal!r} should be terminal=True"
+
+    @pytest.mark.asyncio
+    async def test_multi_step_heuristic_last_task_is_terminal(self) -> None:
+        """For multi-step heuristic patterns, only the LAST task is terminal."""
+        d = make_decomposer()
+        tasks = await d.decompose("Create a Flask project")
+        assert len(tasks) > 1
+        assert tasks[-1].terminal, "Last task should be terminal=True"
+        for t in tasks[:-1]:
+            assert not t.terminal, f"Non-final task {t.description!r} should not be terminal"
+
+    @pytest.mark.asyncio
+    async def test_unknown_passthrough_is_terminal(self) -> None:
+        """Unknown goals produce a single-task passthrough that is terminal."""
+        d = make_decomposer()
+        tasks = await d.decompose("Completely unknown goal XYZ987")
+        assert len(tasks) == 1
+        assert tasks[0].terminal
+
+    @pytest.mark.asyncio
+    async def test_terminal_survives_state_transitions(self) -> None:
+        """terminal flag is preserved across all state transitions."""
+        d = make_decomposer()
+        t = (await d.decompose("open notepad"))[0]
+        assert t.terminal
+        assert t.mark_running().terminal
+        assert t.mark_running().mark_completed("done").terminal
+        assert t.mark_skipped("skip").terminal
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Heuristic-first — LLM is bypassed for known patterns
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestHeuristicFirst:
+    """Verify the heuristic takes precedence over LLM for known goals."""
+
+    @pytest.mark.asyncio
+    async def test_app_launch_bypasses_llm(self) -> None:
+        """'open edge' must produce 1 heuristic task even when LLM is available."""
+        llm = make_mock_llm(
+            '[{"description":"Find Edge","utterance":"find edge on desktop"},'
+            '{"description":"Double-click","utterance":"double click edge"},'
+            '{"description":"Minimise","utterance":"minimise other windows"}]'
+        )
+        d = make_decomposer()
+        tasks = await d.decompose("open edge", llm_client=llm)
+        assert len(tasks) == 1, (
+            f"Expected 1 heuristic task for 'open edge', got {len(tasks)}"
+        )
+        assert tasks[0].terminal
+        llm.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_notepad_bypasses_llm(self) -> None:
+        llm = make_mock_llm('[{"description":"Find Notepad","utterance":"find notepad"}]')
+        d = make_decomposer()
+        tasks = await d.decompose("open notepad", llm_client=llm)
+        assert len(tasks) == 1
+        llm.complete.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_heuristic_goal_uses_llm(self) -> None:
+        """Goals not in the heuristic table must consult the LLM."""
+        llm = make_mock_llm(
+            '[{"description":"Step 1","utterance":"do step one"},'
+            '{"description":"Step 2","utterance":"do step two"}]'
+        )
+        d = make_decomposer()
+        tasks = await d.decompose(
+            "Reconfigure my entire dev environment from scratch",
+            llm_client=llm,
+        )
+        llm.complete.assert_called_once()
+        assert len(tasks) == 2
+
+    @pytest.mark.asyncio
+    async def test_flask_heuristic_beats_llm(self) -> None:
+        """Flask project is in the heuristic table — LLM must be bypassed."""
+        llm = make_mock_llm('[{"description":"LLM step","utterance":"llm step"}]')
+        d = make_decomposer()
+        tasks = await d.decompose("Create a Flask project", llm_client=llm)
+        llm.complete.assert_not_called()
+        assert len(tasks) >= 3
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# LLM terminal field parsing
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+class TestLLMTerminalParsing:
+    """Verify the LLM terminal=true JSON field is parsed correctly."""
+
+    @pytest.mark.asyncio
+    async def test_llm_terminal_true_parsed(self) -> None:
+        llm = make_mock_llm(
+            '[{"description":"Do A","utterance":"do a","terminal":false},'
+            '{"description":"Do B","utterance":"do b","terminal":true}]'
+        )
+        d = make_decomposer()
+        tasks = await d.decompose("XYZ non-heuristic goal entirely new", llm_client=llm)
+        assert len(tasks) == 2
+        assert not tasks[0].terminal
+        assert tasks[1].terminal
+
+    @pytest.mark.asyncio
+    async def test_llm_missing_terminal_defaults_false(self) -> None:
+        """Old LLM responses without 'terminal' key default to terminal=False."""
+        llm = make_mock_llm(
+            '[{"description":"Step A","utterance":"do a"},'
+            '{"description":"Step B","utterance":"do b"}]'
+        )
+        d = make_decomposer()
+        tasks = await d.decompose("XYZ non-heuristic goal entirely new", llm_client=llm)
+        assert not tasks[0].terminal
+        assert not tasks[1].terminal

@@ -1,6 +1,6 @@
 """
-Agent Events (Milestone 13)
-============================
+Agent Events (Milestone 13 → Milestone 16 upgrade)
+====================================================
 All EventBus events published by the Autonomous Agent layer.
 
 Topic namespace: ``agent.*``
@@ -15,6 +15,7 @@ agent.goal_started      — execution of a goal began
 agent.goal_completed    — goal finished successfully
 agent.goal_failed       — goal failed permanently
 agent.goal_cancelled    — goal was cancelled by user
+agent.goal_verified     — final goal verification result
 agent.task_started      — a task within a goal began executing
 agent.task_completed    — a task finished successfully
 agent.task_failed       — a task failed (may still be retried)
@@ -22,6 +23,10 @@ agent.task_skipped      — a task was skipped
 agent.progress          — percentage-based progress update
 agent.reflection        — reflection engine decision logged
 agent.clarification     — agent needs user input to continue
+agent.observation       — environment observation after a task
+agent.evaluation        — structured task outcome evaluation
+agent.replanning        — replanner triggered after soft failure
+agent.confirmation_required — task requires user approval before proceeding
 """
 
 from __future__ import annotations
@@ -84,6 +89,24 @@ class GoalCancelledEvent(Event):
 
 
 @dataclass
+class GoalVerifiedEvent(Event):
+    """
+    Emitted after GoalVerifier.verify() completes.
+
+    Carries the final verification verdict and human-readable summary.
+    Subscribers (UI, logging) can use this to display a definitive outcome.
+    """
+    topic = "agent.goal_verified"
+    goal_id: str = ""
+    description: str = ""
+    verified: bool = True
+    confidence: str = "medium"
+    summary: str = ""
+    method: str = "task_results"
+    session_id: str = ""
+
+
+@dataclass
 class TaskStartedEvent(Event):
     """Emitted when a task within a goal begins executing."""
     topic = "agent.task_started"
@@ -93,6 +116,7 @@ class TaskStartedEvent(Event):
     task_index: int = 0
     total_tasks: int = 0
     attempt: int = 1
+    authority_level: str = "safe"
     session_id: str = ""
 
 
@@ -177,4 +201,83 @@ class AgentClarificationEvent(Event):
     goal_id: str = ""
     task_id: str = ""
     question: str = ""
+    session_id: str = ""
+
+
+# ── New events (Milestone 16 autonomous agent upgrade) ─────────────────────────
+
+
+@dataclass
+class AgentObservationEvent(Event):
+    """
+    Emitted after TaskObserver.observe() completes for a task.
+
+    Carries the observation method used and the resulting success signal.
+    Useful for debugging, audit trails, and UI progress display.
+    """
+    topic = "agent.observation"
+    goal_id: str = ""
+    task_id: str = ""
+    task_description: str = ""
+    method: str = ""
+    summary: str = ""
+    success_signal: bool | None = None
+    session_id: str = ""
+
+
+@dataclass
+class AgentEvaluationEvent(Event):
+    """
+    Emitted after TaskEvaluator.evaluate() produces a TaskOutcome.
+
+    Allows UI and logging subscribers to see the structured verdict
+    (success, confidence, whether replanning was triggered).
+    """
+    topic = "agent.evaluation"
+    goal_id: str = ""
+    task_id: str = ""
+    task_description: str = ""
+    success: bool = False
+    confidence: str = "unknown"
+    should_replan: bool = False
+    reason: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class AgentReplanningEvent(Event):
+    """
+    Emitted when the Replanner is triggered after a soft task failure.
+
+    Carries the attempt counter so the UI can show "Replanning (1/2)".
+    """
+    topic = "agent.replanning"
+    goal_id: str = ""
+    failed_task_id: str = ""
+    failed_task_description: str = ""
+    attempt: int = 1
+    max_attempts: int = 2
+    reason: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class AgentConfirmationRequiredEvent(Event):
+    """
+    Emitted when a task requires explicit user confirmation before proceeding.
+
+    The UI must prompt the user. The ExecutionLoop pauses until:
+    - user confirms (publishes agent.confirmation_granted)
+    - user denies  (publishes agent.confirmation_denied)
+    - or the goal is cancelled
+
+    This event is published BEFORE Brain.process() — the LLM never sees it.
+    """
+    topic = "agent.confirmation_required"
+    goal_id: str = ""
+    task_id: str = ""
+    task_description: str = ""
+    utterance: str = ""
+    authority_level: str = "confirm"
+    prompt: str = ""
     session_id: str = ""

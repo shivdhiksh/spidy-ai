@@ -53,6 +53,7 @@ Usage
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING, Any
 
 from spidy.brain.context_resolver import ContextResolver
@@ -205,6 +206,13 @@ class Brain:
         7. Natural language response composition
         8. Memory storage
 
+        Latency instrumentation
+        -----------------------
+        Every pipeline stage is timed individually and logged at INFO
+        level as a structured breakdown.  This makes it possible to
+        identify exactly which stage is responsible for high end-to-end
+        latency without guessing.
+
         Parameters
         ----------
         utterance:
@@ -237,13 +245,17 @@ class Brain:
             utterance=utterance,
         ))
 
+        _pipeline_start = time.monotonic()
+
         # ── Step 1: Context resolution ──────────────────────────────────────
         #
         # Resolve pronouns and references ("it", "that", "the file") against
         # the conversation history before anything else.
+        _t0 = time.monotonic()
         entity_turns = self._conversation.get_entity_history(max_turns=10)
         resolution = self._context_resolver.resolve(utterance, entity_turns)
         resolved_utterance = resolution.utterance
+        _t_context = (time.monotonic() - _t0) * 1000
 
         if resolution.was_resolved:
             log.debug(
@@ -267,7 +279,9 @@ class Brain:
         #
         # We classify on the RESOLVED utterance but store the ORIGINAL as the
         # conversation text (so conversation history reads naturally).
+        _t0 = time.monotonic()
         intent = await self._classifier.classify(resolved_utterance)
+        _t_intent = (time.monotonic() - _t0) * 1000
 
         # ── Step 3: Add user turn with intent attached ───────────────────────
         #
@@ -275,9 +289,12 @@ class Brain:
         self._conversation.add_turn(TurnRole.USER, utterance, intent=intent)
 
         # ── Step 4: Decide ──────────────────────────────────────────────────
+        _t0 = time.monotonic()
         decision = await self._decision_engine.decide(intent, session_id=sid)
+        _t_decision = (time.monotonic() - _t0) * 1000
 
         # ── Step 6: Recall relevant memories ───────────────────────────────
+        _t0 = time.monotonic()
         memory_context = ""
         if self._memory is not None:
             try:
@@ -288,8 +305,10 @@ class Brain:
                     )
             except Exception as exc:  # noqa: BLE001
                 log.warning("Brain: memory recall failed (non-fatal): {exc}", exc=exc)
+        _t_memory = (time.monotonic() - _t0) * 1000
 
         # ── Step 7: Plan ────────────────────────────────────────────────────
+        _t0 = time.monotonic()
         plan = await self._planner.plan(
             decision=decision,
             session_id=sid,
@@ -298,6 +317,7 @@ class Brain:
                 + (f"\n\nRelevant memories:\n{memory_context}" if memory_context else "")
             ),
         )
+        _t_plan = (time.monotonic() - _t0) * 1000
 
         # ── Step 8: Build LLM messages ──────────────────────────────────────
         llm_messages = self._conversation.get_llm_messages(include_system=True)
@@ -308,18 +328,46 @@ class Brain:
         ]
 
         # ── Step 9: Execute plan ────────────────────────────────────────────
+        # NOTE: This step includes the actual LLM call when the decision is LLM-type.
+        # The LLMRouter will log provider, model, and duration separately at INFO level.
+        _t0 = time.monotonic()
         results = await self._router.execute(
             plan=plan,
             session_id=sid,
             llm_messages=typed_messages,
             user_name=self._user_name,
         )
+        _t_execute = (time.monotonic() - _t0) * 1000
 
         # ── Step 10: Compose response ───────────────────────────────────────
         #
         # V2: ResponseComposer handles multi-step aggregation + natural phrasing.
+        _t0 = time.monotonic()
         primary_action = plan.first.action if plan.first else ""
         response_text = self._response_composer.compose(results, action=primary_action)
+        _t_compose = (time.monotonic() - _t0) * 1000
+
+        # ── Latency breakdown log ───────────────────────────────────────────
+        _total_ms = (time.monotonic() - _pipeline_start) * 1000
+        log.info(
+            "[Brain latency] "
+            "context_resolve={ctx:.0f}ms "
+            "intent_classify={intent:.0f}ms "
+            "decision={dec:.0f}ms "
+            "memory_recall={mem:.0f}ms "
+            "plan={plan:.0f}ms "
+            "tool_execute={exe:.0f}ms "
+            "compose={comp:.0f}ms "
+            "total={tot:.0f}ms",
+            ctx=_t_context,
+            intent=_t_intent,
+            dec=_t_decision,
+            mem=_t_memory,
+            plan=_t_plan,
+            exe=_t_execute,
+            comp=_t_compose,
+            tot=_total_ms,
+        )
 
         # ── Step 11: Record action in conversation ──────────────────────────
         if results:
