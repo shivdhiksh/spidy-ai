@@ -88,6 +88,7 @@ _CONFIRM_KEYWORDS: list[str] = [
     "tweet", "instagram", "facebook post", "linkedin post",
     "submit form", "place order", "buy", "purchase",
     # File destructive
+    "delete", "remove", "erase", "trash", "destroy",
     "delete file", "delete folder", "remove file", "remove folder",
     "overwrite", "replace file",
     "move to trash", "empty trash",
@@ -95,12 +96,14 @@ _CONFIRM_KEYWORDS: list[str] = [
     "install software", "install application", "install app",
     "uninstall",
     "change password", "reset password",
-    "grant permission", "revoke permission",
+    # Code execution escape hatches
+    "code_exec", "execute_code", "run_code", "run arbitrary code", "eval(",
     # Finance
     "transfer money", "send payment", "wire transfer",
     # Git
     "git push", "force push", "git rm",
 ]
+
 
 # AWARE — T1: write/modify but low-risk
 _AWARE_KEYWORDS: list[str] = [
@@ -162,6 +165,11 @@ class TaskAuthorityChecker:
         utterance_lower = (task.utterance or "").lower()
         description_lower = (task.description or "").lower()
         combined = f"{utterance_lower} {description_lower}"
+
+        # M18: also scan structured action fields (action, target) to prevent bypass
+        if task.action and isinstance(task.action, dict):
+            action_str = " ".join(str(v) for v in task.action.values() if v)
+            combined = f"{combined} {action_str.lower()}"
 
         # Check from most restrictive to least
         if any(kw in combined for kw in _CRITICAL_KEYWORDS):

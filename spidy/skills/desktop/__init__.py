@@ -94,6 +94,15 @@ def register_desktop_skills(
         except Exception as exc:  # noqa: BLE001
             log.warning("Failed to register SystemControlSkill: {exc}", exc=exc)
 
+    # ── ComputerControlSkill ──────────────────────────────────────────────
+    if _enabled("computer_control_skill_enabled"):
+        try:
+            from spidy.skills.desktop.computer_control_skill import ComputerControlSkill
+            registry.register(ComputerControlSkill(bus=bus))
+            registered.append("computer_control_skill")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("Failed to register ComputerControlSkill: {exc}", exc=exc)
+
     log.info(
         "Desktop skills registered: {skills}",
         skills=registered,
@@ -102,3 +111,4 @@ def register_desktop_skills(
 
 
 __all__ = ["register_desktop_skills"]
+

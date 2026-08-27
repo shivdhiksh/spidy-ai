@@ -57,8 +57,8 @@ class TestDeviceManagerDetect:
         DeviceManager._instance = None
 
     def test_detect_cpu_when_torch_missing(self):
-        """If torch is not importable, should gracefully fall back to CPU."""
-        with patch.dict("sys.modules", {"torch": None}):
+        """If torch and ctranslate2 are not available, should gracefully fall back to CPU."""
+        with patch.dict("sys.modules", {"torch": None, "ctranslate2": None}):
             dm = DeviceManager()
             info = dm.detect()
 
@@ -89,7 +89,7 @@ class TestDeviceManagerDetect:
         mock_torch = MagicMock()
         mock_torch.cuda.is_available.return_value = False
 
-        with patch.dict("sys.modules", {"torch": mock_torch}):
+        with patch.dict("sys.modules", {"torch": mock_torch, "ctranslate2": None}):
             dm = DeviceManager()
             info = dm.detect()
 
@@ -98,7 +98,7 @@ class TestDeviceManagerDetect:
 
     def test_detect_stores_singleton(self):
         """detect() should store the result for later retrieval via get()."""
-        with patch.dict("sys.modules", {"torch": None}):
+        with patch.dict("sys.modules", {"torch": None, "ctranslate2": None}):
             dm = DeviceManager()
             info = dm.detect()
 
@@ -112,7 +112,7 @@ class TestDeviceManagerDetect:
 
     def test_multiple_detect_calls_are_safe(self):
         """Calling detect() twice should not raise and second call overwrites singleton."""
-        with patch.dict("sys.modules", {"torch": None}):
+        with patch.dict("sys.modules", {"torch": None, "ctranslate2": None}):
             dm = DeviceManager()
             info1 = dm.detect()
             info2 = dm.detect()

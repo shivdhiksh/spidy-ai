@@ -417,24 +417,57 @@ class SpidyCoreWidget(QWidget):
             )
             p.drawPixmap(int(cx - scaled.width() / 2), int(cy - scaled.height() / 2), scaled)
         else:
-            # Futuristic "S" monogram for now -- replaceable via logo slot
-            # Logo monogram font — capped 10pt min, 22pt max
-            font = QFont("Consolas", max(10, min(22, int(logo_r * 0.95))), QFont.Weight.Bold)
-            p.setFont(font)
-            col = QColor(self._c_nucleus)
-            col.setAlphaF(0.85)
-            p.setPen(QPen(col))
-            rect = QRectF(cx - logo_r, cy - logo_r, logo_r * 2, logo_r * 1.6)
-            p.drawText(rect, Qt.AlignmentFlag.AlignCenter, "S")
+            # High-tech geometric cyber emblem (vector-drawn)
+            emblem_pen = QPen(QColor(self._c_nucleus), 1.8)
+            emblem_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            emblem_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+            p.setPen(emblem_pen)
+            p.setBrush(Qt.BrushStyle.NoBrush)
 
-            # Version label font — capped 6pt min, 11pt max
-            font_small = QFont("Consolas", max(6, min(11, int(logo_r * 0.32))))
+            # Central diamond core
+            d_size = logo_r * 0.45
+            diamond = QPainterPath()
+            diamond.moveTo(cx, cy - d_size)
+            diamond.lineTo(cx + d_size * 0.8, cy)
+            diamond.lineTo(cx, cy + d_size)
+            diamond.lineTo(cx - d_size * 0.8, cy)
+            diamond.closeSubpath()
+            p.drawPath(diamond)
+
+            # Angular legs / cyber lines
+            leg_pen = QPen(QColor(self._c_nucleus), 1.4)
+            p.setPen(leg_pen)
+            s_leg = logo_r * 0.95
+            # Top-left leg
+            p.drawLine(QPointF(cx - d_size * 0.6, cy - d_size * 0.4), QPointF(cx - s_leg * 0.85, cy - s_leg * 0.65))
+            p.drawLine(QPointF(cx - s_leg * 0.85, cy - s_leg * 0.65), QPointF(cx - s_leg, cy - s_leg * 0.25))
+            # Top-right leg
+            p.drawLine(QPointF(cx + d_size * 0.6, cy - d_size * 0.4), QPointF(cx + s_leg * 0.85, cy - s_leg * 0.65))
+            p.drawLine(QPointF(cx + s_leg * 0.85, cy - s_leg * 0.65), QPointF(cx + s_leg, cy - s_leg * 0.25))
+            # Bottom-left leg
+            p.drawLine(QPointF(cx - d_size * 0.6, cy + d_size * 0.4), QPointF(cx - s_leg * 0.85, cy + s_leg * 0.65))
+            p.drawLine(QPointF(cx - s_leg * 0.85, cy + s_leg * 0.65), QPointF(cx - s_leg, cy + s_leg * 0.35))
+            # Bottom-right leg
+            p.drawLine(QPointF(cx + d_size * 0.6, cy + d_size * 0.4), QPointF(cx + s_leg * 0.85, cy + s_leg * 0.65))
+            p.drawLine(QPointF(cx + s_leg * 0.85, cy + s_leg * 0.65), QPointF(cx + s_leg, cy + s_leg * 0.35))
+
+            # Inner 'S' monogram
+            font = QFont("Consolas", max(9, min(20, int(logo_r * 0.55))), QFont.Weight.Bold)
+            p.setFont(font)
+            col = QColor(self._c_text)
+            col.setAlphaF(0.95)
+            p.setPen(QPen(col))
+            p.drawText(QRectF(cx - d_size, cy - d_size, d_size * 2, d_size * 2), Qt.AlignmentFlag.AlignCenter, "S")
+
+            # Technical branding below core
+            font_small = QFont("Consolas", max(6, min(10, int(logo_r * 0.26))), QFont.Weight.DemiBold)
+            font_small.setLetterSpacing(QFont.SpacingType.AbsoluteSpacing, 1)
             p.setFont(font_small)
             small_col = QColor(self._c_text)
-            small_col.setAlphaF(0.45)
+            small_col.setAlphaF(0.65)
             p.setPen(QPen(small_col))
             p.drawText(
-                QRectF(cx - logo_r, cy + logo_r * 0.5, logo_r * 2, logo_r * 0.5),
+                QRectF(cx - logo_r, cy + logo_r * 0.85, logo_r * 2, logo_r * 0.4),
                 Qt.AlignmentFlag.AlignCenter, "SPIDY CORE",
             )
 

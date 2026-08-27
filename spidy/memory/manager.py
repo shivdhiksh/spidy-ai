@@ -102,6 +102,9 @@ class MemoryManager(MemoryInterface):
             db_filename = config.long_term.db_filename
             collection_name = config.semantic.collection_name
             embedding_model = config.semantic.embedding_model
+            semantic_device = getattr(config.semantic, "device", "auto")
+        else:
+            semantic_device = "auto"
 
         # ── Working Memory ─────────────────────────────────────────────────
         self._working: WorkingMemory | None = None
@@ -128,6 +131,7 @@ class MemoryManager(MemoryInterface):
                 collection_name=collection_name,
                 embedding_model=embedding_model,
                 persist_dir=chroma_dir,
+                device=semantic_device,
             )
 
         self._initialized = False

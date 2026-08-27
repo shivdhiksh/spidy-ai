@@ -158,3 +158,47 @@ class SearchResult:
 
     def to_dict(self) -> dict:
         return {"title": self.title, "url": self.url, "snippet": self.snippet}
+
+
+# ─── Browser Target Normalization & Process Maps ──────────────────────────────
+
+_BROWSER_ALIASES: dict[str, str] = {
+    "edge": "edge",
+    "msedge": "edge",
+    "microsoft edge": "edge",
+    "edge browser": "edge",
+    "ms edge": "edge",
+    "chrome": "chrome",
+    "google chrome": "chrome",
+    "chrome browser": "chrome",
+    "firefox": "firefox",
+    "mozilla firefox": "firefox",
+    "firefox browser": "firefox",
+    "chromium": "chromium",
+    "webkit": "webkit",
+}
+
+BROWSER_PROCESS_MAP: dict[str, str] = {
+    "edge": "msedge.exe",
+    "chrome": "chrome.exe",
+    "firefox": "firefox.exe",
+    "chromium": "chrome.exe",
+}
+
+BROWSER_PLAYWRIGHT_CHANNELS: dict[str, str] = {
+    "edge": "msedge",
+    "chrome": "chrome",
+}
+
+
+def normalize_browser_target(target: str | None, default: str = "chromium") -> str:
+    """
+    Normalize browser names and aliases into canonical browser identifiers.
+
+    Canonical outputs: ``"edge"`` | ``"chrome"`` | ``"firefox"`` | ``"chromium"``.
+    """
+    if not target or not isinstance(target, str):
+        return default
+    clean = target.lower().strip()
+    return _BROWSER_ALIASES.get(clean, default)
+

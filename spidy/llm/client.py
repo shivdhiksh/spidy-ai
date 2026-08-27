@@ -4,11 +4,16 @@ LLM Client — Multi-Backend Abstraction Layer
 Abstract interface and data types shared by all LLM backends.
 
 Supported providers:
-  Ollama  (local, default)  → spidy.llm.backends.ollama
-  NVIDIA  (cloud, primary)  → spidy.llm.backends.nvidia  (NIM API, OpenAI-compatible)
-  OpenAI  (cloud)           → spidy.llm.backends.openai
-  Claude  (cloud)           → spidy.llm.backends.claude
-  Gemini  (cloud)           → spidy.llm.backends.gemini
+  NVIDIA      (cloud, primary)   → spidy.llm.backends.nvidia      (NIM API, OpenAI-compatible)
+  OpenRouter  (cloud, fallback)  → spidy.llm.backends.openrouter  (OpenAI-compatible, 100+ models)
+  OpenAI      (cloud)            → spidy.llm.backends.openai
+  Claude      (cloud)            → spidy.llm.backends.claude
+  Gemini      (cloud)            → spidy.llm.backends.gemini
+
+  NOTE: Ollama (local) is no longer a supported runtime provider.
+        The OllamaClient class is retained for backward compatibility only.
+        Passing ``name="ollama"`` to the factory raises ValueError with a
+        deprecation message.
 
 Design principles
 -----------------
@@ -162,7 +167,7 @@ class LLMClientFactory:
         Supports: ollama | openai | claude | anthropic | gemini
         """
         return LLMClientFactory._build_provider(
-            name=(config.provider or "ollama").lower(),
+            name=(config.provider or "nvidia").lower(),
             model=config.model,
             base_url=config.base_url,
             api_key=config.api_key or "",
@@ -200,9 +205,11 @@ class LLMClientFactory:
 
         enabled = [p for p in config.providers if p.enabled]
         if not enabled:
-            log.warning("No LLM providers enabled — using default OllamaClient.")
-            from spidy.llm.backends.ollama import OllamaClient
-            return OllamaClient()
+            raise ValueError(
+                "No LLM providers enabled — cannot build router. "
+                "Enable at least one provider in spidy_config.yaml or set "
+                "NVIDIA_API_KEY / OPENROUTER_API_KEY."
+            )
 
         clients = [LLMClientFactory.build_from_provider_config(p) for p in enabled]
 
@@ -229,20 +236,30 @@ class LLMClientFactory:
     ) -> BaseLLMClient:
         """Internal: instantiate one provider client by name."""
         if name == "ollama":
-            from spidy.llm.backends.ollama import OllamaClient
-            return OllamaClient(
-                base_url=base_url or "http://localhost:11434",
-                model=model or "llama3.2:3b",
-                temperature=temperature,
-                max_tokens=max_tokens,
-                timeout=timeout,
+            # DEPRECATED: Ollama is no longer a supported runtime provider.
+            # OllamaClient still exists for backward compatibility, but it is
+            # never selected by default and should not be used in new configs.
+            raise ValueError(
+                "Ollama provider is deprecated and will not be started. "
+                "Update your spidy_config.yaml to use 'openrouter' as the "
+                "fallback provider instead of 'ollama'."
             )
         if name in ("nvidia", "nim"):
             from spidy.llm.backends.nvidia import NvidiaClient
             return NvidiaClient(
                 api_key=api_key,
-                model=model or "meta/llama-3.1-8b-instruct",
+                model=model or "nvidia/nemotron-3-ultra-550b-a55b",
                 base_url=base_url or "https://integrate.api.nvidia.com/v1",
+                temperature=temperature,
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+        if name == "openrouter":
+            from spidy.llm.backends.openrouter import OpenRouterClient
+            return OpenRouterClient(
+                api_key=api_key,
+                model=model or "nvidia/nemotron-3-ultra-550b-a55b:free",
+                base_url=base_url or "https://openrouter.ai/api/v1",
                 temperature=temperature,
                 max_tokens=max_tokens,
                 timeout=timeout,
@@ -278,12 +295,8 @@ class LLMClientFactory:
                 timeout=timeout,
             )
 
-        log.warning("Unknown LLM provider '{p}'. Falling back to Ollama.", p=name)
-        from spidy.llm.backends.ollama import OllamaClient
-        return OllamaClient(
-            base_url=base_url or "http://localhost:11434",
-            model=model or "llama3.2:3b",
-            temperature=temperature,
-            max_tokens=max_tokens,
-            timeout=timeout,
+        raise ValueError(
+            f"Unknown LLM provider: {name!r}. "
+            "Supported providers: nvidia, openrouter, openai, claude, gemini. "
+            "Ollama has been removed from the runtime — use 'openrouter' as fallback."
         )

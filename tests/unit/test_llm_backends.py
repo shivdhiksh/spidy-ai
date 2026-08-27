@@ -444,15 +444,15 @@ class TestLLMRouter:
 # ──────────────────────────────────────────────────────────────────────────────
 
 class TestLLMClientFactory:
-    def _make_reasoning_config(self, provider: str = "ollama"):
+    def _make_reasoning_config(self, provider: str = "nvidia"):
         from spidy.config.manager import ReasoningConfig
         return ReasoningConfig(provider=provider, model="test-model")
 
-    def test_build_ollama(self):
-        from spidy.llm.backends.ollama import OllamaClient
+    def test_build_ollama_raises_deprecated(self):
+        """OllamaClient is deprecated — factory must raise ValueError."""
         cfg = self._make_reasoning_config("ollama")
-        client = LLMClientFactory.build(cfg)
-        assert isinstance(client, OllamaClient)
+        with pytest.raises(ValueError, match="deprecated"):
+            LLMClientFactory.build(cfg)
 
     def test_build_openai(self):
         from spidy.llm.backends.openai import OpenAIClient
@@ -478,40 +478,60 @@ class TestLLMClientFactory:
         client = LLMClientFactory.build(cfg)
         assert isinstance(client, GeminiClient)
 
-    def test_build_unknown_falls_back_to_ollama(self):
-        from spidy.llm.backends.ollama import OllamaClient
+    def test_build_unknown_raises_value_error(self):
+        """Unknown provider names must raise ValueError (no silent Ollama fallback)."""
         cfg = self._make_reasoning_config("unknown_provider")
+        with pytest.raises(ValueError, match="Unknown LLM provider"):
+            LLMClientFactory.build(cfg)
+
+    def test_build_openrouter(self):
+        from spidy.llm.backends.openrouter import OpenRouterClient
+        cfg = self._make_reasoning_config("openrouter")
         client = LLMClientFactory.build(cfg)
-        assert isinstance(client, OllamaClient)
+        assert isinstance(client, OpenRouterClient)
 
     def test_build_router_single_provider(self):
         from spidy.config.manager import LLMProviderConfig, MultiLLMConfig
-        from spidy.llm.backends.ollama import OllamaClient
+        from spidy.llm.backends.openrouter import OpenRouterClient
         cfg = MultiLLMConfig(
-            providers=[LLMProviderConfig(name="ollama", model="llama3.2:3b")]
+            providers=[LLMProviderConfig(name="openrouter", model="nvidia/nemotron-3-ultra-550b-a55b:free")]
         )
         client = LLMClientFactory.build_router(cfg)
-        assert isinstance(client, OllamaClient)
+        assert isinstance(client, OpenRouterClient)
 
     def test_build_router_multiple_providers(self):
         from spidy.config.manager import LLMProviderConfig, MultiLLMConfig
         cfg = MultiLLMConfig(
             providers=[
-                LLMProviderConfig(name="ollama", model="llama3.2:3b"),
+                LLMProviderConfig(name="openrouter", model="nvidia/nemotron-3-ultra-550b-a55b:free"),
                 LLMProviderConfig(name="openai", model="gpt-4o-mini", api_key="sk-test"),
             ]
         )
         client = LLMClientFactory.build_router(cfg)
         assert isinstance(client, LLMRouter)
 
-    def test_build_router_no_enabled_providers(self):
+    def test_build_router_no_enabled_providers_raises(self):
+        """No enabled providers must raise ValueError (no silent Ollama fallback)."""
         from spidy.config.manager import LLMProviderConfig, MultiLLMConfig
-        from spidy.llm.backends.ollama import OllamaClient
         cfg = MultiLLMConfig(
-            providers=[LLMProviderConfig(name="ollama", enabled=False)]
+            providers=[LLMProviderConfig(name="openrouter", enabled=False)]
         )
-        client = LLMClientFactory.build_router(cfg)
-        assert isinstance(client, OllamaClient)
+        with pytest.raises(ValueError, match="No LLM providers enabled"):
+            LLMClientFactory.build_router(cfg)
+
+    def test_ollama_provider_in_config_is_silently_dropped(self):
+        """MultiLLMConfig with ollama in the list should drop it and warn."""
+        from spidy.config.manager import LLMProviderConfig, MultiLLMConfig
+        cfg = MultiLLMConfig(
+            providers=[
+                LLMProviderConfig(name="ollama", model="llama3.2:3b"),
+                LLMProviderConfig(name="openrouter", model="nvidia/nemotron-3-ultra-550b-a55b:free"),
+            ]
+        )
+        # After model_post_init, ollama should be filtered out
+        provider_names = [p.name for p in cfg.providers]
+        assert "ollama" not in provider_names
+        assert "openrouter" in provider_names
 
 
 # ──────────────────────────────────────────────────────────────────────────────

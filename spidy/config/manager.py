@@ -43,6 +43,31 @@ from spidy.logging.logger import get_logger
 
 log = get_logger(__name__)
 
+
+def _load_dotenv() -> None:
+    """
+    Load environment variables from .env file using os.environ.setdefault().
+    Preserves existing environment variables and never logs key values.
+    """
+    candidates = [
+        Path(".env"),
+        Path(__file__).resolve().parent.parent.parent / ".env",
+    ]
+    for env_path in candidates:
+        if env_path.is_file():
+            try:
+                for line in env_path.read_text(encoding="utf-8").splitlines():
+                    line = line.strip()
+                    if line and not line.startswith("#") and "=" in line:
+                        k, _, v = line.partition("=")
+                        os.environ.setdefault(k.strip(), v.strip())
+                break
+            except Exception:
+                pass
+
+
+_load_dotenv()
+
 # ─── Pydantic Config Models ───────────────────────────────────────────────────
 
 
@@ -89,15 +114,12 @@ class LoggingConfig(BaseModel):
     diagnose: bool = True
 
 
-class WakeWordConfig(BaseModel):
-    enabled: bool = True
-    model: str = "hey_jarvis"
-    threshold: float = 0.5
-    chunk_size: int = 1280
-    custom_model_path: str | None = None  # Path to a custom .onnx model file.
-                                           # When set, bypasses model: and _MODEL_MAP.
-                                           # score_key becomes the filename stem.
-                                           # Use for future Hey Spidy custom model.
+class WakeModelConfig(BaseModel):
+    name: str = ""
+    phrase: str = ""
+    model: str = ""
+    model_path: str | None = None
+    threshold: float = 0.35
 
     @field_validator("threshold")
     @classmethod
@@ -107,10 +129,28 @@ class WakeWordConfig(BaseModel):
         return v
 
 
+class WakeWordConfig(BaseModel):
+    enabled: bool = True
+    model: str = "hey_jarvis"
+    threshold: float = 0.35
+    chunk_size: int = 1280
+    custom_model_path: str | None = None  # Path to a custom .onnx model file.
+    models: list[WakeModelConfig] = Field(default_factory=list)
+    active_models: list[str] = Field(default_factory=list)
+
+    @field_validator("threshold")
+    @classmethod
+    def validate_threshold(cls, v: float) -> float:
+        if not 0.0 <= v <= 1.0:
+            raise ValueError("threshold must be between 0.0 and 1.0")
+        return v
+
+
+
 class STTConfig(BaseModel):
     model: str = "base.en"
     device: str = "auto"
-    compute_type: str = "int8"
+    compute_type: str = "auto"
     language: str = "en"
     vad_filter: bool = True
     vad_threshold: float = 0.5
@@ -213,6 +253,8 @@ class BargeInConfig(BaseModel):
     """
     enabled: bool = True
     model: str = "tiny.en"            # faster-whisper model (keep tiny.en; base.en is busy)
+    device: str = "cpu"               # "cpu" | "cuda" | "auto" (default cpu to save VRAM for Ollama)
+    compute_type: str = "int8"        # "int8" | "float16" | "auto"
     window_seconds: float = 0.8       # audio window to accumulate (0.4-2.0 s)
     min_rms_threshold: float = 0.015  # energy gate -- discard chunks below this RMS
 
@@ -251,9 +293,9 @@ class VoiceConfig(BaseModel):
 
 class ReasoningConfig(BaseModel):
     """LLM provider and generation settings."""
-    provider: str = "ollama"       # "ollama" | "openai" | "claude" | "gemini"
-    model: str = "llama3.2:3b"
-    base_url: str = "http://localhost:11434"
+    provider: str = "nvidia"       # "nvidia" | "openrouter" | "openai" | "claude" | "gemini"
+    model: str = "nvidia/nemotron-3-ultra-550b-a55b"
+    base_url: str = ""
     api_key: str | None = None
     temperature: float = 0.7
     max_tokens: int = 1024
@@ -314,6 +356,7 @@ class LongTermMemoryConfig(BaseModel):
 class SemanticMemoryConfig(BaseModel):
     collection_name: str = "spidy_memories"
     embedding_model: str = "all-MiniLM-L6-v2"
+    device: str = "auto"
 
 
 class MemoryConfig(BaseModel):
@@ -426,44 +469,66 @@ def _default_llm_providers() -> list:  # -> list[LLMProviderConfig]
     """
     Build the default ordered provider list for MultiLLMConfig.
 
-    When ``NVIDIA_API_KEY`` is present in the environment:
-        [nvidia (primary), ollama (fallback)]
+    Priority table
+    --------------
+    NVIDIA_API_KEY present:
+        [nvidia (primary), openrouter (fallback)]
 
-    When ``NVIDIA_API_KEY`` is absent:
-        [ollama]  ← identical to the previous single-provider default
+    OPENROUTER_API_KEY present (no NVIDIA key):
+        [openrouter]
+
+    Neither key present:
+        [nvidia]  (health_check returns False; failure messages guide the user)
+
+    Ollama is never added to the default list regardless of environment.
 
     Security note
     -------------
-    We only check for the *presence* of the key here, not its value.
-    The actual key string is read inside ``NvidiaClient.__init__()`` and
-    is never stored in config objects or emitted in logs.
+    We only check for the *presence* of the keys here, not their values.
+    The actual key strings are read inside the respective client __init__()
+    methods and are never stored in config objects or emitted in logs.
     """
     nvidia_key_present = bool(os.environ.get("NVIDIA_API_KEY", "").strip())
+    openrouter_key_present = bool(os.environ.get("OPENROUTER_API_KEY", "").strip())
 
-    ollama_provider = LLMProviderConfig(
-        name="ollama",
-        model="llama3.2:3b",
-        base_url="http://localhost:11434",
-        timeout_seconds=30,
-    )
-
-    if not nvidia_key_present:
-        return [ollama_provider]
-
-    log.debug(
-        "NVIDIA_API_KEY detected — NVIDIA NIM will be the primary LLM provider "
-        "with Ollama as fallback."
-    )
     nvidia_provider = LLMProviderConfig(
         name="nvidia",
-        model="meta/llama-3.1-8b-instruct",
+        model="nvidia/nemotron-3-ultra-550b-a55b",
         base_url="https://integrate.api.nvidia.com/v1",
-        # api_key is intentionally left empty here.
-        # NvidiaClient reads NVIDIA_API_KEY directly from os.environ.
+        # api_key intentionally empty: NvidiaClient reads NVIDIA_API_KEY from os.environ.
         api_key="",
         timeout_seconds=60,
     )
-    return [nvidia_provider, ollama_provider]
+    openrouter_provider = LLMProviderConfig(
+        name="openrouter",
+        model="nvidia/nemotron-3-ultra-550b-a55b:free",
+        base_url="https://openrouter.ai/api/v1",
+        # api_key intentionally empty: OpenRouterClient reads OPENROUTER_API_KEY from os.environ.
+        api_key="",
+        timeout_seconds=60,
+    )
+
+    if nvidia_key_present:
+        log.debug(
+            "NVIDIA_API_KEY detected — NVIDIA NIM will be the primary LLM provider "
+            "with OpenRouter as cloud fallback."
+        )
+        return [nvidia_provider, openrouter_provider]
+
+    if openrouter_key_present:
+        log.debug(
+            "OPENROUTER_API_KEY detected (no NVIDIA key) — "
+            "OpenRouter will be the sole LLM provider."
+        )
+        return [openrouter_provider]
+
+    # Neither key present: return nvidia so health_check() fails gracefully
+    # with a clear "no API key" message rather than a silent empty list.
+    log.debug(
+        "No NVIDIA_API_KEY or OPENROUTER_API_KEY found. "
+        "Set at least one key to enable cloud LLM inference."
+    )
+    return [nvidia_provider]
 
 
 class MultiLLMConfig(BaseModel):
@@ -473,13 +538,20 @@ class MultiLLMConfig(BaseModel):
     Providers are tried in order. On failure the router falls back
     to the next enabled provider in the list.
 
-    Default priority (when ``NVIDIA_API_KEY`` env var is present)
-    -------------------------------------------------------------
-    1. NVIDIA NIM  — fast cloud inference, primary for all LLM requests
-    2. Ollama      — local fallback when NVIDIA is unavailable or key is absent
+    Default priority
+    ----------------
+    When both NVIDIA_API_KEY and OPENROUTER_API_KEY are present:
+        1. NVIDIA NIM  — fast cloud inference, primary for all LLM requests
+        2. OpenRouter  — cloud fallback across 100+ models
 
-    When ``NVIDIA_API_KEY`` is absent the list contains only Ollama,
-    preserving the previous behaviour exactly.
+    When only OPENROUTER_API_KEY is present:
+        1. OpenRouter  — sole cloud provider
+
+    When neither key is present:
+        1. NVIDIA NIM  — health_check() returns False; clear error message
+
+    Ollama is NOT in the default list. If a legacy config still contains
+    ``name: ollama``, it is reported as deprecated and skipped.
     """
     providers: list[LLMProviderConfig] = Field(
         default_factory=_default_llm_providers
@@ -488,6 +560,22 @@ class MultiLLMConfig(BaseModel):
     failure_threshold: int = 3
     # If True, fall back to the next provider automatically on failure
     auto_fallback: bool = True
+
+    def model_post_init(self, __context: object) -> None:
+        """Filter out deprecated Ollama providers and warn loudly."""
+        cleaned: list[LLMProviderConfig] = []
+        for p in self.providers:
+            if p.name.lower() == "ollama":
+                log.warning(
+                    "DEPRECATED: Ollama provider found in LLM config — ignoring. "
+                    "Replace 'ollama' with 'openrouter' in spidy_config.yaml to "
+                    "suppress this warning."
+                )
+            else:
+                cleaned.append(p)
+        # Replace providers list in-place (Pydantic v2 allows this in post_init)
+        object.__setattr__(self, "providers", cleaned) if not cleaned else None
+        self.providers = cleaned if cleaned else self.providers
 
 
 class SkillsConfig(BaseModel):
@@ -691,6 +779,7 @@ class KnowledgeConfig(BaseModel):
 
     # Embedding
     embedding_model: str = "all-MiniLM-L6-v2"   # sentence-transformers model
+    device: str = "auto"                        # "auto" | "cpu" | "cuda"
 
     # Vector store
     collection_name: str = "spidy_knowledge"     # ChromaDB collection name
@@ -834,6 +923,7 @@ class ConfigManager:
         SpidyConfig
             The fully validated configuration object.
         """
+        _load_dotenv()
         raw: dict[str, Any] = {}
 
         if self._config_path.exists():

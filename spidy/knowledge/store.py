@@ -81,16 +81,9 @@ class VectorStore:
         if not self.is_available:
             return False
         try:
-            import chromadb
+            from spidy.core.chroma import ChromaClientRegistry
 
-            if self._persist_dir is not None:
-                self._persist_dir.mkdir(parents=True, exist_ok=True)
-                self._client = chromadb.PersistentClient(
-                    path=str(self._persist_dir)
-                )
-            else:
-                self._client = chromadb.EphemeralClient()
-
+            self._client = ChromaClientRegistry.get_client(self._persist_dir)
             self._collection = self._client.get_or_create_collection(
                 name=self._collection_name,
                 metadata={"hnsw:space": "cosine"},

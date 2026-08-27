@@ -70,6 +70,7 @@ from spidy.agent.observer import TaskObserver
 from spidy.agent.progress_tracker import ProgressTracker
 from spidy.agent.reflection_engine import ReflectionEngine
 from spidy.agent.replanner import Replanner
+from spidy.agent.structured_router import StructuredRouter  # M18
 from spidy.agent.task_decomposer import TaskDecomposer
 from spidy.agent.task_logger import AgentTaskLogger
 from spidy.agent.types import ExecutionContext, GoalState
@@ -168,6 +169,9 @@ class AutonomousAgent:
         self._authority = authority
         self._verifier = GoalVerifier() if verify_enabled else None
 
+        # M18: Structured action router
+        router = StructuredRouter(brain=brain)
+
         # Wire all components into ExecutionLoop
         self._loop = ExecutionLoop(
             brain=brain,
@@ -180,6 +184,7 @@ class AutonomousAgent:
             replanner=replanner,
             authority=authority,
             task_log=self._task_log,
+            router=router,  # M18
             inter_task_delay=inter_task_delay,
         )
 

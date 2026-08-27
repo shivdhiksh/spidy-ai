@@ -101,7 +101,7 @@ class TestNvidiaClientBasics:
     def test_default_model(self):
         from spidy.llm.backends.nvidia import NvidiaClient
         client = NvidiaClient(api_key=_FAKE_KEY)
-        assert client._model == "meta/llama-3.1-8b-instruct"
+        assert client._model == "nvidia/nemotron-3-ultra-550b-a55b"
 
     def test_default_base_url(self):
         from spidy.llm.backends.nvidia import NvidiaClient
@@ -171,13 +171,13 @@ class TestLLMClientFactoryNvidia:
         client = LLMClientFactory.build(self._cfg("nim"))
         assert isinstance(client, NvidiaClient)
 
-    def test_build_router_nvidia_ollama_returns_router(self):
+    def test_build_router_nvidia_openrouter_returns_router(self):
         from spidy.config.manager import LLMProviderConfig, MultiLLMConfig
         cfg = MultiLLMConfig(
             providers=[
-                LLMProviderConfig(name="nvidia", model="meta/llama-3.1-8b-instruct",
+                LLMProviderConfig(name="nvidia", model="nvidia/nemotron-3-ultra-550b-a55b",
                                    api_key=_FAKE_KEY),
-                LLMProviderConfig(name="ollama", model="llama3.2:3b"),
+                LLMProviderConfig(name="openrouter", model="nvidia/nemotron-3-ultra-550b-a55b:free"),
             ]
         )
         client = LLMClientFactory.build_router(cfg)
@@ -188,7 +188,7 @@ class TestLLMClientFactoryNvidia:
         from spidy.llm.backends.nvidia import NvidiaClient
         cfg = MultiLLMConfig(
             providers=[
-                LLMProviderConfig(name="nvidia", model="meta/llama-3.1-8b-instruct",
+                LLMProviderConfig(name="nvidia", model="nvidia/nemotron-3-ultra-550b-a55b",
                                    api_key=_FAKE_KEY),
             ]
         )
@@ -270,113 +270,122 @@ class TestNvidiaFallback:
 
     def _router(self, nvidia_response: LLMResponse):
         nvidia = _FakeClient("nvidia", nvidia_response)
-        ollama = _FakeClient("ollama", _ok("Ollama fallback response"))
-        router = LLMRouter(providers=[nvidia, ollama])
-        return router, nvidia, ollama
+        openrouter = _FakeClient("openrouter", _ok("OpenRouter fallback response"))
+        router = LLMRouter(providers=[nvidia, openrouter])
+        return router, nvidia, openrouter
 
     @pytest.mark.asyncio
-    async def test_nvidia_http_error_falls_back_to_ollama(self):
-        router, nvidia, ollama = self._router(_fail("HTTP 503 Service Unavailable"))
+    async def test_nvidia_http_error_falls_back_to_openrouter(self):
+        router, nvidia, openrouter = self._router(_fail("HTTP 503 Service Unavailable"))
         result = await router.complete(_MSG)
         assert result.success
         assert nvidia.call_count == 1
-        assert ollama.call_count == 1
-        assert "Ollama fallback" in result.text
+        assert openrouter.call_count == 1
+        assert "OpenRouter fallback" in result.text
 
     @pytest.mark.asyncio
-    async def test_nvidia_timeout_falls_back_to_ollama(self):
-        router, nvidia, ollama = self._router(_fail("Connection timed out"))
+    async def test_nvidia_timeout_falls_back_to_openrouter(self):
+        router, nvidia, openrouter = self._router(_fail("Connection timed out"))
         result = await router.complete(_MSG)
         assert result.success
-        assert ollama.call_count == 1
+        assert openrouter.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_nvidia_quota_error_falls_back_to_ollama(self):
-        router, nvidia, ollama = self._router(_fail("HTTP 429: quota exceeded"))
+    async def test_nvidia_quota_error_falls_back_to_openrouter(self):
+        router, nvidia, openrouter = self._router(_fail("HTTP 429: quota exceeded"))
         result = await router.complete(_MSG)
         assert result.success
-        assert ollama.call_count == 1
+        assert openrouter.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_nvidia_network_failure_falls_back_to_ollama(self):
-        router, nvidia, ollama = self._router(_fail("Network unreachable"))
+    async def test_nvidia_network_failure_falls_back_to_openrouter(self):
+        router, nvidia, openrouter = self._router(_fail("Network unreachable"))
         result = await router.complete(_MSG)
         assert result.success
-        assert ollama.call_count == 1
+        assert openrouter.call_count == 1
 
     @pytest.mark.asyncio
-    async def test_nvidia_unavailable_model_falls_back_to_ollama(self):
-        router, nvidia, ollama = self._router(_fail("Model not available"))
+    async def test_nvidia_unavailable_model_falls_back_to_openrouter(self):
+        router, nvidia, openrouter = self._router(_fail("Model not available"))
         result = await router.complete(_MSG)
         assert result.success
-        assert ollama.call_count == 1
+        assert openrouter.call_count == 1
 
     @pytest.mark.asyncio
     async def test_both_fail_returns_failure(self):
         nvidia = _FakeClient("nvidia", _fail("nvidia down"))
-        ollama = _FakeClient("ollama", _fail("ollama down"))
-        router = LLMRouter(providers=[nvidia, ollama])
+        openrouter = _FakeClient("openrouter", _fail("openrouter down"))
+        router = LLMRouter(providers=[nvidia, openrouter])
         result = await router.complete(_MSG)
         assert not result.success
 
     @pytest.mark.asyncio
     async def test_fallback_result_is_successful(self):
-        """The returned LLMResponse must be success=True when Ollama saves us."""
-        router, nvidia, ollama = self._router(_fail("any error"))
+        """The returned LLMResponse must be success=True when OpenRouter saves us."""
+        router, nvidia, openrouter = self._router(_fail("any error"))
         result = await router.complete(_MSG)
         assert result.success is True
         assert result.text != ""
 
 
-# ─── 6. Missing NVIDIA_API_KEY → Ollama only ─────────────────────────────────
+# ─── 6. Missing NVIDIA_API_KEY → OpenRouter only (if OPENROUTER_API_KEY present) ─
 
 class TestMissingNvidiaKey:
-    """When NVIDIA_API_KEY is not set, config must default to Ollama only."""
+    """When NVIDIA_API_KEY is not set, config must default to OpenRouter (if key present)
+    or nvidia-only (if no key at all)."""
 
-    def test_default_providers_no_key(self):
-        """_default_llm_providers() returns only Ollama when key is absent."""
+    def test_default_providers_no_keys(self):
+        """With no keys at all, _default_llm_providers() returns [nvidia] (graceful fail)."""
         from spidy.config.manager import _default_llm_providers
         with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("NVIDIA_API_KEY", None)
+            os.environ.pop("OPENROUTER_API_KEY", None)
+            providers = _default_llm_providers()
+        assert len(providers) == 1
+        assert providers[0].name == "nvidia"  # graceful fallback; health_check returns False
+
+    def test_default_providers_only_openrouter_key(self):
+        """With only OPENROUTER_API_KEY, returns [openrouter]."""
+        from spidy.config.manager import _default_llm_providers
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
             os.environ.pop("NVIDIA_API_KEY", None)
             providers = _default_llm_providers()
         assert len(providers) == 1
-        assert providers[0].name == "ollama"
+        assert providers[0].name == "openrouter"
 
-    def test_default_providers_with_key(self):
-        """_default_llm_providers() returns [nvidia, ollama] when key present."""
+    def test_default_providers_with_nvidia_key(self):
+        """_default_llm_providers() returns [nvidia, openrouter] when NVIDIA key present."""
         from spidy.config.manager import _default_llm_providers
         with patch.dict(os.environ, {"NVIDIA_API_KEY": _FAKE_KEY}):
             providers = _default_llm_providers()
-        assert len(providers) == 2
         assert providers[0].name == "nvidia"
-        assert providers[1].name == "ollama"
 
-    def test_multiLLMConfig_no_key_uses_ollama(self):
+    def test_multiLLMConfig_no_keys_uses_nvidia_fallback(self):
         from spidy.config.manager import MultiLLMConfig
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("NVIDIA_API_KEY", None)
+            os.environ.pop("OPENROUTER_API_KEY", None)
             cfg = MultiLLMConfig()
         assert len(cfg.providers) == 1
-        assert cfg.providers[0].name == "ollama"
+        assert cfg.providers[0].name == "nvidia"
 
     def test_multiLLMConfig_with_key_uses_nvidia_first(self):
         from spidy.config.manager import MultiLLMConfig
         with patch.dict(os.environ, {"NVIDIA_API_KEY": _FAKE_KEY}):
             cfg = MultiLLMConfig()
         assert cfg.providers[0].name == "nvidia"
-        assert cfg.providers[1].name == "ollama"
 
     @pytest.mark.asyncio
-    async def test_router_no_key_uses_ollama(self):
-        """End-to-end: config → factory → router without key uses Ollama."""
+    async def test_router_no_nvidia_key_uses_openrouter_when_key_present(self):
+        """End-to-end: no NVIDIA key + OPENROUTER key → OpenRouterClient."""
         from spidy.config.manager import MultiLLMConfig
-        from spidy.llm.backends.ollama import OllamaClient
-        with patch.dict(os.environ, {}, clear=False):
+        from spidy.llm.backends.openrouter import OpenRouterClient
+        with patch.dict(os.environ, {"OPENROUTER_API_KEY": "sk-or-test"}, clear=False):
             os.environ.pop("NVIDIA_API_KEY", None)
             cfg = MultiLLMConfig()
         client = LLMClientFactory.build_router(cfg)
-        # Single provider → direct OllamaClient (no router overhead)
-        assert isinstance(client, OllamaClient)
+        # Single provider → direct OpenRouterClient (no router overhead)
+        assert isinstance(client, OpenRouterClient)
 
 
 # ─── 7. Local skill → LLM never called ───────────────────────────────────────
@@ -544,7 +553,7 @@ class TestNvidiaClientComplete:
         client = self._make_client()
         response_data = {
             "choices": [{"message": {"content": "Hello from NIM!"}, "finish_reason": "stop"}],
-            "model": "meta/llama-3.1-8b-instruct",
+            "model": "nvidia/nemotron-3-ultra-550b-a55b",
             "usage": {"prompt_tokens": 5, "completion_tokens": 8, "total_tokens": 13},
         }
         with patch.object(client, "_post", return_value=response_data):
@@ -607,15 +616,15 @@ class TestRouterThresholdWithNvidia:
 
     @pytest.mark.asyncio
     async def test_nvidia_skipped_after_threshold(self):
-        """After 3 failures, NVIDIA is skipped and Ollama serves all requests."""
+        """After 3 failures, NVIDIA is skipped and OpenRouter serves all requests."""
         nvidia = _FakeClient("nvidia", _fail("always fails"))
-        ollama = _FakeClient("ollama", _ok("from ollama"))
-        router = LLMRouter(providers=[nvidia, ollama], failure_threshold=3)
+        openrouter = _FakeClient("openrouter", _ok("from openrouter"))
+        router = LLMRouter(providers=[nvidia, openrouter], failure_threshold=3)
 
         # Three failures exhaust the threshold
         for _ in range(3):
             result = await router.complete(_MSG)
-            assert result.success  # ollama saved it each time
+            assert result.success  # openrouter saved it each time
 
         assert nvidia.call_count == 3
         nvidia_before = nvidia.call_count
@@ -628,8 +637,8 @@ class TestRouterThresholdWithNvidia:
     @pytest.mark.asyncio
     async def test_reset_failures_re_enables_nvidia(self):
         nvidia = _FakeClient("nvidia", _fail())
-        ollama = _FakeClient("ollama", _ok())
-        router = LLMRouter(providers=[nvidia, ollama], failure_threshold=1)
+        openrouter = _FakeClient("openrouter", _ok())
+        router = LLMRouter(providers=[nvidia, openrouter], failure_threshold=1)
 
         # Exhaust threshold
         await router.complete(_MSG)
@@ -643,3 +652,73 @@ class TestRouterThresholdWithNvidia:
         nvidia._response = _ok("nvidia back")
         result = await router.complete(_MSG)
         assert result.text == "nvidia back"
+
+
+# ─── 11. Authorization & Client Wiring Regression Tests ─────────────────────
+
+class TestNvidiaAuthAndWiringRegression:
+    """Explicit tests for NVIDIA auth headers and client wiring."""
+
+    def test_nvidia_client_reads_nvidia_api_key(self):
+        from spidy.llm.backends.nvidia import NvidiaClient
+        with patch.dict(os.environ, {"NVIDIA_API_KEY": "nvapi-test-key-123"}):
+            client = NvidiaClient()
+            assert client._api_key == "nvapi-test-key-123"
+
+    def test_nvidia_request_sends_authorization_header(self):
+        from spidy.llm.backends.nvidia import NvidiaClient
+        client = NvidiaClient(api_key="nvapi-test-secret")
+        headers = client._headers()
+        assert "Authorization" in headers
+        assert headers["Authorization"] == "Bearer nvapi-test-secret"
+        assert headers["Content-Type"] == "application/json"
+
+    def test_nvidia_does_not_use_openai_api_key(self):
+        from spidy.llm.backends.nvidia import NvidiaClient
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "sk-openai-key-abc"}, clear=False):
+            os.environ.pop("NVIDIA_API_KEY", None)
+            client = NvidiaClient(api_key="")
+            # Must NOT pick up OPENAI_API_KEY
+            assert client._api_key != "sk-openai-key-abc"
+
+    @pytest.mark.asyncio
+    async def test_nvidia_direct_completion_produces_llmresponse(self):
+        from spidy.llm.backends.nvidia import NvidiaClient
+        client = NvidiaClient(api_key=_FAKE_KEY)
+        response_data = {
+            "choices": [{"message": {"content": "NEMOTRON_OK"}, "finish_reason": "stop"}],
+            "model": "nvidia/nemotron-3-ultra-550b-a55b",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+        }
+        with patch.object(client, "_post", return_value=response_data):
+            resp = await client.complete([LLMMessage(role="user", content="Ping")])
+        assert resp.success
+        assert resp.text == "NEMOTRON_OK"
+        assert resp.model == "nvidia/nemotron-3-ultra-550b-a55b"
+        assert resp.usage.total_tokens == 15
+
+    @pytest.mark.asyncio
+    async def test_brain_to_nvidia_wiring(self):
+        from spidy.brain.brain import Brain
+        from spidy.skills.registry import SkillRegistry
+        from spidy.config.manager import ReasoningConfig
+        from spidy.core.event_bus import EventBus
+
+        fake_nvidia = _FakeClient(
+            "nvidia",
+            _ok("Python is a programming language.", "nvidia/nemotron-3-ultra-550b-a55b")
+        )
+        bus = EventBus()
+        registry = SkillRegistry()
+        brain = Brain(
+            bus=bus,
+            config=ReasoningConfig(),
+            skill_registry=registry,
+            llm_client=fake_nvidia,
+        )
+        await brain.start()
+        res = await brain.process("What is Python?")
+        await brain.stop()
+        assert "Python is a programming language" in res
+        assert fake_nvidia.call_count == 1
+

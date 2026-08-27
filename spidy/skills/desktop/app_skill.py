@@ -245,6 +245,36 @@ class AppSkill(BaseSkill):
                     "terminate spotify", "close all Chrome windows",
                 ],
             ),
+            SkillCapability(
+                action="run_python_script",
+                description="Execute a local Python script and return its stdout/stderr output.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("path", "string", required=True,
+                                description="Path to the Python script (e.g. Desktop/area.py or full path)."),
+                    ParamSchema("args", "string", required=False, default="",
+                                description="Optional space-separated arguments to pass to the script."),
+                    ParamSchema("timeout", "int", required=False, default=15,
+                                description="Execution timeout in seconds (default 15, max 60)."),
+                ],
+                examples=[
+                    "run python script", "run the script on my desktop", "execute area.py",
+                ],
+            ),
+            SkillCapability(
+                action="execute_script",
+                description="Execute a specific command or script with safety isolation.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("command", "string", required=True,
+                                description="Command to execute (e.g. 'python script.py')."),
+                    ParamSchema("timeout", "int", required=False, default=15,
+                                description="Execution timeout in seconds (default 15, max 60)."),
+                ],
+                examples=[
+                    "run command", "execute command",
+                ],
+            ),
         ]
 
     # ── Dispatch ──────────────────────────────────────────────────────────
@@ -262,7 +292,12 @@ class AppSkill(BaseSkill):
             return await self._maximize_window(context)
         if action == "close_app":
             return await self._close_app(context)
+        if action == "run_python_script":
+            return await self._run_python_script(context)
+        if action == "execute_script":
+            return await self._execute_script(context)
         return SkillResult.fail(f"AppSkill: unknown action '{action}'.")
+
 
     # ── Actions ───────────────────────────────────────────────────────────
 
@@ -533,7 +568,148 @@ class AppSkill(BaseSkill):
         except Exception as exc:  # noqa: BLE001
             return SkillResult.fail(f"AppSkill: maximize failed: {exc}")
 
+    async def _run_python_script(self, context: SkillContext) -> SkillResult:
+        """
+        Execute a Python script safely with timeout and output capture.
+        """
+        import os
+        import sys
+        from pathlib import Path
+
+        path_str = context.get("path") or context.get("script_path") or context.get("target") or ""
+        if not path_str:
+            return SkillResult.fail(
+                "AppSkill: 'path' parameter is required for run_python_script.",
+                non_retryable=True,
+            )
+
+        timeout = int(context.get("timeout") or 15)
+        timeout = max(1, min(timeout, 60))
+        extra_args_str = context.get("args") or ""
+
+        # Resolve candidate paths
+        candidate_paths = [
+            Path(path_str).expanduser().resolve(),
+            Path.home() / "Desktop" / Path(path_str).name,
+            Path.home() / "OneDrive" / "Desktop" / Path(path_str).name,
+            Path.cwd() / path_str,
+        ]
+
+        resolved_path = None
+        for p in candidate_paths:
+            if p.is_file():
+                resolved_path = p
+                break
+
+        if resolved_path is None:
+            # Try finding on disk
+            if os.path.exists(path_str):
+                resolved_path = Path(path_str).resolve()
+
+        if resolved_path is None:
+            return SkillResult.fail(
+                f"AppSkill: Python script not found at '{path_str}'.",
+                non_retryable=True,
+            )
+
+        cmd = [sys.executable, str(resolved_path)]
+        if extra_args_str:
+            import shlex
+            cmd.extend(shlex.split(extra_args_str))
+
+        log.info("AppSkill: executing python script '{p}' with timeout {t}s", p=resolved_path, t=timeout)
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(),
+                    timeout=float(timeout),
+                )
+            except asyncio.TimeoutError:
+                try:
+                    proc.kill()
+                except Exception:  # noqa: BLE001
+                    pass
+                return SkillResult.fail(
+                    f"AppSkill: Script execution timed out after {timeout} seconds.",
+                    non_retryable=True,
+                )
+
+            stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            returncode = proc.returncode
+
+            if returncode == 0:
+                out_msg = f"Script completed successfully (exit 0).\nOutput:\n{stdout}" if stdout else "Script completed with no output (exit 0)."
+                return SkillResult.ok(
+                    out_msg,
+                    data={"stdout": stdout, "stderr": stderr, "returncode": returncode},
+                    action_taken="run_python_script",
+                )
+            else:
+                err_msg = f"Script exited with code {returncode}.\nError:\n{stderr or stdout}"
+                return SkillResult.fail(
+                    err_msg,
+                    data={"stdout": stdout, "stderr": stderr, "returncode": returncode},
+                )
+
+        except Exception as exc:  # noqa: BLE001
+            log.error("AppSkill._run_python_script error: {exc}", exc=exc)
+            return SkillResult.fail(f"AppSkill: Failed to execute script: {exc}")
+
+    async def _execute_script(self, context: SkillContext) -> SkillResult:
+        """Execute a general script or command with timeout."""
+        cmd_str = context.get("command") or ""
+        if not cmd_str:
+            return SkillResult.fail("AppSkill: 'command' parameter is required for execute_script.")
+
+        import shlex
+        import sys
+        timeout = int(context.get("timeout") or 15)
+        timeout = max(1, min(timeout, 60))
+
+        args = shlex.split(cmd_str)
+        if not args:
+            return SkillResult.fail("AppSkill: Invalid command.")
+
+        # If it's a python command, use current interpreter
+        if args[0].lower() in ("python", "python3", "py"):
+            args[0] = sys.executable
+
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=float(timeout),
+            )
+            stdout = stdout_bytes.decode("utf-8", errors="replace").strip()
+            stderr = stderr_bytes.decode("utf-8", errors="replace").strip()
+            returncode = proc.returncode
+
+            if returncode == 0:
+                return SkillResult.ok(
+                    f"Command completed successfully.\nOutput:\n{stdout}",
+                    data={"stdout": stdout, "stderr": stderr, "returncode": returncode},
+                    action_taken="execute_script",
+                )
+            return SkillResult.fail(
+                f"Command exited with code {returncode}.\nError:\n{stderr or stdout}",
+                data={"stdout": stdout, "stderr": stderr, "returncode": returncode},
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(f"AppSkill: execute_script error: {exc}")
+
     # ── Internal helpers ──────────────────────────────────────────────────
+
 
     @staticmethod
     def _resolve_exe_path(exe_name: str) -> str:

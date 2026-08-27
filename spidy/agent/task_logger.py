@@ -76,13 +76,31 @@ class AgentTaskLogger:
             desc=goal.description[:60],
         )
         for i, task in enumerate(tasks):
-            log.info(
-                "  {tag}   Task {i}/{n}: '{desc}'",
-                tag=_TAG,
-                i=i + 1,
-                n=len(tasks),
-                desc=task.description[:60],
-            )
+            # M18: emit structured action details if present
+            if task.action and isinstance(task.action, dict):
+                act_parts = []
+                for key in ("skill", "action", "target", "query"):
+                    val = task.action.get(key, "")
+                    if val:
+                        act_parts.append(f"{key}={val!r}")
+                eo = task.action.get("expected_outcome", "")
+                log.info(
+                    "  {tag}   Task {i}/{n}: '{desc}' [{action_info}] eo='{eo}'",
+                    tag=_TAG,
+                    i=i + 1,
+                    n=len(tasks),
+                    desc=task.description[:60],
+                    action_info=" ".join(act_parts),
+                    eo=eo[:60] if eo else "(none)",
+                )
+            else:
+                log.info(
+                    "  {tag}   Task {i}/{n}: '{desc}'",
+                    tag=_TAG,
+                    i=i + 1,
+                    n=len(tasks),
+                    desc=task.description[:60],
+                )
 
     def goal_complete(self, goal: "GoalRecord") -> None:
         """Emitted when all tasks complete successfully."""
@@ -132,6 +150,20 @@ class AgentTaskLogger:
             auth=authority_label,
             a=task.attempt,
         )
+        # M18: log structured action fields when present
+        if task.action and isinstance(task.action, dict):
+            act_parts = []
+            for key in ("skill", "action", "target", "query", "url"):
+                val = task.action.get(key, "")
+                if val:
+                    act_parts.append(f"{key}={val!r}")
+            eo = task.action.get("expected_outcome", "")
+            log.info(
+                "  {tag}   contract: {info} | expected_outcome='{eo}'",
+                tag=_TAG,
+                info=" ".join(act_parts) if act_parts else "(no params)",
+                eo=eo[:80] if eo else "(none)",
+            )
 
     def task_success(
         self,

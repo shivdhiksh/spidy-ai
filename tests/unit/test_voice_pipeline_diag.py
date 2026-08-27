@@ -278,7 +278,7 @@ def loguru_caplog(caplog):
 @pytest.mark.asyncio
 async def test_a_llm_router_logs_provider_timing_at_info(loguru_caplog):
     """LLMRouter must log 'LLM request' and 'LLM response' at INFO level."""
-    nvidia = FakeLLMClient(name="nvidia", model="meta/llama-3.1-8b-instruct", success=True)
+    nvidia = FakeLLMClient(name="nvidia", model="nvidia/nemotron-3-ultra-550b-a55b", success=True)
     router = LLMRouter(providers=[nvidia], bus=None, auto_fallback=False)
 
     msgs = [LLMMessage(role="user", content="Hello")]
@@ -300,7 +300,7 @@ async def test_a_llm_router_logs_provider_timing_at_info(loguru_caplog):
 @pytest.mark.asyncio
 async def test_b_nvidia_provider_name_in_logs(loguru_caplog):
     """LLMRouter must log 'provider=nvidia' for an NVIDIA client."""
-    nvidia = FakeLLMClient(name="nvidia", model="meta/llama-3.1-8b-instruct", success=True)
+    nvidia = FakeLLMClient(name="nvidia", model="nvidia/nemotron-3-ultra-550b-a55b", success=True)
     router = LLMRouter(providers=[nvidia], bus=None)
 
     msgs = [LLMMessage(role="user", content="ping")]

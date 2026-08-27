@@ -1,6 +1,6 @@
 """
-Agent — Shared Data Types (Milestone 13)
-=========================================
+Agent — Shared Data Types (Milestones 13 + 18)
+===============================================
 Typed data structures used across all autonomous agent components.
 
 The agent layer sits above the Brain pipeline and manages persistent
@@ -8,7 +8,10 @@ goal state across multiple Brain.process() invocations.
 
 Pipeline
 --------
-User goal → GoalRecord → TaskRecord[] → ExecutionLoop → Brain.process() × N → completion
+User goal → GoalRecord → TaskRecord[] → ExecutionLoop
+    → IF task.action: StructuredRouter (direct skill dispatch)
+    → ELSE: Brain.process() × N
+    → completion
 
 GoalState transitions
 ---------------------
@@ -25,6 +28,18 @@ TaskState transitions
   PENDING → RUNNING → COMPLETED
                     ↘ FAILED
                     ↘ SKIPPED
+
+Structured Action Schema (M18)
+------------------------------
+TaskRecord.action is an optional dict with the following keys:
+  skill           str  — which skill to route to ("browser", "desktop", "file")
+  action          str  — what to do ("open_app", "navigate", "search", "verify", ...)
+  target          str  — target app / site name ("Edge", "YouTube", "Google")
+  query           str  — search query, preserved verbatim
+  url             str  — explicit URL override
+  expected_outcome str — what success looks like (used by Observer + GoalVerifier)
+
+All fields are optional; the router uses whatever is present.
 """
 
 from __future__ import annotations
@@ -59,6 +74,13 @@ class TaskState(str, Enum):
     SKIPPED    = "skipped"     # Intentionally skipped (e.g. optional step)
 
 
+class TaskPriority(str, Enum):
+    """Execution priority of a task."""
+    HIGH   = "high"    # Cancellation, critical recovery, user confirmations
+    NORMAL = "normal"  # Standard task steps
+    LOW    = "low"     # Optional cleanup, telemetry
+
+
 class ReflectionDecision(str, Enum):
     """Decision produced by the ReflectionEngine after a task result."""
     CONTINUE     = "continue"     # Task succeeded — proceed to next
@@ -85,29 +107,40 @@ class TaskRecord:
     description:
         Human-readable description (e.g. "Install Flask via pip").
     utterance:
-        The natural-language utterance sent to Brain.process() to execute
-        this task (e.g. "install flask using pip in the terminal").
+        The natural-language command to execute this step (what a user would say to an AI assistant)
+    action:
+        Optional structured action contract. When present, the ExecutionLoop
+        routes directly to the appropriate skill without re-parsing through Brain.
+    input_from:
+        Optional task_id or reference expression (e.g. "${task_1}.text", "<input_from:step_2>").
+    priority:
+        Task priority (HIGH, NORMAL, LOW).
     state:
         Current lifecycle state.
     result_message:
         The Brain's response text for this task.
     result_success:
-        Whether the Brain considered the task successful.
+        Whether the task succeeded.
     attempt:
-        How many times this task has been attempted (1-based).
+        How many times this task has been attempted.
     error:
         Error description if the task failed.
     started_at:
         When execution began.
     completed_at:
-        When execution ended (success or final failure).
+        When execution ended.
     extra:
-        Arbitrary metadata (e.g. skill name, action used).
+        Arbitrary metadata.
+    terminal:
+        If True, the ExecutionLoop will complete the goal immediately after this task.
     """
     task_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     goal_id: str = ""
     description: str = ""
     utterance: str = ""
+    action: dict[str, Any] | None = None   # structured action contract
+    input_from: str = ""                   # inject result of prior task
+    priority: TaskPriority = TaskPriority.NORMAL
     state: TaskState = TaskState.PENDING
     result_message: str = ""
     result_success: bool = False
@@ -117,11 +150,6 @@ class TaskRecord:
     completed_at: datetime | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     terminal: bool = False
-    """If True, the ExecutionLoop will stop after this task succeeds and
-    complete the goal immediately, skipping any remaining tasks.
-    Set by the TaskDecomposer for decisive single-action tasks (e.g. launch_app)
-    or by the LLM when it marks a step as the final objective.
-    """
 
     def mark_running(self) -> "TaskRecord":
         """Return a new TaskRecord in RUNNING state."""
@@ -130,6 +158,9 @@ class TaskRecord:
             goal_id=self.goal_id,
             description=self.description,
             utterance=self.utterance,
+            action=self.action,
+            input_from=self.input_from,
+            priority=self.priority,
             state=TaskState.RUNNING,
             attempt=self.attempt + 1,
             started_at=datetime.now(timezone.utc),
@@ -144,6 +175,9 @@ class TaskRecord:
             goal_id=self.goal_id,
             description=self.description,
             utterance=self.utterance,
+            action=self.action,
+            input_from=self.input_from,
+            priority=self.priority,
             state=TaskState.COMPLETED,
             result_message=message,
             result_success=True,
@@ -161,6 +195,9 @@ class TaskRecord:
             goal_id=self.goal_id,
             description=self.description,
             utterance=self.utterance,
+            action=self.action,
+            input_from=self.input_from,
+            priority=self.priority,
             state=TaskState.FAILED,
             result_message=message,
             result_success=False,
@@ -179,6 +216,9 @@ class TaskRecord:
             goal_id=self.goal_id,
             description=self.description,
             utterance=self.utterance,
+            action=self.action,
+            input_from=self.input_from,
+            priority=self.priority,
             state=TaskState.SKIPPED,
             result_message=reason,
             attempt=self.attempt,
@@ -195,34 +235,7 @@ class TaskRecord:
 @dataclass
 class GoalRecord:
     """
-    An autonomous goal owned by GoalManager.
-
-    A goal is the top-level user intention; it is decomposed into
-    an ordered list of TaskRecords by the TaskDecomposer.
-
-    Attributes
-    ----------
-    goal_id:
-        Unique identifier.
-    description:
-        The original user goal description (e.g. "Create a Flask project").
-    state:
-        Current lifecycle state.
-    tasks:
-        Ordered list of tasks produced by TaskDecomposer.
-        Empty until the PLANNING phase completes.
-    session_id:
-        The Brain session this goal belongs to.
-    created_at:
-        When the goal was created.
-    started_at:
-        When execution began.
-    completed_at:
-        When execution finished (any terminal state).
-    error:
-        Error description if the goal failed.
-    summary:
-        Natural language summary of the outcome (populated on completion).
+    Persistent state of a multi-task autonomous goal.
     """
     goal_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     description: str = ""
@@ -285,14 +298,110 @@ class ExecutionContext:
     """
     Runtime context passed through the execution loop.
 
-    Carries the goal, mutable cancellation flag, and session info
-    without any mutable shared state on the GoalRecord itself.
+    Carries the goal, mutable cancellation flag, session info, and
+    a structured step-result store so later tasks can reference earlier results.
     """
     goal: GoalRecord
     session_id: str = ""
     cancelled: bool = False
     max_task_retries: int = 2
+    step_results: dict[str, Any] = field(default_factory=dict)
+    _ordered_task_ids: list[str] = field(default_factory=list)
 
     def cancel(self) -> None:
         """Signal the execution loop to stop after the current task."""
         self.cancelled = True
+
+    def add_result(self, task_id: str, result: Any) -> None:
+        """Store a task result so later tasks can reference it via input_from or templating."""
+        self.step_results[task_id] = result
+        if task_id not in self._ordered_task_ids:
+            self._ordered_task_ids.append(task_id)
+
+    def add_structured_result(
+        self,
+        task_id: str,
+        data: dict[str, Any] | str,
+        step_index: int = -1,
+    ) -> None:
+        """Store a structured step result dictionary."""
+        if isinstance(data, str):
+            structured = {"result": data, "text": data}
+        else:
+            structured = dict(data)
+            if "result" not in structured and "text" in structured:
+                structured["result"] = structured["text"]
+
+        self.step_results[task_id] = structured
+        if task_id not in self._ordered_task_ids:
+            self._ordered_task_ids.append(task_id)
+
+        # Also alias step_N for intuitive reference
+        if step_index >= 0:
+            self.step_results[f"step_{step_index + 1}"] = structured
+            self.step_results[f"step{step_index + 1}"] = structured
+
+    def get_result(self, key: str, default: Any = "") -> Any:
+        """Retrieve a raw or structured result by key."""
+        return self.step_results.get(key, default)
+
+    def resolve_variable(self, expr: str, current_task_id: str = "") -> Any:
+        """
+        Resolve a variable expression against stored step results.
+
+        Supported expressions:
+          - "${task_id.field}" or "${task_id}"
+          - "${prev.field}" or "${prev}"
+          - "<input_from:task_id>"
+          - "<input_from:step_N>"
+          - plain task_id string
+        """
+        if not expr or not isinstance(expr, str):
+            return expr
+
+        # 1. Plain task ID match in step_results
+        if expr in self.step_results:
+            val = self.step_results[expr]
+            if isinstance(val, dict):
+                return val.get("result") or val.get("text") or val.get("url") or str(val)
+            return val
+
+        # 2. Extract <input_from:...> syntax
+        if expr.startswith("<input_from:") and expr.endswith(">"):
+            ref_key = expr[12:-1].strip()
+            if ref_key not in self.step_results and not ref_key.startswith("step"):
+                return ""
+            return self.resolve_variable(ref_key, current_task_id)
+
+        # 3. Match ${...} interpolation patterns
+        if "${" in expr:
+            import re
+
+            def _replace_match(match: re.Match) -> str:
+                token = match.group(1).strip()
+                parts = token.split(".", 1)
+                target_ref = parts[0]
+                field_name = parts[1] if len(parts) > 1 else None
+
+                # Resolve 'prev' or 'previous'
+                if target_ref in ("prev", "previous", "last"):
+                    if self._ordered_task_ids:
+                        if current_task_id and current_task_id in self._ordered_task_ids:
+                            idx = self._ordered_task_ids.index(current_task_id)
+                            target_ref = self._ordered_task_ids[idx - 1] if idx > 0 else ""
+                        else:
+                            target_ref = self._ordered_task_ids[-1]
+
+                if not target_ref or target_ref not in self.step_results:
+                    return ""
+
+                stored = self.step_results[target_ref]
+                if isinstance(stored, dict):
+                    if field_name:
+                        return str(stored.get(field_name, ""))
+                    return str(stored.get("result") or stored.get("text") or stored.get("url") or "")
+                return str(stored)
+
+            return re.sub(r"\$\{([^}]+)\}", _replace_match, expr)
+
+        return expr

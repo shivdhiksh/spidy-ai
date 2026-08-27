@@ -26,11 +26,11 @@ current session to avoid repeated timeouts.
 Latency and provider identification logging
 -------------------------------------------
 Every ``complete()`` call logs at INFO level:
-    LLM request: provider=nvidia model=meta/llama-3.1-8b-instruct
+    LLM request: provider=nvidia model=nvidia/nemotron-3-ultra-550b-a55b
     LLM response: provider=nvidia model=... duration=4231ms success=True
 
 On fallback:
-    LLM fallback: nvidia → ollama
+    LLM fallback: nvidia → openrouter
 
 The API key is NEVER logged at any level.
 

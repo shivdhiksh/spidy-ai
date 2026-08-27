@@ -7,6 +7,7 @@ from spidy.llm.client import (
     LLMUsage,
 )
 from spidy.llm.router import LLMRouter
+from spidy.llm.backends.openrouter import OpenRouterClient
 from spidy.llm.health import (
     OllamaHealthReport,
     run_health_check,
@@ -22,6 +23,8 @@ __all__ = [
     "LLMResponse",
     "LLMUsage",
     "LLMRouter",
+    "OpenRouterClient",
+    # Retained for backward compatibility (health.py is stdlib-only)
     "OllamaHealthReport",
     "run_health_check",
     "run_health_check_async",

@@ -23,12 +23,63 @@ VRAM Budget (RTX 3050 4GB):
 
 from __future__ import annotations
 
+import os
+import site
+import subprocess
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import ClassVar
 
 from spidy.logging.logger import get_logger
 
 log = get_logger(__name__)
+
+_DLL_DIRS_ADDED = False
+
+
+def ensure_cuda_dlls() -> list[str]:
+    """
+    Ensure NVIDIA CUDA runtime DLL directories from site-packages (e.g. nvidia-cublas-cu12,
+    nvidia-cuda-runtime-cu12) are added to Python's DLL search paths on Windows.
+
+    Returns
+    -------
+    list[str]
+        List of directory paths that were successfully registered.
+    """
+    global _DLL_DIRS_ADDED
+    added: list[str] = []
+    if sys.platform != "win32":
+        return added
+
+    # Gather search candidate roots
+    candidate_roots = list(site.getsitepackages())
+    if site.getusersitepackages():
+        candidate_roots.append(site.getusersitepackages())
+    candidate_roots.append(sys.prefix)
+
+    for root in candidate_roots:
+        nv_dir = os.path.join(root, "nvidia")
+        if os.path.isdir(nv_dir):
+            try:
+                for sub in os.listdir(nv_dir):
+                    bin_dir = os.path.join(nv_dir, sub, "bin")
+                    if os.path.isdir(bin_dir) and bin_dir not in added:
+                        try:
+                            os.add_dll_directory(bin_dir)
+                            added.append(bin_dir)
+                        except Exception:
+                            pass
+                        # Also prepend to PATH for subprocesses or legacy loaders
+                        cur_path = os.environ.get("PATH", "")
+                        if bin_dir not in cur_path:
+                            os.environ["PATH"] = bin_dir + os.pathsep + cur_path
+            except Exception:
+                pass
+
+    _DLL_DIRS_ADDED = True
+    return added
 
 
 @dataclass(frozen=True)
@@ -88,8 +139,9 @@ class DeviceManager:
         """
         Detect CUDA availability and resolve the device configuration.
 
-        Calls torch.cuda under the hood. If torch is not installed,
-        gracefully falls back to CPU.
+        Registers NVIDIA CUDA runtime DLLs, probes ctranslate2 and PyTorch,
+        and queries GPU properties. Gracefully falls back to CPU if no
+        CUDA device or drivers are available.
 
         Returns
         -------
@@ -121,9 +173,11 @@ class DeviceManager:
     @staticmethod
     def _do_detect() -> DeviceInfo:
         """Core detection logic."""
+        ensure_cuda_dlls()
+
+        # 1. Probe PyTorch first if CUDA is available there
         try:
             import torch
-
             if torch.cuda.is_available():
                 props = torch.cuda.get_device_properties(0)
                 return DeviceInfo(
@@ -134,30 +188,50 @@ class DeviceManager:
                     vram_bytes=props.total_memory,
                     whisper_compute_type="float16",
                 )
-            else:
-                return DeviceInfo(
-                    cuda_available=False,
-                    device="cpu",
-                    provider="cpu",
-                    gpu_name="",
-                    vram_bytes=0,
-                    whisper_compute_type="int8",
-                )
+        except Exception:
+            pass
 
-        except ImportError:
-            # torch not installed — fall back to CPU gracefully
-            log.warning(
-                "PyTorch not found. AI models will run on CPU. "
-                "Install torch for GPU acceleration."
+        # 2. Probe ctranslate2 + NVIDIA driver (handles torch CPU build)
+        try:
+            import ctranslate2
+            if ctranslate2.get_cuda_device_count() > 0:
+                gpu_name, vram_bytes = DeviceManager._query_nvidia_smi()
+                return DeviceInfo(
+                    cuda_available=True,
+                    device="cuda:0",
+                    provider="cuda",
+                    gpu_name=gpu_name or "NVIDIA CUDA GPU",
+                    vram_bytes=vram_bytes or (4 * 1024 * 1024 * 1024),
+                    whisper_compute_type="float16",
+                )
+        except Exception:
+            pass
+
+        # Fallback to CPU
+        return DeviceInfo(
+            cuda_available=False,
+            device="cpu",
+            provider="cpu",
+            gpu_name="",
+            vram_bytes=0,
+            whisper_compute_type="int8",
+        )
+
+    @staticmethod
+    def _query_nvidia_smi() -> tuple[str, int]:
+        """Query GPU name and VRAM bytes via nvidia-smi if available."""
+        try:
+            out = subprocess.check_output(
+                ["nvidia-smi", "--query-gpu=name,memory.total", "--format=csv,nounits,noheader"],
+                encoding="utf-8",
+                timeout=3,
             )
-            return DeviceInfo(
-                cuda_available=False,
-                device="cpu",
-                provider="cpu",
-                gpu_name="",
-                vram_bytes=0,
-                whisper_compute_type="int8",
-            )
+            parts = [p.strip() for p in out.strip().split(",")]
+            name = parts[0]
+            vram_mb = float(parts[1]) if len(parts) > 1 else 0
+            return name, int(vram_mb * 1024 * 1024)
+        except Exception:
+            return "", 0
 
     @staticmethod
     def _log_summary(info: DeviceInfo) -> None:
@@ -177,3 +251,4 @@ class DeviceManager:
                 "Whisper compute type: {ct}",
                 ct=info.whisper_compute_type,
             )
+

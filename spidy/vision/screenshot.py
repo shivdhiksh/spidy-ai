@@ -92,7 +92,7 @@ class ScreenshotEngine:
 
     @property
     def is_available(self) -> bool:
-        """True when ``mss`` is installed and screenshots can be taken."""
+        """True when ``mss`` is installed and ready to use."""
         return _MSS_AVAILABLE
 
     # ── Monitor Enumeration ───────────────────────────────────────────────────
@@ -138,33 +138,15 @@ class ScreenshotEngine:
     def capture_fullscreen(self, monitor_index: int | None = None) -> ScreenshotResult:
         """
         Capture the full contents of one monitor.
-
-        Parameters
-        ----------
-        monitor_index:
-            0-based monitor index. Defaults to ``self._default_monitor``.
-
-        Returns
-        -------
-        ScreenshotResult
-            PNG bytes, dimensions, and metadata.
-
-        Raises
-        ------
-        VisionDependencyError
-            If ``mss`` is not installed.
         """
         if not _MSS_AVAILABLE:
-            raise VisionDependencyError(
-                "mss is not installed. Install with: pip install mss"
-            )
+            raise VisionDependencyError("mss is not installed. Install with: pip install mss")
 
         idx = monitor_index if monitor_index is not None else self._default_monitor
         t_start = time.perf_counter()
 
         try:
             with _mss_module.mss() as sct:
-                # mss.monitors[0] is virtual, real monitors start at [1]
                 real_monitors = sct.monitors
                 if len(real_monitors) < 2:
                     monitor_spec = real_monitors[0]
@@ -174,24 +156,24 @@ class ScreenshotEngine:
 
                 raw = sct.grab(monitor_spec)
                 png_bytes = _mss_tools.to_png(raw.rgb, raw.size)
-
+                w, h = raw.width, raw.height
         except Exception as exc:
-            log.error("capture_fullscreen() failed: {exc}", exc=exc)
+            log.error("capture_fullscreen() mss failed: {exc}", exc=exc)
             raise VisionDependencyError(f"Screenshot failed: {exc}") from exc
 
         duration = (time.perf_counter() - t_start) * 1000
         log.debug(
             "Full screen captured | monitor={idx} {w}×{h} in {ms:.1f}ms",
             idx=idx,
-            w=raw.width,
-            h=raw.height,
+            w=w,
+            h=h,
             ms=duration,
         )
 
         return ScreenshotResult(
             image_data=png_bytes,
-            width=raw.width,
-            height=raw.height,
+            width=w,
+            height=h,
             monitor_index=idx,
             region=None,
             timestamp=time.time(),
@@ -208,47 +190,36 @@ class ScreenshotEngine:
     ) -> ScreenshotResult:
         """
         Capture a rectangular region of the screen.
-
-        Parameters
-        ----------
-        x, y:
-            Top-left corner in screen coordinates.
-        width, height:
-            Dimensions of the region in pixels.
-        monitor_index:
-            Which monitor the region belongs to (metadata only).
-
-        Raises
-        ------
-        VisionDependencyError
-            If ``mss`` is not installed.
         """
         if not _MSS_AVAILABLE:
-            raise VisionDependencyError(
-                "mss is not installed. Install with: pip install mss"
-            )
+            raise VisionDependencyError("mss is not installed. Install with: pip install mss")
 
         t_start = time.perf_counter()
-        region = {"left": x, "top": y, "width": width, "height": height}
 
         try:
             with _mss_module.mss() as sct:
-                raw = sct.grab(region)
+                region_spec = {"left": x, "top": y, "width": width, "height": height}
+                raw = sct.grab(region_spec)
                 png_bytes = _mss_tools.to_png(raw.rgb, raw.size)
+                w, h = raw.width, raw.height
         except Exception as exc:
-            log.error("capture_region() failed: {exc}", exc=exc)
-            raise VisionDependencyError(f"Region screenshot failed: {exc}") from exc
+            log.error("capture_region() mss failed: {exc}", exc=exc)
+            raise VisionDependencyError(f"Screenshot region failed: {exc}") from exc
 
         duration = (time.perf_counter() - t_start) * 1000
         log.debug(
             "Region captured | ({x},{y}) {w}×{h} in {ms:.1f}ms",
-            x=x, y=y, w=width, h=height, ms=duration,
+            x=x,
+            y=y,
+            w=w,
+            h=h,
+            ms=duration,
         )
 
         return ScreenshotResult(
             image_data=png_bytes,
-            width=raw.width,
-            height=raw.height,
+            width=w,
+            height=h,
             monitor_index=monitor_index,
             region=(x, y, width, height),
             timestamp=time.time(),
@@ -258,20 +229,9 @@ class ScreenshotEngine:
     def capture_active_window(self) -> ScreenshotResult:
         """
         Capture the currently focused window's screen region.
-
-        Uses ``win32gui`` to get the window rect, then captures that region
-        via ``mss``. Falls back to full-screen capture when ``win32gui``
-        is not available.
-
-        Raises
-        ------
-        VisionDependencyError
-            If ``mss`` is not installed.
         """
         if not _MSS_AVAILABLE:
-            raise VisionDependencyError(
-                "mss is not installed. Install with: pip install mss"
-            )
+            raise VisionDependencyError("mss is not installed. Install with: pip install mss")
 
         if _WIN32_AVAILABLE:
             try:
@@ -280,29 +240,16 @@ class ScreenshotEngine:
                 x, y, x2, y2 = rect
                 w = max(1, x2 - x)
                 h = max(1, y2 - y)
-
-                t_start = time.perf_counter()
-                region = {"left": x, "top": y, "width": w, "height": h}
-                with _mss_module.mss() as sct:
-                    raw = sct.grab(region)
-                    png_bytes = _mss_tools.to_png(raw.rgb, raw.size)
-
-                duration = (time.perf_counter() - t_start) * 1000
-                log.debug(
-                    "Active window captured | ({x},{y}) {w}×{h} in {ms:.1f}ms",
-                    x=x, y=y, w=w, h=h, ms=duration,
-                )
-
+                res = self.capture_region(x, y, w, h)
                 return ScreenshotResult(
-                    image_data=png_bytes,
-                    width=raw.width,
-                    height=raw.height,
-                    monitor_index=0,
+                    image_data=res.image_data,
+                    width=res.width,
+                    height=res.height,
+                    monitor_index=res.monitor_index,
                     region=(x, y, w, h),
-                    timestamp=time.time(),
+                    timestamp=res.timestamp,
                     source="window",
                 )
-
             except Exception as exc:
                 log.warning(
                     "Active window capture failed, falling back to fullscreen: {exc}",
@@ -310,9 +257,7 @@ class ScreenshotEngine:
                 )
 
         # Fallback: full-screen capture
-        log.debug("Using fullscreen fallback for active-window capture.")
         result = self.capture_fullscreen()
-        # Return with source="window" so callers know the intent
         return ScreenshotResult(
             image_data=result.image_data,
             width=result.width,
@@ -322,3 +267,4 @@ class ScreenshotEngine:
             timestamp=result.timestamp,
             source="window",
         )
+

@@ -65,10 +65,12 @@ class SemanticMemory:
         collection_name: str = "spidy_memories",
         embedding_model: str = "all-MiniLM-L6-v2",
         persist_dir: str | Path = ":memory:",
+        device: str = "cpu",
     ) -> None:
         self._collection_name = collection_name
         self._embedding_model_name = embedding_model
         self._persist_dir = str(persist_dir)
+        self._device = device
         self._available: bool | None = None   # None = not yet probed
         self._client: Any = None
         self._collection: Any = None
@@ -114,21 +116,18 @@ class SemanticMemory:
             return True  # Already initialised
 
         try:
-            import chromadb
-            from sentence_transformers import SentenceTransformer
+            from spidy.core.chroma import ChromaClientRegistry
+            from spidy.core.models import EmbeddingModelRegistry
 
-            if self._persist_dir == ":memory:":
-                self._client = chromadb.EphemeralClient()
-            else:
-                persist_path = Path(self._persist_dir)
-                persist_path.mkdir(parents=True, exist_ok=True)
-                self._client = chromadb.PersistentClient(path=str(persist_path))
-
+            self._client = ChromaClientRegistry.get_client(self._persist_dir)
             self._collection = self._client.get_or_create_collection(
                 name=self._collection_name,
                 metadata={"hnsw:space": "cosine"},
             )
-            self._encoder = SentenceTransformer(self._embedding_model_name)
+            self._encoder = EmbeddingModelRegistry.get_model(
+                self._embedding_model_name,
+                device=self._device,
+            )
             log.info(
                 "SemanticMemory: ChromaDB ready | collection='{col}' | model='{model}'",
                 col=self._collection_name,

@@ -139,7 +139,8 @@ class ContinuousVoiceController:
         self._goal_clf = GoalIntentClassifier()
 
         # Voice pipeline normalization and quality guards
-        self._wake_stripper = WakeWordStripper()
+        ack_phrases = getattr(self._wake_acknowledger, "phrases", []) if self._wake_acknowledger else []
+        self._wake_stripper = WakeWordStripper(ack_phrases=ack_phrases)
         self._quality_guard = TranscriptQualityGuard()
 
         self._running = False
@@ -149,7 +150,7 @@ class ContinuousVoiceController:
         self._last_transcript: str = ""
         self._last_transcript_time: float = 0.0
         self._dedup_window: float = 1.5          # configurable at construction time
-        self._post_ack_flush_ms: int = 100       # configurable at construction time
+        self._post_ack_flush_ms: int = 350       # 350ms settle allows sound card DAC & room echo decay
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -245,7 +246,8 @@ class ContinuousVoiceController:
             )
             return
 
-        wake_word = getattr(event, "model_name", "hey_jarvis")
+        wake_word = getattr(event, "wake_phrase", None) or getattr(event, "model_name", "hey_jarvis")
+
 
         # Step 2: overlay → AWAKE/LISTENING immediately (before ack audio)
         from spidy.ui.events import UIStateChangeEvent
@@ -341,9 +343,9 @@ class ContinuousVoiceController:
             )
         text = stripped
 
-        # If stripping consumed the entire utterance (only wake phrase spoken),
+        # If stripping consumed the entire utterance or left only wake phrase remnants,
         # treat as a no-command event — do not forward to Brain.
-        if not text:
+        if not text or self._wake_stripper.is_wake_only(text):
             log.debug("[tx:{tx}] Wake phrase only -- no command, skipping Brain.", tx=tx_id)
             return
 

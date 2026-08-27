@@ -18,6 +18,24 @@ contention, ~20 MB extra RSS) and passes the result to InterruptionHandler.
 If a stop phrase is matched, streaming_tts.stop() is called thread-safely and
 a VoiceInterruptEvent is published to the bus.
 
+Model loading
+-------------
+Two loading modes are available:
+
+``load_model()``:
+    Eager synchronous load — call at startup from the factory.  The model is
+    ready immediately before Spidy finishes starting up.
+
+``schedule_lazy_load(delay_seconds=3.0)``:
+    Deferred background load — starts a daemon thread that waits
+    ``delay_seconds`` then loads the model.  Use this to reduce startup RAM
+    impact.  Spidy starts faster and the barge-in model is ready by the time
+    TTS first plays (typical: 3–10 seconds after startup).
+
+    The ``is_loaded`` guard in ``start()`` already handles the 'not yet
+    ready' case gracefully — barge-in silently skips the first TTS cycle
+    if the model hasn't finished loading.
+
 Performance (measured on this machine)
 --------------------------------------
 - Model:          tiny.en (int8 CPU)
@@ -99,16 +117,22 @@ class BargeInDetector:
         interruption_handler: InterruptionHandler,
         bus: "EventBus",
         model_size: str = "tiny.en",
+        device: str = "cpu",
+        compute_type: str = "int8",
         window_seconds: float = 0.8,
         min_rms_threshold: float = 0.015,
         enabled: bool = True,
+        suppress_during_tts: bool = True,
     ) -> None:
         self._handler = interruption_handler
         self._bus = bus
         self._model_size = model_size
+        self._device = device
+        self._compute_type = compute_type
         self._window_seconds = max(0.4, float(window_seconds))
         self._min_rms = float(min_rms_threshold)
         self._enabled = enabled
+        self._suppress_during_tts = suppress_during_tts
 
         # The tiny.en faster-whisper model instance (loaded lazily at first start())
         self._model = None
@@ -131,11 +155,14 @@ class BargeInDetector:
 
     def load_model(self) -> None:
         """
-        Load the tiny.en faster-whisper model.
+        Load the tiny.en faster-whisper model (eager/synchronous).
 
         Called once at startup from the asyncio loop via asyncio.to_thread
         so the blocking model load doesn't block the event loop.
         This is the ONLY method that loads a model — never called again.
+
+        Alternative: use ``schedule_lazy_load()`` to defer the load to a
+        background thread and reduce startup time / initial RAM usage.
         """
         with self._model_lock:
             if self._model_loaded:
@@ -145,23 +172,64 @@ class BargeInDetector:
                 log.info("BargeInDetector: disabled — skipping model load.")
                 return
 
+            # Resolve device & compute_type
+            dev = self._device
+            ct = self._compute_type
+            if dev == "auto":
+                try:
+                    from spidy.perception.voice.stt.whisper import _detect_cuda_via_ctranslate2
+                    cuda_ok, _ = _detect_cuda_via_ctranslate2()
+                    dev = "cuda" if cuda_ok else "cpu"
+                except Exception:
+                    dev = "cpu"
+            if ct == "auto":
+                ct = "float16" if dev == "cuda" else "int8"
+
+            try:
+                from spidy.core.device import ensure_cuda_dlls
+                ensure_cuda_dlls()
+            except Exception:
+                pass
+
             try:
                 from faster_whisper import WhisperModel
                 log.info(
-                    "BargeInDetector: loading '{m}' (int8/CPU) for barge-in STT ...",
+                    "BargeInDetector: loading '{m}' ({ct}/{dev}) for barge-in STT ...",
                     m=self._model_size,
+                    ct=ct,
+                    dev=dev,
                 )
                 t0 = time.monotonic()
-                self._model = WhisperModel(
-                    self._model_size,
-                    device="cpu",
-                    compute_type="int8",
-                )
+                try:
+                    self._model = WhisperModel(
+                        self._model_size,
+                        device=dev,
+                        compute_type=ct,
+                    )
+                except Exception as cuda_exc:
+                    if dev == "cuda":
+                        log.warning(
+                            "BargeInDetector: CUDA load failed ({exc}) — falling back to CPU",
+                            exc=cuda_exc,
+                        )
+                        dev = "cpu"
+                        ct = "int8"
+                        self._model = WhisperModel(
+                            self._model_size,
+                            device="cpu",
+                            compute_type="int8",
+                        )
+                    else:
+                        raise
+
                 elapsed = (time.monotonic() - t0) * 1000
                 self._model_loaded = True
                 log.info(
-                    "BargeInDetector: '{m}' loaded in {ms:.0f}ms.",
+                    "[STT BARGE-IN] model={m} | device={dev} | compute_type={ct} | "
+                    "loaded in {ms:.0f}ms.",
                     m=self._model_size,
+                    dev=dev,
+                    ct=ct,
                     ms=elapsed,
                 )
             except Exception as exc:  # noqa: BLE001
@@ -171,6 +239,44 @@ class BargeInDetector:
                     m=self._model_size,
                     exc=exc,
                 )
+
+    def schedule_lazy_load(self, delay_seconds: float = 3.0) -> None:
+        """
+        Schedule the tiny.en model to load in a background thread after a delay.
+
+        This reduces Spidy's startup time and initial RAM footprint.  The
+        barge-in model (~180 MB) is loaded asynchronously after
+        ``delay_seconds``.  By the time the user first triggers TTS, the
+        model is ready.  If TTS fires before the model is loaded, the first
+        TTS cycle runs without barge-in (safe fallback — mic stays IDLE).
+
+        Parameters
+        ----------
+        delay_seconds:
+            Seconds to wait after this method is called before starting
+            the model load.  Default: 3.0 s.  Should be long enough for
+            the rest of Spidy's startup sequence to complete.
+        """
+        if self._model_loaded or not self._enabled:
+            return  # Already loaded or disabled — nothing to do
+
+        def _deferred_load() -> None:
+            time.sleep(delay_seconds)
+            log.info(
+                "BargeInDetector: starting deferred model load "
+                "(delay={d}s elapsed).",
+                d=delay_seconds,
+            )
+            self.load_model()
+
+        t = threading.Thread(target=_deferred_load, name="spidy-barge-in-loader", daemon=True)
+        t.start()
+        log.info(
+            "BargeInDetector: lazy load scheduled in {d}s "
+            "(model='{m}', device=cpu).",
+            d=delay_seconds,
+            m=self._model_size,
+        )
 
     def start(self, tts: "StreamingTTSWrapper") -> None:
         """
@@ -242,10 +348,14 @@ class BargeInDetector:
             return
 
         # Energy gate: Piper's speaker output typically bleeds into the mic
-        # at high RMS (≥ 0.04).  User speech arrives at ≥ 0.05 RMS.
-        # Chunks below the gate are discarded as ambient/bleed.
+        # at moderate RMS (0.02-0.06). User speech arrives at >= 0.08 RMS when speaking over TTS.
         rms = float(np.sqrt(np.mean(chunk ** 2)))
-        if rms < self._min_rms:
+        effective_threshold = self._min_rms
+        if self._suppress_during_tts and self._streaming_tts is not None and getattr(self._streaming_tts, "is_speaking", False):
+            # Raise gate during active TTS playback to isolate user voice from speaker bleed
+            effective_threshold = max(0.065, self._min_rms * 2.5)
+
+        if rms < effective_threshold:
             return
 
         with self._buf_lock:
@@ -296,7 +406,7 @@ class BargeInDetector:
             if not text:
                 continue
 
-            log.info(
+            log.debug(
                 "BargeInDetector: transcribed: '{t}'",
                 t=text[:80],
             )

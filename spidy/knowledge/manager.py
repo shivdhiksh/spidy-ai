@@ -96,6 +96,7 @@ class KnowledgeManager(KnowledgeInterface):
         self._chunk_size: int = getattr(config, "chunk_size", 1000)
         self._chunk_overlap: int = getattr(config, "chunk_overlap", 200)
         self._embedding_model: str = getattr(config, "embedding_model", "all-MiniLM-L6-v2")
+        self._embedding_device: str = getattr(config, "device", "auto")
         self._collection_name: str = getattr(config, "collection_name", "spidy_knowledge")
         self._min_score: float = getattr(config, "min_relevance_score", 0.3)
         self._max_results: int = getattr(config, "max_results", 5)
@@ -111,7 +112,10 @@ class KnowledgeManager(KnowledgeInterface):
             chunk_size=self._chunk_size,
             chunk_overlap=self._chunk_overlap,
         )
-        self._embedder = EmbeddingEngine(model_name=self._embedding_model)
+        self._embedder = EmbeddingEngine(
+            model_name=self._embedding_model,
+            device=self._embedding_device,
+        )
         self._store = VectorStore(
             collection_name=self._collection_name,
             persist_dir=self._knowledge_dir,

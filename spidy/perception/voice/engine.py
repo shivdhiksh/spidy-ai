@@ -84,6 +84,8 @@ class WakeWordDetectedEvent(Event):
     topic = "wake_word.detected"
     confidence: float = 0.0
     model_name: str = ""
+    wake_phrase: str = ""
+
 
 
 @dataclass
@@ -480,9 +482,14 @@ class VoiceEngine:
                 n=self._wake_chunk_counter,
             )
 
-        if score >= self._wake_threshold:
+        is_detected = getattr(self._wake_model, "is_detected", False) or (score >= self._wake_threshold)
+        if is_detected:
+            detected_model = getattr(self._wake_model, "last_detected_model", "") or self._wake_model.model_name
+            detected_phrase = getattr(self._wake_model, "last_detected_phrase", "") or getattr(self._wake_model, "wake_phrase", detected_model)
             log.info(
-                "Wake word detected! confidence={score:.3f}",
+                "Wake word detected! phrase='{phrase}' model='{model}' confidence={score:.3f}",
+                phrase=detected_phrase,
+                model=detected_model,
                 score=score,
             )
             self._set_state(VoiceState.WAKING)
@@ -494,11 +501,13 @@ class VoiceEngine:
             self._bus.publish_threadsafe(
                 WakeWordDetectedEvent(
                     confidence=score,
-                    model_name=self._wake_model.model_name,
+                    model_name=detected_model,
+                    wake_phrase=detected_phrase,
                 )
             )
             # Signal async loop to start listening
             self._wake_detected.set()
+
 
     def _buffer_audio(self, chunk: np.ndarray) -> None:
         """Buffer audio chunks during the LISTENING state."""

@@ -158,6 +158,11 @@ class SpidyApp:
         self._bridge.confirmation_show.connect(self._overlay.show_confirmation)
         self._bridge.confirmation_hide.connect(self._overlay.hide_confirmation)
 
+        # Thread-safe show / hide / toggle wiring (queued connection across threads)
+        self._bridge.show_hud_requested.connect(self._overlay.show_hud)
+        self._bridge.hide_hud_requested.connect(self._overlay.hide_hud)
+        self._bridge.toggle_hud_requested.connect(self._overlay.toggle_hud)
+
         # Confirmation card signals -> EventBus (publish back to agent layer)
         self._overlay._confirmation_card.confirmed.connect(self._on_confirmation_granted)
         self._overlay._confirmation_card.cancelled.connect(self._on_confirmation_denied)
@@ -232,16 +237,18 @@ class SpidyApp:
     # ── EventBus handlers (async — called from asyncio loop) ─────────────
 
     async def _handle_show(self, event: UIShowEvent) -> None:
-        if self._overlay:
-            self._overlay.show_animated()
-            if self._tray:
-                self._tray.set_overlay_visible(True)
+        log.info("[HUD LIFECYCLE] show_hud requested via EventBus ui.show")
+        if self._bridge:
+            self._bridge.request_show_hud()
+        if self._tray:
+            self._tray.set_overlay_visible(True)
 
     async def _handle_hide(self, event: UIHideEvent) -> None:
-        if self._overlay:
-            self._overlay.hide_animated()
-            if self._tray:
-                self._tray.set_overlay_visible(False)
+        log.info("[HUD LIFECYCLE] hide_hud requested via EventBus ui.hide")
+        if self._bridge:
+            self._bridge.request_hide_hud()
+        if self._tray:
+            self._tray.set_overlay_visible(False)
 
     async def _handle_state_change(self, event: UIStateChangeEvent) -> None:
         if self._bridge:
@@ -253,8 +260,6 @@ class SpidyApp:
 
     async def _handle_notify(self, event: UINotifyEvent) -> None:
         if self._bridge:
-            # UISignalBridge.request_notification accepts (title, msg, level);
-            # duration_ms is not forwarded — the bridge/overlay do not use it.
             self._bridge.request_notification(
                 event.title, event.body, event.level
             )
@@ -268,16 +273,10 @@ class SpidyApp:
             self._bridge.request_theme_change(event.theme)
 
     async def _handle_hotkey(self, event) -> None:
-        """Toggle overlay on hotkey press."""
-        if self._overlay and self._overlay.isVisible():
-            self._overlay.hide_animated()
-            if self._tray:
-                self._tray.set_overlay_visible(False)
-        else:
-            if self._overlay:
-                self._overlay.show_animated()
-            if self._tray:
-                self._tray.set_overlay_visible(True)
+        """Toggle overlay on hotkey press thread-safely."""
+        log.info("[HUD LIFECYCLE] toggle_hud requested via hotkey")
+        if self._bridge:
+            self._bridge.request_toggle_hud()
 
     # Voice pipeline forward-compat handlers
     async def _handle_listening_started(self, event) -> None:
@@ -297,9 +296,46 @@ class SpidyApp:
             self._bridge.request_state_change("idle")
 
     async def _handle_wake_detected(self, event) -> None:
-        """Wake word detected → overlay immediately shows AWAKE/LISTENING."""
+        """Wake word detected → thread-safely request show and transition to LISTENING."""
+        wake_phrase = getattr(event, "wake_phrase", None) or getattr(event, "model_name", "Hey Spidy")
+        vis_before = self._overlay.isVisible() and self._overlay.windowOpacity() > 0.05 if self._overlay else False
+        log.info(
+            "[HUD LIFECYCLE] wake_received phrase=\"{phrase}\" visible_before={vis}",
+            phrase=wake_phrase,
+            vis=vis_before,
+        )
         if self._bridge:
+            self._bridge.request_show_hud()
             self._bridge.request_state_change("listening")
+        if self._tray:
+            self._tray.set_overlay_visible(True)
+
+    # ── Public HUD Lifecycle API ──────────────────────────────────────────
+
+    def show_hud(self) -> None:
+        """Show HUD overlay window thread-safely."""
+        if self._bridge:
+            self._bridge.request_show_hud()
+        elif self._overlay:
+            self._overlay.show_hud()
+        if self._tray:
+            self._tray.set_overlay_visible(True)
+
+    def hide_hud(self) -> None:
+        """Hide HUD overlay window thread-safely."""
+        if self._bridge:
+            self._bridge.request_hide_hud()
+        elif self._overlay:
+            self._overlay.hide_hud()
+        if self._tray:
+            self._tray.set_overlay_visible(False)
+
+    def toggle_hud(self) -> None:
+        """Toggle HUD overlay window visibility thread-safely."""
+        if self._bridge:
+            self._bridge.request_toggle_hud()
+        elif self._overlay:
+            self._overlay.toggle_hud()
 
     # ── Qt slot handlers (called from Qt main thread) ─────────────────────
 
@@ -312,12 +348,10 @@ class SpidyApp:
         self._publish_sync(UIClosedEvent())
 
     def _on_show_requested(self) -> None:
-        if self._overlay:
-            self._overlay.show_animated()
+        self.show_hud()
 
     def _on_hide_requested(self) -> None:
-        if self._overlay:
-            self._overlay.hide_animated()
+        self.hide_hud()
 
     def _on_settings_requested(self) -> None:
         from spidy.ui.events import UISettingsOpenedEvent

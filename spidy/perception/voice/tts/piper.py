@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import io
 import threading
+import time
 import wave
 from pathlib import Path
 
@@ -89,11 +90,13 @@ class PiperTTSEngine(TTSEngine):
         self._stop_event = threading.Event()
         self._speaking = False
         self._loaded = False
+        self._stream = None          # persistent sounddevice OutputStream
+        self._stream_lock = threading.Lock()
 
     # ── TTSEngine interface ───────────────────────────────────────────────
 
     def load(self) -> None:
-        """Load the Piper voice model from disk."""
+        """Load the Piper voice model from disk and pre-warm the engine."""
         try:
             import piper
         except ImportError as exc:
@@ -123,17 +126,45 @@ class PiperTTSEngine(TTSEngine):
                 "Piper voice loaded | sample_rate={sr} Hz",
                 sr=self._sample_rate,
             )
+            # Pre-warm Piper ONNX execution graph so user queries avoid the ~2.5s cold penalty
+            try:
+                self._synthesize_sync("ready")
+                self._ensure_stream()
+                log.info("Piper TTS engine pre-warmed and output stream initialized.")
+            except Exception as warm_exc:
+                log.debug("Piper pre-warm non-fatal warning: {exc}", exc=warm_exc)
         except Exception as exc:
             log.error("Failed to load Piper voice: {exc}", exc=exc)
             raise
 
     def unload(self) -> None:
-        """Release Piper model resources."""
+        """Release Piper model and audio stream resources."""
+        with self._stream_lock:
+            if self._stream is not None:
+                try:
+                    self._stream.stop()
+                    self._stream.close()
+                except Exception:
+                    pass
+                self._stream = None
         if self._piper_voice is not None:
             del self._piper_voice
             self._piper_voice = None
         self._loaded = False
         log.debug("Piper TTS unloaded.")
+
+    def _ensure_stream(self) -> None:
+        """Ensure persistent low-latency sounddevice OutputStream is active."""
+        import sounddevice as sd
+        with self._stream_lock:
+            if self._stream is None or self._stream.closed:
+                self._stream = sd.OutputStream(
+                    samplerate=self._sample_rate,
+                    channels=1,
+                    dtype="float32",
+                    latency="low",
+                )
+                self._stream.start()
 
     async def synthesize(self, text: str) -> AudioBuffer:
         """
@@ -149,31 +180,65 @@ class PiperTTSEngine(TTSEngine):
                 duration_seconds=0.0,
             )
 
-        return await asyncio.to_thread(self._synthesize_sync, text)
+        t0 = time.monotonic()
+        buf = await asyncio.to_thread(self._synthesize_sync, text)
+        elapsed = (time.monotonic() - t0) * 1000
+        log.debug("[TTS] synth_complete: ms={ms:.0f}ms | dur={dur:.2f}s | text='{t}'",
+                  ms=elapsed, dur=buf.duration_seconds, t=text[:40])
+        return buf
+
+    async def play_buffer(self, buffer: AudioBuffer) -> None:
+        """
+        Play a pre-synthesised AudioBuffer directly without re-synthesis.
+        """
+        if not self._loaded:
+            log.error("play_buffer() called before load()")
+            return
+
+        if buffer.samples.size == 0 or self._stop_event.is_set():
+            return
+
+        self._stop_event.clear()
+        self._speaking = True
+        try:
+            await asyncio.to_thread(self._play_buffer, buffer)
+        finally:
+            self._speaking = False
 
     async def speak(self, text: str) -> None:
         """
         Synthesise and play audio. Awaitable — returns after playback finishes
         or stop() is called.
-
-        Parameters
-        ----------
-        text:
-            Text to speak. Automatically chunked at sentence boundaries
-            for lower first-word latency.
         """
         if not self._loaded:
             log.error("speak() called before load()")
             return
 
+        t_total_start = time.monotonic()
         self._stop_event.clear()
         self._speaking = True
 
         try:
+            t0 = time.monotonic()
             buffer = await self.synthesize(text)
-            if buffer.samples.size == 0:
+            syn_ms = (time.monotonic() - t0) * 1000
+
+            if buffer.samples.size == 0 or self._stop_event.is_set():
                 return
+
+            t1 = time.monotonic()
             await asyncio.to_thread(self._play_buffer, buffer)
+            play_ms = (time.monotonic() - t1) * 1000
+            total_ms = (time.monotonic() - t_total_start) * 1000
+
+            log.info(
+                "[TTS] synth_complete={syn:.0f}ms | playback_complete={play:.0f}ms | "
+                "audio_dur={dur:.0f}ms | total={tot:.0f}ms",
+                syn=syn_ms,
+                play=play_ms,
+                dur=buffer.duration_seconds * 1000,
+                tot=total_ms,
+            )
         finally:
             self._speaking = False
 
@@ -191,17 +256,10 @@ class PiperTTSEngine(TTSEngine):
         """Run Piper synthesis synchronously (called via asyncio.to_thread)."""
         from piper.config import SynthesisConfig
 
-        # Build synthesis parameters via SynthesisConfig (Piper 1.6.0 API).
-        # synthesize_wav() is used instead of synthesize() because:
-        #   1. It writes directly to a wave.Wave_write file handle
-        #   2. It sets WAV headers (channels, sample rate, bit depth) automatically
-        #      via set_wav_format=True (default), preventing wave.Error: "# channels not specified"
-        #   3. synthesize() in Piper 1.6 returns an Iterable[AudioChunk], not a WAV
-        # length_scale: lower = faster speech (inverse of speed multiplier)
         syn_config = SynthesisConfig(
             length_scale=1.0 / self._speed,
             noise_scale=0.667,
-            noise_w_scale=0.8,  # Piper 1.6: noise_w renamed to noise_w_scale
+            noise_w_scale=0.8,
             volume=self._volume,
         )
 
@@ -214,8 +272,6 @@ class PiperTTSEngine(TTSEngine):
             frames = wav_file.readframes(wav_file.getnframes())
             sr = wav_file.getframerate()
 
-        # Convert int16 PCM bytes → float32 numpy.
-        # Volume already applied by SynthesisConfig.volume — no second scaling.
         int16_samples = np.frombuffer(frames, dtype=np.int16)
         float32_samples = int16_samples.astype(np.float32) / 32767.0
         duration = len(float32_samples) / sr if sr > 0 else 0.0
@@ -226,12 +282,11 @@ class PiperTTSEngine(TTSEngine):
             duration_seconds=duration,
         )
 
-
     def _play_buffer(self, buffer: AudioBuffer) -> None:
         """
-        Play an AudioBuffer via sounddevice.
+        Play an AudioBuffer via persistent sounddevice OutputStream.
 
-        Checks stop_event during playback for interrupt support.
+        Writes in 1024-frame chunks, monitoring stop_event for instant cutoff.
         """
         try:
             import sounddevice as sd
@@ -239,33 +294,28 @@ class PiperTTSEngine(TTSEngine):
             log.error("sounddevice not installed. Cannot play audio.")
             return
 
-        if self._stop_event.is_set():
+        if self._stop_event.is_set() or buffer.samples.size == 0:
             return
 
-        log.debug(
-            "Speaking ({dur:.1f}s) via sounddevice",
-            dur=buffer.duration_seconds,
-        )
-
         try:
-            sd.play(buffer.samples, samplerate=buffer.sample_rate, blocking=False)
+            self._ensure_stream()
+            chunk_size = 1024
+            samples = buffer.samples.reshape(-1, 1)
+            total_samples = len(samples)
+            offset = 0
 
-            # Wait for completion or stop signal
-            # Poll every 50ms — low overhead, responsive to stop()
-            import time
-            while True:
-                try:
-                    stream_active = sd.get_stream().active
-                except RuntimeError:
-                    # Stream already closed — playback finished
-                    break
-                if not stream_active:
-                    break
+            while offset < total_samples:
                 if self._stop_event.is_set():
-                    sd.stop()
-                    log.debug("TTS playback interrupted.")
+                    log.debug("TTS playback interrupted mid-buffer.")
                     return
-                time.sleep(0.05)
+                end = min(offset + chunk_size, total_samples)
+                chunk = samples[offset:end]
+                with self._stream_lock:
+                    if self._stream and not self._stream.closed:
+                        self._stream.write(chunk)
+                    else:
+                        break
+                offset = end
 
         except Exception as exc:  # noqa: BLE001
             log.error("Audio playback error: {exc}", exc=exc)

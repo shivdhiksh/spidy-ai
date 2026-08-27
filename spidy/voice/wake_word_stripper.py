@@ -53,36 +53,44 @@ from __future__ import annotations
 import re
 
 # Default wake patterns in order of longest-first so the greedy match
-# hits "hey jarvis" before "jarvis" if both were listed.
+# hits "wake up spidy" / "hey jarvis" before shorter prefixes.
 _DEFAULT_PATTERNS: list[str] = [
+    "wake up spidy",
+    "wake up spidey",
+    "hey spidy",
+    "hey spidey",
+    "okay spidy",
+    "okay spidey",
+    "ok spidy",
+    "ok spidey",
     "hey jarvis",
     "okay jarvis",
     "ok jarvis",
-    "wake up spidy",   # future custom model phrase (strip only; no model yet)
-    "hey spidy",
-    "okay spidy",
-    "ok spidy",
+    "spidy",
+    "spidey",
 ]
 
-# Punctuation characters that may follow the wake phrase before the command.
-_BOUNDARY_PUNCT = r"[,.\s!?]*"
+# Boundary pattern: word boundary, trailing punctuation, and optional filler
+# conjunction (e.g. "and" in "Wake up Spidy and search...")
+_BOUNDARY_PUNCT = r"\b[,.\s!?]*(?:and(?:\s+|$))?\s*"
 
 
-def _build_pattern(wake_phrases: list[str]) -> re.Pattern[str]:
+def _build_pattern(wake_phrases: list[str], ack_phrases: list[str] | None = None) -> re.Pattern[str]:
     r"""
-    Compile a single regex that matches any wake phrase at the start.
-
-    Each phrase is escaped and joined with | (alternation).
-    The boundary group consumes trailing punctuation and whitespace.
-
-    Example compiled pattern (simplified)::
-
-        ^(hey jarvis|ok jarvis)[,.\s!?]*\s*
+    Compile a single regex that matches any wake phrase (or optional ack preamble) at the start.
     """
-    escaped = [re.escape(p) for p in wake_phrases]
+    all_phrases = list(wake_phrases)
+    if ack_phrases:
+        for ack in ack_phrases:
+            clean_ack = ack.strip().rstrip(".,!?")
+            if clean_ack and len(clean_ack) >= 2:
+                all_phrases.append(clean_ack)
+
+    sorted_phrases = sorted(set(all_phrases), key=len, reverse=True)
+    escaped = [re.escape(p) for p in sorted_phrases]
     alternation = "|".join(escaped)
     return re.compile(
-        rf"^(?:{alternation}){_BOUNDARY_PUNCT}\s*",
+        rf"^(?:{alternation}){_BOUNDARY_PUNCT}",
         re.IGNORECASE,
     )
 
@@ -96,14 +104,19 @@ class WakeWordStripper:
     wake_patterns:
         List of wake phrases to recognise (case-insensitive).
         Defaults to the standard Spidy/Jarvis phrases.
+    ack_phrases:
+        Optional list of wake acknowledgement phrases (e.g. from config)
+        to strip if caught at the very start of a transcript.
     """
 
     def __init__(
         self,
         wake_patterns: list[str] | None = None,
+        ack_phrases: list[str] | None = None,
     ) -> None:
         self._patterns = wake_patterns or _DEFAULT_PATTERNS
-        self._re = _build_pattern(self._patterns)
+        self._ack_phrases = ack_phrases or []
+        self._re = _build_pattern(self._patterns, self._ack_phrases)
 
     def strip_wake_prefix(self, text: str) -> str:
         """
@@ -118,25 +131,33 @@ class WakeWordStripper:
         -------
         str
             The transcript with the wake prefix removed and surrounding
-            whitespace stripped.  Empty string if the transcript contained
+            whitespace stripped. Empty string if the transcript contained
             only the wake phrase.
 
         Examples
         --------
         >>> s = WakeWordStripper()
-        >>> s.strip_wake_prefix("Hey Jarvis, open Edge.")
+        >>> s.strip_wake_prefix("Hey Spidy, open Edge.")
         'open Edge.'
-        >>> s.strip_wake_prefix("Hey Jarvis. What is Python?")
-        'What is Python?'
-        >>> s.strip_wake_prefix("Hey Jarvis.")
+        >>> s.strip_wake_prefix("Wake up Spidy and search YouTube for Python tutorials.")
+        'search YouTube for Python tutorials.'
+        >>> s.strip_wake_prefix("Hey Spidy.")
         ''
         >>> s.strip_wake_prefix("what time is it")
         'what time is it'
-        >>> s.strip_wake_prefix("I asked Jarvis about the weather")
-        'I asked Jarvis about the weather'
+        >>> s.strip_wake_prefix("Who is Spidy?")
+        'Who is Spidy?'
         """
-        stripped = self._re.sub("", text).strip()
-        return stripped
+        current = text.strip()
+        for _ in range(10):
+            if not self.has_wake_prefix(current):
+                break
+            prev = current
+            current = self._re.sub("", current).strip()
+            current = current.lstrip(".,!? \t")
+            if current == prev:
+                break
+        return current
 
     def has_wake_prefix(self, text: str) -> bool:
         """
@@ -154,24 +175,12 @@ class WakeWordStripper:
         Return True when *text* consists entirely of wake phrase(s) — with
         no real command remaining.
 
-        This catches multi-repetition transcripts like::
+        This catches single and multi-repetition transcripts like::
 
+            "Hey Spidy"                 → wake-only  → True
+            "Wake up Spidy"             → wake-only  → True
             "Hey Jarvis. Hey Jarvis."   → wake-only  → True
-            "Hey Jarvis, Hey Jarvis."   → wake-only  → True
-            "Okay Jarvis. Okay Jarvis." → wake-only  → True
-            "Hey Jarvis"                → wake-only  → True
-
-        But preserves legitimate commands::
-
-            "Hey Jarvis, open Edge."            → False
-            "Hey Jarvis, what is Python?"       → False
-            "Who is Jarvis?"                    → False  (no wake prefix)
-
-        Algorithm
-        ---------
-        Repeatedly strip the wake prefix until no more prefix remains.
-        If the final remainder is empty (or blank punctuation only), the
-        entire text was composed of wake phrases.
+            "Wake up Spidy, open Edge"  → False
 
         Parameters
         ----------
@@ -187,24 +196,12 @@ class WakeWordStripper:
         if not current:
             return False  # empty string — handled by the empty-text guard elsewhere
 
-        # Strip wake prefixes iteratively until no more match at the head.
-        # Safety cap: max 10 iterations (a real sentence won't have 10 wake
-        # phrases, so this prevents any pathological infinite-loop risk).
-        for _ in range(10):
-            if not self.has_wake_prefix(current):
-                break
-            current = self._re.sub("", current).strip()
-            # After stripping, remove any leading punctuation-only debris
-            # (e.g. a period left behind between phrases like "Jarvis. Hey…")
-            current = current.lstrip(".,!? \t")
-
-        # If nothing meaningful remains → wake-only
-        # "Meaningful" = at least one word character that is NOT part of
-        # another wake phrase starter.
-        remaining = current.strip(".,!? \t\n")
-        return len(remaining) == 0
+        stripped = self.strip_wake_prefix(current)
+        remaining = stripped.strip(".,!? \t\n")
+        return len(remaining) == 0 or remaining.lower() in ("and",)
 
     @property
     def patterns(self) -> list[str]:
         """The configured wake patterns."""
         return list(self._patterns)
+

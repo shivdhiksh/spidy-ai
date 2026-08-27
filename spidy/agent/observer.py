@@ -129,6 +129,7 @@ _KNOWN_APP_NAMES = [
     "paint",
     "task manager",
     "explorer", "file explorer",
+    "settings", "windows settings",
 ]
 
 
@@ -180,8 +181,17 @@ class TaskObserver:
         Observation
             Environment observation result. Never raises.
         """
-        # ── Fast path: terminal single-step tasks ──────────────────────────
-        if skip_for_terminal and task.terminal and task.attempt <= 1:
+        # ── Fast path: terminal single-step tasks (never skip browser tasks) ─
+        is_browser_task = False
+        if task.action and isinstance(task.action, dict):
+            skill = (task.action.get("skill") or "").lower()
+            act = (task.action.get("action") or "").lower()
+            if skill == "browser" or act in ("navigate", "search", "open_url", "search_youtube", "search_google"):
+                is_browser_task = True
+        elif any(kw in (task.utterance or "").lower() for kw in ("youtube", "google", "browser", "navigate", "search")):
+            is_browser_task = True
+
+        if skip_for_terminal and task.terminal and task.attempt <= 1 and not is_browser_task:
             log.debug(
                 "[AGENT] Observer: skipping observation for terminal task '{desc}'",
                 desc=task.description[:60],
@@ -196,16 +206,88 @@ class TaskObserver:
 
         utterance_lower = (task.utterance or "").lower()
 
+        # M18: extract expected_outcome from structured action
+        expected_outcome: str = ""
+        if task.action and isinstance(task.action, dict):
+            expected_outcome = task.action.get("expected_outcome", "")
+
         # ── Step 1: Response text analysis ─────────────────────────────────
         text_signal = self._analyse_response(response_text)
 
-        # ── Step 2: App state check ─────────────────────────────────────────
+        # ── Step 2: Browser URL extraction & Verification ───────────────────
+        browser_url = self._extract_browser_url(response_text)
+        browser_verified: bool | None = None
+        browser_reason: str = ""
+
+        if is_browser_task:
+            act = (task.action.get("action") or "").lower() if task.action else ""
+            target = (task.action.get("target") or "").lower() if task.action else ""
+            req_query = (task.action.get("query") or "").lower() if task.action else ""
+            req_url = (task.action.get("url") or "").lower() if task.action else ""
+
+            if act == "navigate" or "navigat" in task.description.lower() or "open" in task.description.lower():
+                expected_host = ""
+                if "youtube" in target or "youtube" in req_url or "youtube" in task.description.lower():
+                    expected_host = "youtube.com"
+                elif "google" in target or "google" in req_url or "google" in task.description.lower():
+                    expected_host = "google.com"
+                elif req_url:
+                    expected_host = req_url.replace("https://", "").replace("http://", "").split("/")[0]
+
+                if browser_url:
+                    if expected_host:
+                        if expected_host in browser_url.lower():
+                            browser_verified = True
+                            browser_reason = f"Verified browser navigated to {expected_host} (URL: {browser_url})"
+                        else:
+                            browser_verified = False
+                            browser_reason = f"Browser URL mismatch: expected {expected_host}, got {browser_url}"
+                    else:
+                        browser_verified = True
+                        browser_reason = f"Verified browser opened with URL: {browser_url}"
+                elif "http" in response_text or "navigat" in response_text.lower() or "open" in response_text.lower():
+                    browser_verified = None
+                    browser_reason = "Browser state unverified (URL not extracted)"
+
+            elif act in ("extract_text", "read_page", "read_result", "get_text") or "extract" in task.description.lower() or "read" in task.description.lower():
+                if len(response_text.strip()) > 5 and "error" not in response_text.lower():
+                    browser_verified = True
+                    browser_reason = f"Verified text extracted from browser ({len(response_text)} chars)"
+                else:
+                    browser_verified = False
+                    browser_reason = "Failed to extract text from browser page"
+
+            elif act == "search" or "search" in task.description.lower():
+                query_disp = (task.action.get("query") or "").strip() if task.action else ""
+                if not query_disp and "for" in task.description.lower():
+                    query_disp = task.description.split("for", 1)[1].strip()
+
+                if browser_url:
+                    norm_q = req_query.replace(" ", "+") if req_query else ""
+                    norm_q_raw = req_query if req_query else ""
+                    if norm_q and (norm_q in browser_url.lower() or all(w in browser_url.lower() for w in norm_q_raw.split())):
+                        browser_verified = True
+                        browser_reason = f"Verified search results for '{query_disp or req_query}' loaded (URL: {browser_url})"
+                    else:
+                        browser_verified = False
+                        browser_reason = f"Browser search query mismatch: '{query_disp or req_query}' not found in URL {browser_url}"
+                elif "search" in response_text.lower() or "result" in response_text.lower():
+                    browser_verified = None
+                    browser_reason = "Browser search state unverified (URL not extracted)"
+
+        # ── Step 3: App state check ─────────────────────────────────────────
         app_running: bool | None = None
-        app_name = self._extract_app_name(utterance_lower)
+        app_name: str | None = None
+        if task.action and isinstance(task.action, dict):
+            t = (task.action.get("target") or task.action.get("browser") or "").lower().strip()
+            if t in _KNOWN_APP_NAMES or any(a in t for a in ("edge", "chrome", "firefox")):
+                app_name = t
+        if not app_name:
+            app_name = self._extract_app_name(utterance_lower)
         if app_name:
             app_running = self._check_app_running(app_name)
 
-        # ── Step 3: File existence check ────────────────────────────────────
+        # ── Step 4: File existence check ────────────────────────────────────
         file_exists: bool | None = None
         file_path = self._extract_file_path(utterance_lower, response_text)
         if file_path:
@@ -216,7 +298,7 @@ class TaskObserver:
                 exists=file_exists,
             )
 
-        # ── Step 4: Visual observation (screenshot) ─────────────────────────
+        # ── Step 5: Visual observation (screenshot) ─────────────────────────
         screenshot_path = ""
         if self._vision_enabled and self._vision is not None:
             is_visual = any(kw in utterance_lower for kw in _VISUAL_KEYWORDS)
@@ -231,7 +313,20 @@ class TaskObserver:
             file_path=file_path,
             file_exists=file_exists,
             screenshot_path=screenshot_path,
+            browser_url=browser_url,
+            browser_verified=browser_verified,
+            browser_reason=browser_reason,
+            is_browser_task=is_browser_task,
         )
+
+        # M18: enrich summary with expected_outcome when present
+        extra: dict = {}
+        if expected_outcome:
+            extra["expected_outcome"] = expected_outcome
+            if success_signal is True:
+                summary = f"{summary} | Expected: {expected_outcome[:60]}"
+            elif success_signal is False:
+                summary = f"{summary} | Wanted: {expected_outcome[:60]}"
 
         obs = Observation(
             method=method,
@@ -239,7 +334,9 @@ class TaskObserver:
             success_signal=success_signal,
             app_running=app_running,
             file_exists=file_exists,
+            browser_url=browser_url,
             screenshot_path=screenshot_path,
+            extra=extra,
         )
 
         log.info(
@@ -364,6 +461,15 @@ class TaskObserver:
             return ""
 
     @staticmethod
+    def _extract_browser_url(response_text: str) -> str:
+        """Extract URL from response text."""
+        import re
+        m = re.search(r'https?://[^\s\'"<>]+', response_text)
+        if m:
+            return m.group(0).rstrip(".,;)")
+        return ""
+
+    @staticmethod
     def _consolidate(
         text_signal: bool | None,
         app_name: str | None,
@@ -371,6 +477,10 @@ class TaskObserver:
         file_path: str | None,
         file_exists: bool | None,
         screenshot_path: str,
+        browser_url: str = "",
+        browser_verified: bool | None = None,
+        browser_reason: str = "",
+        is_browser_task: bool = False,
     ) -> tuple[bool | None, str, str]:
         """
         Combine all observation signals into a single verdict.
@@ -381,6 +491,14 @@ class TaskObserver:
         parts: list[str] = []
         signals: list[bool] = []
 
+        if browser_verified is not None:
+            parts.append(browser_reason or f"Browser URL: {browser_url}")
+            return browser_verified, "browser_url", browser_reason or f"Browser verified ({browser_url})"
+
+        if is_browser_task and browser_verified is None:
+            # Browser task executed but actual state unverified
+            return None, "browser_url", browser_reason or "Browser state unverified directly"
+
         if app_running is not None:
             sig_str = "running" if app_running else "NOT running"
             parts.append(f"App '{app_name}' is {sig_str}")
@@ -390,6 +508,9 @@ class TaskObserver:
             sig_str = "exists" if file_exists else "NOT found"
             parts.append(f"File '{file_path}' {sig_str}")
             signals.append(file_exists)
+
+        if browser_url:
+            parts.append(f"Browser URL: {browser_url}")
 
         if screenshot_path:
             parts.append(f"Screenshot captured: {screenshot_path}")
@@ -414,3 +535,4 @@ class TaskObserver:
             )
 
         return None, "response_text", "Inconclusive — no strong signal."
+

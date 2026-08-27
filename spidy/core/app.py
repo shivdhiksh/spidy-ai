@@ -227,8 +227,8 @@ class SpidyCore:
         self._config_mgr = ConfigManager(config_path=self._config_path)
         self._settings = self._config_mgr.load()
 
-        # ── 1a. Ollama health check (onboarding diagnostics) ──────────────
-        await self._run_ollama_health_check()
+        # ── 1a. LLM provider chain startup log (no Ollama health check) ──────
+        await self._log_llm_provider_chain()
 
         # ── 2. Logging (reconfigure with values from config) ──────────────
         log_dir = self._settings.paths.resolve("log_dir")
@@ -250,6 +250,7 @@ class SpidyCore:
         # ── 4. Device Manager (CUDA detection) ───────────────────────────
         self._device_mgr = DeviceManager()
         self._device_mgr.detect()
+        self._log_ai_runtime_summary()
 
         # ── 5. OS Signal Handlers (CTRL+C, SIGTERM) ───────────────────────
         self._register_signal_handlers()
@@ -342,68 +343,72 @@ class SpidyCore:
                 )
                 self._learning_mgr = None
 
-    async def _run_ollama_health_check(self) -> None:
+    def _log_ai_runtime_summary(self) -> None:
+        """Log structured AI runtime and device placement status."""
+        if self._settings is None:
+            return
+
+        # STT
+        stt_cfg = self._settings.voice.stt
+        log.info(
+            "[STT] model={model} | device={device} | compute_type={ct}",
+            model=stt_cfg.model,
+            device=stt_cfg.device,
+            ct=stt_cfg.compute_type,
+        )
+        # STT Barge-in
+        bi_cfg = self._settings.voice.barge_in
+        log.info(
+            "[STT BARGE-IN] model={model} | device={device} | compute_type={ct}",
+            model=bi_cfg.model,
+            device=getattr(bi_cfg, "device", "cpu"),
+            ct=getattr(bi_cfg, "compute_type", "int8"),
+        )
+        # Embedding
+        emb_model = getattr(self._settings.memory.semantic, "embedding_model", "all-MiniLM-L6-v2")
+        emb_dev = getattr(self._settings.memory.semantic, "device", "cpu")
+        log.info(
+            "[EMBEDDING] model={model} | device={device} | shared_instance=true",
+            model=emb_model,
+            device=emb_dev,
+        )
+        # LLM provider chain
+        providers = getattr(self._settings.llm, "providers", [])
+        provider_names = [p.name for p in providers if p.enabled]
+        log.info(
+            "[LLM] provider_chain={chain}",
+            chain=" -> ".join(provider_names) if provider_names else "(none configured)",
+        )
+
+    async def _log_llm_provider_chain(self) -> None:
         """
-        Run the Ollama startup health check and print a diagnostic banner.
+        Log the active LLM provider chain at startup.
 
-        Called immediately after configuration is loaded so the user sees
-        the report before any other module starts.
-
-        Behaviour
-        ---------
-        - Always prints the report banner (never silent).
-        - In text mode: if the model is missing, offers an interactive pull.
-        - In voice/UI mode: logs a warning if issues are detected (no stdin).
-        - Never blocks startup — issues are advisory, not fatal.
+        Replaces the old Ollama-specific health check. Does NOT connect to
+        any local endpoint (no localhost:11434 call). Only logs provider names
+        and model slugs — API key values are never logged.
         """
         assert self._settings is not None
-        provider = getattr(self._settings.reasoning, "provider", "ollama").lower()
-        if provider != "ollama":
-            # Skip Ollama-specific checks for cloud providers
-            return
+        providers = getattr(self._settings.llm, "providers", [])
+        enabled = [p for p in providers if p.enabled]
 
-        try:
-            from spidy.llm.health import (
-                run_health_check_async,
-                print_health_report,
-                maybe_pull_model,
-            )
-        except ImportError:
-            # Should never happen — health.py is stdlib-only
-            log.warning("Could not import health check module.")
-            return
-
-        report = await run_health_check_async(self._settings.reasoning)
-        print_health_report(report)
-
-        if report.all_ok:
-            return
-
-        if not report.server_running:
+        if not enabled:
             log.warning(
-                "Ollama server is not running. "
-                "Brain will be unavailable until 'ollama serve' is started."
+                "[LLM] No providers enabled. Set NVIDIA_API_KEY or "
+                "OPENROUTER_API_KEY to enable cloud LLM inference."
             )
             return
 
-        if not report.model_available:
-            if self._text_mode:
-                # Text mode: terminal is available — offer auto-pull
-                pulled = maybe_pull_model(
-                    model=self._settings.reasoning.model,
-                    base_url=self._settings.reasoning.base_url,
-                )
-                if pulled:
-                    log.info(
-                        "Model '{m}' pulled successfully.",
-                        m=self._settings.reasoning.model,
-                    )
-            else:
-                log.warning(
-                    "Model '{m}' is not installed. "
-                    "Run 'ollama pull {m}' then restart Spidy.",
-                    m=self._settings.reasoning.model,
-                )
+        log.info("[LLM] Provider chain configured ({n} provider(s)):", n=len(enabled))
+        for idx, p in enumerate(enabled):
+            role = "primary" if idx == 0 else "fallback"
+            log.info(
+                "  [{idx}] {name} | model={model} | role={role}",
+                idx=idx + 1,
+                name=p.name,
+                model=p.model or "(default)",
+                role=role,
+            )
 
     async def _run(self) -> None:
         """Step 2: Start all services and enter the main event loop."""
@@ -480,7 +485,10 @@ class SpidyCore:
                 from spidy.skills.desktop import register_desktop_skills
 
                 skill_registry = SkillRegistry()
-                llm_client = LLMClientFactory.build(self._settings.reasoning)
+                if self._settings.llm and getattr(self._settings.llm, "providers", None):
+                    llm_client = LLMClientFactory.build_router(self._settings.llm, bus=self._bus)
+                else:
+                    llm_client = LLMClientFactory.build(self._settings.reasoning)
 
                 # Register built-in skills
                 register_builtin_skills(

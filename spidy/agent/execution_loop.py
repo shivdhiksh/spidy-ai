@@ -1,6 +1,6 @@
 """
-ExecutionLoop — Autonomous Agent Execution Engine (Milestone 16 upgrade)
-=========================================================================
+ExecutionLoop -- Autonomous Agent Execution Engine (Milestones 16 + 18)
+========================================================================
 The core loop that drives autonomous goal execution.
 
 Pipeline (per-goal)
@@ -9,29 +9,34 @@ Pipeline (per-goal)
   for task in tasks:
       if ctx.cancelled: break
 
-      1. TaskAuthorityChecker.check(task)  [NEW M16]
-         → CONFIRM/CRITICAL → publish AgentConfirmationRequiredEvent, skip
-         → SAFE/AWARE       → proceed
+      1. TaskAuthorityChecker.check(task)  [M16]
+         -> CONFIRM/CRITICAL -> publish AgentConfirmationRequiredEvent, skip
+         -> SAFE/AWARE       -> proceed
 
-      2. Brain.process(task.utterance)
+      2a. IF task.action (structured contract) [M18]:
+          -> StructuredRouter.execute(action, task, session_id)
+          -> ctx.add_result(task.task_id, result)
+      2b. ELSE:
+          -> Brain.process(task.utterance)   [original path]
 
-      3. TaskObserver.observe(task, response_text)  [NEW M16]
+      3. TaskObserver.observe(task, response_text)  [M16]
 
       4. ReflectionEngine.reflect(task, response_text, success)
 
-      5. TaskEvaluator.evaluate(observation, reflection_decision)  [NEW M16]
-         → outcome.success → mark COMPLETED
-         → outcome.should_replan → Replanner.replan() → revise remaining
-         → otherwise → RETRY / ABORT as before
+      5. TaskEvaluator.evaluate(observation, reflection_decision)  [M16]
+         -> outcome.success -> mark COMPLETED
+         -> outcome.should_replan -> Replanner.replan() -> revise remaining
+         -> otherwise -> RETRY / ABORT as before
 
-  GoalVerifier.verify(goal, observations)  [NEW M16]
+  GoalVerifier.verify(goal, observations)  [M16]
 
 Design
 ------
-- Observer, Evaluator, Replanner, AuthorityChecker are all optional (None-safe).
-  When not configured, the loop behaves identically to M13.
+- Observer, Evaluator, Replanner, AuthorityChecker, StructuredRouter are
+  all optional (None-safe). When not configured, the loop behaves
+  identically to M13.
 - Cancellation is checked at the top of every task iteration AND after each
-  Brain.process() call (long-running tasks respect mid-task cancellation).
+  execution call (long-running tasks respect mid-task cancellation).
 - All [AGENT] structured log tags are emitted via AgentTaskLogger.
 - Self-recovery: ALTERNATIVE tries a rephrased utterance before replanning.
 - Natural progress events are published via ProgressTracker.
@@ -49,6 +54,7 @@ Usage
         replanner=replanner,
         authority=authority_checker,
         task_log=task_logger,
+        router=structured_router,   # M18
     )
     completed_goal = await loop.run(goal, tasks, ctx)
 """
@@ -76,6 +82,7 @@ if TYPE_CHECKING:
     from spidy.agent.observer import Observation, TaskObserver
     from spidy.agent.progress_tracker import ProgressTracker
     from spidy.agent.replanner import Replanner
+    from spidy.agent.structured_router import StructuredRouter  # M18
     from spidy.agent.task_logger import AgentTaskLogger
     from spidy.brain.brain import Brain
     from spidy.core.event_bus import EventBus
@@ -128,6 +135,7 @@ class ExecutionLoop:
         replanner: "Replanner | None" = None,
         authority: "TaskAuthorityChecker | None" = None,
         task_log: "AgentTaskLogger | None" = None,
+        router: "StructuredRouter | None" = None,  # M18
         inter_task_delay: float = _INTER_TASK_DELAY,
     ) -> None:
         self._brain = brain
@@ -140,6 +148,7 @@ class ExecutionLoop:
         self._replanner = replanner
         self._authority = authority
         self._task_log = task_log
+        self._router = router  # M18
         self._inter_task_delay = inter_task_delay
 
     # ── Public API ─────────────────────────────────────────────────────────
@@ -344,9 +353,38 @@ class ExecutionLoop:
                 desc=task.description[:80],
             )
 
-            # ── Call Brain.process() ───────────────────────────────────────
-            utterance = running_task.utterance
-            response_text, result_success = await self._call_brain(utterance, ctx.session_id)
+            # -- Structured action path vs Brain.process() fallback ----------
+            if task.action and self._router is not None:
+                # Inject input_from result and template variables if declared
+                resolved_action = self._inject_step_result(task.action, ctx, running_task.task_id)
+                # Log structured action details
+                self._log_structured_action(running_task, resolved_action)
+                response_text, result_success = await self._execute_structured(
+                    resolved_action, running_task, ctx.session_id
+                )
+                # Store rich result for potential later input_from references
+                structured_data: dict[str, Any] = {
+                    "result": response_text,
+                    "text": response_text,
+                    "success": result_success,
+                }
+                if "http" in response_text:
+                    import re
+                    m_url = re.search(r'https?://[^\s]+', response_text)
+                    if m_url:
+                        structured_data["url"] = m_url.group(0).rstrip(".,;)'\"")
+                if "title" in response_text.lower():
+                    import re
+                    m_title = re.search(r'title:?\s*["\']?([^"\',\n]+)', response_text, re.IGNORECASE)
+                    if m_title:
+                        structured_data["title"] = m_title.group(1).strip()
+
+                ctx.add_structured_result(running_task.task_id, structured_data, step_index=task_index)
+            else:
+                # -- Original Brain.process() path (preserved) -----------------
+                utterance = running_task.utterance
+                response_text, result_success = await self._call_brain(utterance, ctx.session_id)
+                ctx.add_structured_result(running_task.task_id, response_text, step_index=task_index)
 
             # Check cancellation after Brain returns (long-running tasks)
             if ctx.cancelled:
@@ -369,7 +407,9 @@ class ExecutionLoop:
                 task_id=task.task_id,
                 goal_id=task.goal_id,
                 description=task.description,
-                utterance=utterance,
+                utterance=running_task.utterance,   # always safe (no local var dependency)
+                action=task.action,                  # M18: preserve action
+                input_from=task.input_from,          # M18: preserve input_from
                 state=TaskState.RUNNING,
                 attempt=attempt,
                 extra=task.extra,
@@ -527,7 +567,7 @@ class ExecutionLoop:
         """
         Call Brain.process() and return (response_text, success_bool).
 
-        Never raises — all errors are caught and surfaced as failure tuples.
+        Never raises -- all errors are caught and surfaced as failure tuples.
         """
         try:
             response_text = await self._brain.process(utterance, session_id=session_id)
@@ -536,6 +576,104 @@ class ExecutionLoop:
         except Exception as exc:  # noqa: BLE001
             log.error("[AGENT] ExecutionLoop: Brain.process() raised: {exc}", exc=exc)
             return f"An error occurred: {exc}", False
+
+    # -- M18: Structured execution helpers ------------------------------------
+
+    @staticmethod
+    def _inject_step_result(
+        action: dict,
+        ctx: ExecutionContext,
+        current_task_id: str = "",
+    ) -> dict:
+        """
+        Resolve input_from and template variables (${task_id.field}, ${prev.field}, etc.)
+        in a structured action by injecting prior task results into action fields.
+        """
+        resolved = dict(action)
+        input_from = action.get("input_from", "")
+
+        # 1. Resolve explicit input_from if declared
+        prior_result = ""
+        if input_from:
+            if input_from in ctx.step_results:
+                stored = ctx.step_results[input_from]
+                if isinstance(stored, dict):
+                    prior_result = str(stored.get("result") or stored.get("text") or stored.get("url") or "")
+                else:
+                    prior_result = str(stored)
+            elif input_from.startswith("<input_from:") or "${" in input_from:
+                res = ctx.resolve_variable(input_from, current_task_id)
+                prior_result = str(res) if res != input_from else ""
+            else:
+                prior_result = ""
+
+        skill = (resolved.get("skill") or "").lower()
+        act = (resolved.get("action") or "").lower()
+
+        # 2. Interpolate template expressions across string fields
+        for field_key in ("text", "query", "target", "url", "input", "expression"):
+            val = resolved.get(field_key)
+            if isinstance(val, str):
+                resolved_val = ctx.resolve_variable(val, current_task_id)
+                if isinstance(resolved_val, str) and resolved_val != val:
+                    resolved[field_key] = resolved_val
+
+        # 3. If input_from was declared, map it to the primary field if unset or generic
+        if prior_result and input_from:
+            if skill == "file" and act in ("open_file", "open", "read_file", "read"):
+                if not resolved.get("target"):
+                    resolved["target"] = prior_result
+            elif skill == "browser" and act in ("navigate", "search"):
+                if not resolved.get("url") and ("http://" in prior_result or "https://" in prior_result):
+                    resolved["url"] = prior_result
+                elif not resolved.get("query"):
+                    resolved["query"] = prior_result
+            elif skill == "desktop" and act in ("type_text", "type", "keyboard_type", "write"):
+                if not resolved.get("text") or resolved.get("text") in ("${prev}.text", "the result", "the search result"):
+                    resolved["text"] = prior_result
+            else:
+                if not resolved.get("input"):
+                    resolved["input"] = prior_result
+
+        return resolved
+
+    async def _execute_structured(
+        self,
+        action: dict,
+        task: TaskRecord,
+        session_id: str,
+    ) -> tuple[str, bool]:
+        """
+        Execute a structured action via StructuredRouter.
+
+        Falls back gracefully to Brain.process(utterance) if the router
+        is unavailable or the action is invalid.
+        """
+        if self._router is None:
+            return await self._call_brain(task.utterance, session_id)
+        try:
+            return await self._router.execute(action, task, session_id)
+        except Exception as exc:  # noqa: BLE001
+            log.error(
+                "[AGENT] ExecutionLoop: StructuredRouter.execute raised: %s", exc
+            )
+            return await self._call_brain(task.utterance, session_id)
+
+    @staticmethod
+    def _log_structured_action(task: TaskRecord, action: dict) -> None:
+        """Emit a structured [AGENT] log line for the action contract."""
+        parts = []
+        for key in ("skill", "action", "target", "query", "url"):
+            val = action.get(key, "")
+            if val:
+                parts.append(f"{key}={val!r}")
+        eo = action.get("expected_outcome", "")
+        summary = " ".join(parts)
+        log.info(
+            "[AGENT] Structured task: %s | expected_outcome='%s'",
+            summary,
+            eo[:80] if eo else "(none)",
+        )
 
     # ── Event publishers ───────────────────────────────────────────────────
 

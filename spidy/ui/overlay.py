@@ -79,6 +79,20 @@ class UISignalBridge(QWidget):
     confirmation_show        = Signal(str, str, str, str)  # tid, gid, desc, prompt
     confirmation_hide        = Signal()
 
+    # Thread-safe HUD visibility control signals (dispatched to Qt main thread)
+    show_hud_requested       = Signal()
+    hide_hud_requested       = Signal()
+    toggle_hud_requested     = Signal()
+
+    def request_show_hud(self) -> None:
+        self.show_hud_requested.emit()
+
+    def request_hide_hud(self) -> None:
+        self.hide_hud_requested.emit()
+
+    def request_toggle_hud(self) -> None:
+        self.toggle_hud_requested.emit()
+
     def request_state_change(self, state: str) -> None:
         self.state_change_requested.emit(state)
 
@@ -180,12 +194,13 @@ class _HUDInfoWidget(QWidget):
 
 
 class _HUDHeader(QWidget):
-    """Top bar: left datetime | center status | right sys info."""
+    """Top bar: left datetime | center status | right sys info + window controls + dragging."""
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setFixedHeight(52)
+        self._drag_pos = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(12, 4, 12, 4)
@@ -198,6 +213,45 @@ class _HUDHeader(QWidget):
         for w in (self._tl, self._tc, self._tr):
             layout.addWidget(w, 1)
 
+        # Window controls (minimize & close buttons)
+        self._btn_min = QPushButton("—")
+        self._btn_min.setFixedSize(28, 28)
+        self._btn_min.setStyleSheet("""
+            QPushButton {
+                background: rgba(10, 25, 41, 0.7);
+                color: #80DEEA;
+                border: 1px solid rgba(0, 229, 255, 0.4);
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 12px;
+            }
+            QPushButton:hover {
+                background: rgba(0, 229, 255, 0.2);
+                color: #FFFFFF;
+            }
+        """)
+        self._btn_min.clicked.connect(self._on_minimize)
+        layout.addWidget(self._btn_min)
+
+        self._btn_close = QPushButton("✕")
+        self._btn_close.setFixedSize(28, 28)
+        self._btn_close.setStyleSheet("""
+            QPushButton {
+                background: rgba(10, 25, 41, 0.7);
+                color: #FF8A80;
+                border: 1px solid rgba(255, 36, 68, 0.4);
+                border-radius: 4px;
+                font-weight: bold;
+                font-size: 11px;
+            }
+            QPushButton:hover {
+                background: rgba(255, 36, 68, 0.3);
+                color: #FFFFFF;
+            }
+        """)
+        self._btn_close.clicked.connect(self._on_close)
+        layout.addWidget(self._btn_close)
+
         self._state_label = self._tc  # kept for test compat
 
         # Clock timer
@@ -206,6 +260,44 @@ class _HUDHeader(QWidget):
         self._clock.timeout.connect(self._update_clock)
         self._clock.start()
         self._update_clock()
+
+    def _on_minimize(self) -> None:
+        win = self.window()
+        if win:
+            win.showMinimized()
+
+    def _on_close(self) -> None:
+        win = self.window()
+        if win:
+            OverlayWindow._session_pos = win.pos()
+            if hasattr(win, "hide_animated"):
+                win.hide_animated()
+            else:
+                win.hide()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            win = self.window()
+            if win:
+                self._drag_pos = event.globalPosition().toPoint() - win.pos()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if event.buttons() & Qt.MouseButton.LeftButton and self._drag_pos is not None:
+            win = self.window()
+            if win:
+                new_pos = event.globalPosition().toPoint() - self._drag_pos
+                win.move(new_pos)
+                OverlayWindow._session_pos = new_pos
+                event.accept()
+                return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_pos = None
+        super().mouseReleaseEvent(event)
 
     def set_state(self, state: str) -> None:
         _label_map = {
@@ -344,17 +436,34 @@ class _HUDFooter(QWidget):
 
 # ── OverlayWindow ─────────────────────────────────────────────────────────
 
-def _hud_size() -> tuple[int, int]:
-    """Compute responsive HUD dimensions based on primary screen."""
+def _hud_size(width_hint: int = 0, height_hint: int = 0) -> tuple[int, int]:
+    """
+    Compute responsive wide HUD dimensions based on primary screen geometry.
+    Priority: WIDTH > HEIGHT (horizontal futuristic command center).
+    """
+    if width_hint > 0 and height_hint > 0:
+        return width_hint, height_hint
+
     screens = QGuiApplication.screens()
     screen = screens[0] if screens else None
-    if screen:
+    if screen and screen.availableGeometry().width() > 800:
         geom = screen.availableGeometry()
         sw, sh = geom.width(), geom.height()
     else:
         sw, sh = 1920, 1080
-    w = max(1100, min(1400, int(sw * 0.82)))
-    h = max(650,  min(850,  int(sh * 0.78)))
+
+    # Minimum desktop safe boundaries (adapt for small screens)
+    min_safe_w = min(1050, max(750, sw - 40))
+    min_safe_h = min(580,  max(480, sh - 60))
+
+    # Standard wide horizontal target:
+    # At 1920x1080 -> w ≈ 1550, h ≈ 780
+    # At 1536x864  -> w ≈ 1350, h ≈ 700
+    # At 1280x720  -> w ≈ 1150, h ≈ 600
+    # At 2560x1440 -> w ≈ 1950, h ≈ 1000
+    w = max(min_safe_w, min(1980, int(sw * 0.82)))
+    h = max(min_safe_h, min(1080, int(sh * 0.78)))
+
     return w, h
 
 
@@ -394,37 +503,22 @@ def _apply_acrylic(hwnd: int, color_hex: str) -> None:
 
 class OverlayWindow(QWidget):
     """
-    Spidy HUD Overlay (Milestone 17.2).
+    Spidy HUD Overlay.
 
-    Futuristic full-HUD command center with:
-    - Responsive sizing (75-90% of screen)
-    - Central AI core as the dominant visual
-    - Surrounding telemetry modules
-    - Floating conversation cards
-    - Futuristic confirmation panel
-    - Boot/close animation sequence
-
-    Public API (backward-compatible with M17.1)
-    -------------------------------------------
-    set_state(state: str)
-    add_message(role: str, text: str)
-    update_waveform(amplitudes: list[float])
-    show_notification(title, msg, level)
-    update_task_progress(goal, steps)
-    show_confirmation(task_id, goal_id, description, prompt)
-    hide_confirmation()
-    apply_theme(theme)
-    show_animated()
-    hide_animated()
-
-    Signals
-    -------
-    mic_button_clicked
-    overlay_closed
+    Futuristic wide desktop command center:
+    - Wide horizontal layout (WIDTH > HEIGHT)
+    - Central large AI core with multi-ring animation
+    - Full-width scrollable conversation area
+    - Real hardware telemetry (CPU, RAM, GPU, VRAM, Disk)
+    - Autonomous agent task console
+    - Floating & draggable window with persistent position
+    - Clean hide/show/toggle lifecycle
     """
 
     mic_button_clicked = Signal()
     overlay_closed     = Signal()
+
+    _session_pos = None  # Persistent position across toggles in same session
 
     def __init__(
         self,
@@ -437,10 +531,10 @@ class OverlayWindow(QWidget):
     ) -> None:
         super().__init__(None)
 
-        # Responsive size
-        auto_w, auto_h = _hud_size()
-        self._hud_w = width  if width  > 0 else auto_w
-        self._hud_h = height if height > 0 else auto_h
+        # Responsive wide size
+        auto_w, auto_h = _hud_size(width, height)
+        self._hud_w = auto_w
+        self._hud_h = auto_h
         self._animate = animate
 
         # Window flags: frameless, on top, translucent
@@ -454,22 +548,19 @@ class OverlayWindow(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         self.setFixedSize(self._hud_w, self._hud_h)
 
-        # Center on screen
-        screens = QGuiApplication.screens()
-        if screens:
-            sg = screens[0].availableGeometry()
-            self.move(
-                sg.x() + (sg.width()  - self._hud_w) // 2,
-                sg.y() + (sg.height() - self._hud_h) // 2,
-            )
+        # Position on screen (use saved session position if user moved window)
+        if OverlayWindow._session_pos is not None:
+            self.move(OverlayWindow._session_pos)
+        else:
+            screens = QGuiApplication.screens()
+            if screens:
+                sg = screens[0].availableGeometry()
+                self.move(
+                    sg.x() + (sg.width()  - self._hud_w) // 2,
+                    sg.y() + (sg.height() - self._hud_h) // 2,
+                )
 
-        # Window opacity: start invisible for boot animation.
-        # NOTE: We intentionally do NOT use QGraphicsOpacityEffect here.
-        # QGraphicsOpacityEffect allocates an intermediate offscreen buffer with
-        # its own internal QPainter.  When our custom paintEvent() then creates
-        # a second QPainter on the same paint device, Qt prints:
-        #   "QPainter::begin: A paint device can only be painted by one painter"
-        # Using setWindowOpacity() avoids this conflict entirely.
+        # Window opacity: start invisible for boot animation
         self.setWindowOpacity(0.0)
 
         # Build layout
@@ -486,64 +577,124 @@ class OverlayWindow(QWidget):
         # Try acrylic
         QTimer.singleShot(100, self._setup_acrylic)
 
+        # Log diagnostics
+        self._log_diagnostics()
+
+    def _log_diagnostics(self) -> None:
+        screens = QGuiApplication.screens()
+        screen = screens[0] if screens else None
+        sw = screen.geometry().width() if screen else 0
+        sh = screen.geometry().height() if screen else 0
+        aw = screen.availableGeometry().width() if screen else 0
+        ah = screen.availableGeometry().height() if screen else 0
+        dpr = screen.devicePixelRatio() if screen else 1.0
+        log.info(
+            f"[HUD DIAGNOSTICS] screen={sw}x{sh} available={aw}x{ah} dpr={dpr} | "
+            f"requested_size={self._hud_w}x{self._hud_h} actual_size={self.width()}x{self.height()} "
+            f"pos=({self.x()},{self.y()})"
+        )
+
+    def showEvent(self, event) -> None:
+        super().showEvent(event)
+        self._log_diagnostics()
+
     # ---- Build Layout -------------------------------------------------------
 
     def _build_layout(self) -> None:
         main = QVBoxLayout(self)
-        main.setContentsMargins(8, 8, 8, 8)
-        main.setSpacing(6)
+        main.setContentsMargins(10, 8, 10, 8)
+        main.setSpacing(8)
 
-        # Header
+        # 1. Header (SPIDY SYSTEM | SPIDY INTELLIGENCE | SPIDY NETWORK | — X)
         self._header = _HUDHeader()
         main.addWidget(self._header, 0)
 
-        # Middle row: left | center | right
-        middle = QHBoxLayout()
-        middle.setSpacing(8)
-        middle.setContentsMargins(0, 0, 0, 0)
+        # 2. Upper row: TELEMETRY | SPIDY CORE | SPIDY AGENT
+        self._upper_row = QHBoxLayout()
+        self._upper_row.setSpacing(10)
+        self._upper_row.setContentsMargins(0, 0, 0, 0)
 
         self._left_panel = _HUDLeftPanel()
-        middle.addWidget(self._left_panel, 0)
+        self._upper_row.addWidget(self._left_panel, 0)
 
-        # Center: core + chat overlay stacked
-        self._center_stack = QWidget()
-        self._center_stack.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self._center_stack.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        # Central core container
+        self._core_container = QWidget()
+        self._core_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._core_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred
         )
-        middle.addWidget(self._center_stack, 1)
+        self._center_stack = self._core_container  # Alias for backward compatibility
+
+        core_box = QHBoxLayout(self._core_container)
+        core_box.setContentsMargins(0, 0, 0, 0)
+        self._core = SpidyCoreWidget(self._core_container)
+        core_box.addWidget(self._core, 0, Qt.AlignmentFlag.AlignCenter)
+        self._upper_row.addWidget(self._core_container, 1)
 
         self._right_panel = _HUDRightPanel()
-        middle.addWidget(self._right_panel, 0)
+        self._upper_row.addWidget(self._right_panel, 0)
 
-        # Set initial panel widths based on window size
-        lw, rw = self._compute_side_widths(self._hud_w)
-        self._left_panel.setFixedWidth(lw)
-        self._right_panel.setFixedWidth(rw)
+        main.addLayout(self._upper_row, 0)
 
-        main.addLayout(middle, 1)
+        # 3. Middle row: CONVERSATION (Full horizontal width)
+        self._chat_container = QWidget()
+        self._chat_container.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self._chat_container.setSizePolicy(
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
+        )
+        chat_box = QVBoxLayout(self._chat_container)
+        chat_box.setContentsMargins(0, 0, 0, 0)
+        self._chat_overlay = HUDChatOverlay(self._chat_container)
+        chat_box.addWidget(self._chat_overlay)
+        main.addWidget(self._chat_container, 1)
 
-        # Footer
+        # 4. Footer (CONTROLS | VOICE BAR | SPIDY MEMORY)
         self._footer = _HUDFooter()
         main.addWidget(self._footer, 0)
 
-        # Core widget inside center stack (resized in resizeEvent)
-        self._core = SpidyCoreWidget(self._center_stack)
-
-        # Chat overlay (positioned over lower center)
-        self._chat_overlay = HUDChatOverlay(self._center_stack)
-
-        # Confirmation overlay (centered over center stack)
+        # Confirmation card (overlaid on top of center stack when active)
         self._confirmation_card = HUDConfirmation(self._center_stack)
         self._confirmation_card.hide()
 
+        # Apply initial sizes
+        self._update_layout_dimensions()
+
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        # Update side panel widths proportionally when window is resized
+        self._update_layout_dimensions()
+
+    def moveEvent(self, event) -> None:
+        super().moveEvent(event)
+        OverlayWindow._session_pos = self.pos()
+
+    def _update_layout_dimensions(self) -> None:
         lw, rw = self._compute_side_widths(self.width())
         self._left_panel.setFixedWidth(lw)
         self._right_panel.setFixedWidth(rw)
-        self._layout_center_children()
+
+        # Upper row height is ~36-40% of total height
+        upper_h = max(190, min(360, int(self.height() * 0.38)))
+        self._left_panel.setFixedHeight(upper_h)
+        self._right_panel.setFixedHeight(upper_h)
+        self._core_container.setFixedHeight(upper_h)
+
+        # Large core sizing
+        avail_core_w = self.width() - lw - rw - 36
+        core_size = max(170, min(upper_h - 8, avail_core_w))
+        self._core.setFixedSize(core_size, core_size)
+
+        # Confirmation card geometry
+        if self._confirmation_card.isVisible():
+            cw = self._center_stack.width()
+            ch = self._center_stack.height()
+            conf_w = max(240, int(cw * 0.85))
+            conf_h = max(160, int(ch * 0.75))
+            self._confirmation_card.setGeometry(
+                (cw - conf_w) // 2,
+                (ch - conf_h) // 2,
+                conf_w,
+                conf_h,
+            )
 
     @staticmethod
     def _compute_side_widths(total_w: int) -> tuple[int, int]:
@@ -552,28 +703,22 @@ class OverlayWindow(QWidget):
         right_w = max(172, min(230, int(total_w * 0.145)))
         return left_w, right_w
 
-    def _layout_center_children(self) -> None:
-        s = self._center_stack
-        w, h = s.width(), s.height()
-
-        # Core: square, taking 80% of center height centered
-        core_size = min(w, int(h * 0.88))
-        cx = (w - core_size) // 2
-        cy = (h - core_size) // 2
-        self._core.setGeometry(cx, cy, core_size, core_size)
-
-        # Chat: lower 35% of center
-        chat_h = int(h * 0.35)
-        self._chat_overlay.setGeometry(0, h - chat_h, w, chat_h)
-
-        # Confirmation: middle 60% centered
-        conf_w = int(w * 0.70)
-        conf_h = int(h * 0.52)
-        self._confirmation_card.setGeometry(
-            (w - conf_w) // 2, (h - conf_h) // 2, conf_w, conf_h
-        )
-
     # ---- Public API ---------------------------------------------------------
+
+    def show_hud(self) -> None:
+        """Public API: show the HUD overlay with animation."""
+        self.show_animated()
+
+    def hide_hud(self) -> None:
+        """Public API: hide the HUD overlay."""
+        self.hide_animated()
+
+    def toggle_hud(self) -> None:
+        """Public API: toggle HUD visibility."""
+        if self.isVisible() and self.windowOpacity() > 0.05:
+            self.hide_animated()
+        else:
+            self.show_animated()
 
     def set_state(self, state: str) -> None:
         self._core.set_state(state)
@@ -597,7 +742,6 @@ class OverlayWindow(QWidget):
         self._footer.voice_bar.set_amplitude(amp)
 
     def show_notification(self, title: str, msg: str, level: str = "info") -> None:
-        # Notifications handled by NotificationManager in app.py
         pass
 
     def update_task_progress(self, goal: str, steps) -> None:
@@ -614,10 +758,23 @@ class OverlayWindow(QWidget):
     def show_confirmation(
         self, task_id: str, goal_id: str, description: str, prompt: str = ""
     ) -> None:
+        cw = self._center_stack.width()
+        ch = self._center_stack.height()
+        conf_w = max(240, int(cw * 0.85))
+        conf_h = max(160, int(ch * 0.75))
+        self._confirmation_card.setGeometry(
+            (cw - conf_w) // 2,
+            (ch - conf_h) // 2,
+            conf_w,
+            conf_h,
+        )
         self._confirmation_card.show_confirmation(task_id, goal_id, description, prompt)
+        self._confirmation_card.show()
+        self._confirmation_card.raise_()
 
     def hide_confirmation(self) -> None:
         self._confirmation_card.hide_confirmation()
+        self._confirmation_card.hide()
 
     def apply_theme(self, theme: "Theme") -> None:
         self._theme = theme
@@ -627,28 +784,68 @@ class OverlayWindow(QWidget):
     # ---- Animation ----------------------------------------------------------
 
     def show_animated(self) -> None:
+        # If already fully visible and booted, raise and bring to front without re-zeroing opacity
+        if self.isVisible() and self.windowOpacity() >= 0.95:
+            self.raise_()
+            self.activateWindow()
+            log.debug("[HUD LIFECYCLE] show_animated called while already visible — raised window")
+            return
+
+        if OverlayWindow._session_pos is not None:
+            self.move(OverlayWindow._session_pos)
+
         if not self._animate:
             self.setWindowOpacity(1.0)
             self.show()
+            self.raise_()
+            self.activateWindow()
             return
+
         self.setWindowOpacity(0.0)
         self.show()
+        self.raise_()
+        self.activateWindow()
         self._boot_phase = 0
         self._core.set_boot_scale(0.05)
         self._boot_timer.start()
+        log.info("[HUD LIFECYCLE] show_animated started boot animation on Qt thread")
 
     def hide_animated(self) -> None:
+        # Save position before hiding
+        OverlayWindow._session_pos = self.pos()
         if not self._animate:
             self.hide()
             self.overlay_closed.emit()
             return
         anim = QPropertyAnimation(self, b"windowOpacity", self)
-        anim.setStartValue(1.0)
+        anim.setStartValue(self.windowOpacity())
         anim.setEndValue(0.0)
-        anim.setDuration(400)
+        anim.setDuration(300)
         anim.setEasingCurve(QEasingCurve.Type.InCubic)
         anim.finished.connect(self._on_hide_done)
         anim.start()
+
+    def _boot_tick(self) -> None:
+        """Drives the multi-stage boot animation (~60fps via 16ms timer)."""
+        self._boot_phase += 1
+        p = self._boot_phase
+
+        if p <= 15:  # fade in window (0–240ms)
+            self.setWindowOpacity(p / 15.0 * 0.85)
+        elif p <= 30:  # core expands (240–480ms)
+            scale = (p - 15) / 15.0
+            ease = 1 - (1 - scale) ** 3  # ease-out cubic
+            self._core.set_boot_scale(ease)
+            self.setWindowOpacity(0.85 + 0.15 * ease)
+        elif p <= 40:  # settle
+            self._core.set_boot_scale(1.0)
+            self.setWindowOpacity(1.0)
+            self._boot_timer.stop()
+            log.debug("HUD boot animation complete")
+
+    def _on_hide_done(self) -> None:
+        self.hide()
+        self.overlay_closed.emit()
 
     def _boot_tick(self) -> None:
         """Drives the multi-stage boot animation (~60fps via 16ms timer)."""

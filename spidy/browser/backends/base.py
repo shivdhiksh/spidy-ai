@@ -76,6 +76,16 @@ class BrowserBackend(ABC):
     def is_running(self) -> bool:
         """Return True if the browser session is active."""
 
+    @property
+    def active_browser_type(self) -> str:
+        """Canonical name of the active browser (e.g. 'edge', 'chrome', 'firefox', 'chromium')."""
+        return ""
+
+    @property
+    def active_channel(self) -> str:
+        """Playwright launch channel if used (e.g. 'msedge', 'chrome')."""
+        return ""
+
     # ── Navigation ────────────────────────────────────────────────────────
 
     @abstractmethod

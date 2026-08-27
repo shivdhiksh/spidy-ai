@@ -33,7 +33,15 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from spidy.browser.backends.base import BrowserBackend
-from spidy.browser.types import DownloadResult, HistoryEntry, PageInfo, TabInfo
+from spidy.browser.types import (
+    BROWSER_PLAYWRIGHT_CHANNELS,
+    BROWSER_PROCESS_MAP,
+    DownloadResult,
+    HistoryEntry,
+    PageInfo,
+    TabInfo,
+    normalize_browser_target,
+)
 from spidy.logging.logger import get_logger
 
 log = get_logger(__name__)
@@ -82,6 +90,8 @@ class PlaywrightBackend(BrowserBackend):
         self._active_page_idx: int = 0
         self._download_dir: str = str(Path.home())
         self._running: bool = False
+        self._active_browser_type: str = ""
+        self._active_channel: str = ""
         # Stored so _heal() can relaunch with identical configuration
         self._last_start_kwargs: dict = {}
 
@@ -99,13 +109,23 @@ class PlaywrightBackend(BrowserBackend):
             raise RuntimeError(
                 "Playwright is not installed. Run: py -m playwright install chromium"
             )
-        if self._running:
-            log.debug("PlaywrightBackend.start() called when already running — no-op.")
-            return
+
+        norm_type = normalize_browser_target(browser_type, default="chromium")
+
+        # If already running with the exact same browser type, no-op
+        if self.is_running:
+            if self._active_browser_type == norm_type:
+                log.debug("PlaywrightBackend.start() called when already running {bt} — reusing session.", bt=norm_type)
+                return
+            log.info("PlaywrightBackend: switching active browser from {old} to {new}.", old=self._active_browser_type, new=norm_type)
+            await self.stop()
+
+        self._active_browser_type = norm_type
+        self._active_channel = BROWSER_PLAYWRIGHT_CHANNELS.get(norm_type, "")
 
         # Persist so _heal() can relaunch with identical configuration
         self._last_start_kwargs = {
-            "browser_type": browser_type,
+            "browser_type": norm_type,
             "headless": headless,
             "download_dir": download_dir,
             "cdp_endpoint": cdp_endpoint,
@@ -118,21 +138,62 @@ class PlaywrightBackend(BrowserBackend):
         self._playwright = await async_playwright().start()
 
         # Try attaching to an existing session first
-        if connect_to_existing and cdp_endpoint and browser_type == "chromium":
+        if connect_to_existing and cdp_endpoint and norm_type in ("chromium", "chrome"):
             attached = await self._try_cdp_attach(cdp_endpoint)
             if attached:
                 self._running = True
-                log.info("PlaywrightBackend: attached to existing Chrome session.")
+                log.info("PlaywrightBackend: attached to existing Chrome/CDP session.")
                 return
 
-        # Launch a new browser
-        browser_launcher = {
-            "chromium": self._playwright.chromium,
-            "firefox": self._playwright.firefox,
-            "webkit": self._playwright.webkit,
-        }.get(browser_type, self._playwright.chromium)
+        # Launch the target browser
+        log.info(
+            "[AGENT] Browser target={bt} (channel={ch}, headless={h})",
+            bt=norm_type,
+            ch=self._active_channel or "default",
+            h=headless,
+        )
 
-        self._browser = await browser_launcher.launch(headless=headless)
+        try:
+            if norm_type == "edge":
+                self._browser = await self._playwright.chromium.launch(
+                    channel="msedge",
+                    headless=headless,
+                )
+            elif norm_type == "chrome":
+                self._browser = await self._playwright.chromium.launch(
+                    channel="chrome",
+                    headless=headless,
+                )
+            elif norm_type == "firefox":
+                self._browser = await self._playwright.firefox.launch(
+                    headless=headless,
+                )
+            elif norm_type == "webkit":
+                self._browser = await self._playwright.webkit.launch(
+                    headless=headless,
+                )
+            else:
+                self._browser = await self._playwright.chromium.launch(
+                    headless=headless,
+                )
+        except Exception as exc:
+            log.error(
+                "[AGENT] Failed to launch requested browser '{bt}': {exc}",
+                bt=norm_type, exc=exc,
+            )
+            if norm_type == "edge":
+                raise RuntimeError(
+                    f"Microsoft Edge could not be launched or controlled: {exc}"
+                ) from exc
+            elif norm_type == "chrome":
+                raise RuntimeError(
+                    f"Google Chrome could not be launched or controlled: {exc}"
+                ) from exc
+            else:
+                raise RuntimeError(
+                    f"Browser '{norm_type}' could not be launched: {exc}"
+                ) from exc
+
         self._context = await self._browser.new_context(
             accept_downloads=True,
         )
@@ -141,9 +202,66 @@ class PlaywrightBackend(BrowserBackend):
         self._active_page_idx = 0
         self._running = True
         log.info(
-            "PlaywrightBackend: launched {bt} browser (headless={h}).",
-            bt=browser_type, h=headless,
+            "PlaywrightBackend: launched {bt} browser (channel={ch}, headless={h}).",
+            bt=norm_type, ch=self._active_channel or "default", h=headless,
         )
+
+    @property
+    def active_browser_type(self) -> str:
+        """Canonical name of active browser (e.g. 'edge', 'chrome', 'firefox', 'chromium')."""
+        return self._active_browser_type
+
+    @property
+    def active_channel(self) -> str:
+        """Playwright launch channel if used (e.g. 'msedge', 'chrome')."""
+        return self._active_channel
+
+    async def verify_process_identity(self) -> tuple[bool, str]:
+        """
+        Verify that the active browser process genuinely matches the requested browser target.
+        Checks both Playwright context/UA and OS process.
+        """
+        if not self.is_running:
+            return False, "Browser is not running"
+
+        expected_type = self._active_browser_type
+        if not expected_type:
+            return True, "No specific browser target recorded"
+
+        # 1. Page User-Agent inspection
+        ua = ""
+        try:
+            page = self._active_page()
+            ua = await page.evaluate("navigator.userAgent")
+        except Exception as exc:
+            log.debug("verify_process_identity: evaluate UA failed: {exc}", exc=exc)
+
+        # 2. Check expected markers
+        if expected_type == "edge":
+            if ua and "Edg/" not in ua:
+                return False, f"Browser identity mismatch: expected Edge, but User-Agent is '{ua}' (not Microsoft Edge)"
+        elif expected_type == "chrome":
+            if ua and ("Chrome/" not in ua or "Edg/" in ua):
+                return False, f"Browser identity mismatch: expected Chrome, but User-Agent is '{ua}'"
+        elif expected_type == "firefox":
+            if ua and "Firefox/" not in ua:
+                return False, f"Browser identity mismatch: expected Firefox, but User-Agent is '{ua}'"
+
+        # 3. Process check on Windows
+        proc_name = BROWSER_PROCESS_MAP.get(expected_type)
+        if proc_name and os.name == "nt":
+            import subprocess
+            try:
+                res = subprocess.run(
+                    ["tasklist", "/FI", f"IMAGENAME eq {proc_name}", "/NH"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if proc_name.lower() not in res.stdout.lower():
+                    return False, f"Expected browser process '{proc_name}' not found in running processes"
+            except Exception as exc:
+                log.debug("verify_process_identity: tasklist check error: {exc}", exc=exc)
+
+        return True, f"Verified genuine {expected_type} session (channel={self._active_channel})"
 
     async def _try_cdp_attach(self, endpoint: str) -> bool:
         """Try to connect to an existing Chrome via CDP. Return True on success."""

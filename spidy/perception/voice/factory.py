@@ -116,8 +116,11 @@ class VoiceEngineFactory:
             wake_model = OpenWakeWordModel(
                 model_name=wake_model_name,
                 threshold=voice_cfg.wake_word.threshold,
+                models=voice_cfg.wake_word.models,
+                active_models=voice_cfg.wake_word.active_models,
             )
         wake_model.load(model_path=custom_path)
+
         # [DIAG-6] Wake-word model finished loading.
         log.info(
             "[VOICE DIAG-6] Wake-word model loaded: name='{n}' | "
@@ -253,9 +256,11 @@ class VoiceEngineFactory:
             session=session_mgr,
         )
 
-        # ── Barge-in detector ─────────────────────────────────────────────
-        # Loads tiny.en (separate from main base.en — no contention, ~20 MB extra).
-        # Config: voice.barge_in section (all optional; defaults shown below).
+        # ── Barge-in detector ────────────────────────────────────────────────
+        # tiny.en is lazy-loaded after startup to reduce initial RAM usage.
+        # The is_loaded guard in BargeInDetector.start() handles the window
+        # where the model hasn't finished loading (mic stays IDLE — safe).
+        # Config: voice.barge_in section.
         barge_in_cfg = config.voice.barge_in
 
         barge_in: BargeInDetector | None = None
@@ -264,22 +269,27 @@ class VoiceEngineFactory:
                 interruption_handler=interruption_handler,
                 bus=bus,
                 model_size=barge_in_cfg.model,
+                device=getattr(barge_in_cfg, "device", "cpu"),
+                compute_type=getattr(barge_in_cfg, "compute_type", "int8"),
                 window_seconds=barge_in_cfg.window_seconds,
                 min_rms_threshold=barge_in_cfg.min_rms_threshold,
                 enabled=True,
             )
-            # Load blocking — runs at startup (acceptable; same as wake-word / STT load)
-            barge_in.load_model()
+            # Lazy-load: schedule tiny.en to load 3s after startup completes.
+            # This removes ~180 MB from the startup RAM peak while ensuring the
+            # model is ready long before the user's first TTS interaction.
+            barge_in.schedule_lazy_load(delay_seconds=3.0)
 
             # Register barge-in audio callback on the capture engine
             voice_engine._capture_engine._on_barge_in_chunk = barge_in.feed_chunk  # noqa: SLF001
             log.info(
-                "BargeInDetector wired: model='{m}' | window={w}s | "
-                "min_rms={r} | loaded={ok}",
+                "[STT BARGE-IN] model={m} | device={dev} | compute_type={ct} | "
+                "lazy_load=3s | window={w}s | min_rms={r}",
                 m=barge_in_cfg.model,
+                dev=getattr(barge_in_cfg, "device", "cpu"),
+                ct=getattr(barge_in_cfg, "compute_type", "int8"),
                 w=barge_in_cfg.window_seconds,
                 r=barge_in_cfg.min_rms_threshold,
-                ok=barge_in.is_loaded,
             )
         else:
             log.info("BargeInDetector: disabled in config (voice.barge_in.enabled=false).")
@@ -290,6 +300,8 @@ class VoiceEngineFactory:
         # Disabled when voice.wake_ack.enabled=false in config.
         wake_ack_cfg = config.voice.wake_ack
         wake_acknowledger = WakeAcknowledger(wake_ack_cfg)
+        if wake_ack_cfg.enabled and voice_engine._tts is not None:
+            wake_acknowledger.precache_phrases(voice_engine._tts)
         log.info(
             "WakeAcknowledger: enabled={en}, phrases={ph}",
             en=wake_ack_cfg.enabled,

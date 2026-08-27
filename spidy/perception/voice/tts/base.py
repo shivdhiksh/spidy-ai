@@ -75,7 +75,17 @@ class TTSEngine(ABC):
         text:
             The text to synthesise and speak.
         """
-        ...
+    async def play_buffer(self, buffer: AudioBuffer) -> None:
+        """
+        Play a pre-synthesised AudioBuffer directly without re-synthesis.
+
+        Parameters
+        ----------
+        buffer:
+            The AudioBuffer to play.
+        """
+        # Default fallback if engine doesn't provide custom stream playback
+        pass
 
     @abstractmethod
     def stop(self) -> None:

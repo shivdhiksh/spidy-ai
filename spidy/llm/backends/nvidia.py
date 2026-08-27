@@ -6,7 +6,7 @@ Connects to the NVIDIA NIM API, which exposes an OpenAI-compatible
 
 API reference: https://docs.api.nvidia.com/nim/reference/
 
-Default model : ``meta/llama-3.1-8b-instruct``
+Default model : ``nvidia/nemotron-3-ultra-550b-a55b``
                 (capable, fast, and freely available on the NIM catalog)
 Auth          : ``Authorization: Bearer <api_key>``
                 Falls back to the ``NVIDIA_API_KEY`` environment variable.
@@ -41,10 +41,12 @@ from spidy.llm.backends.openai import OpenAIClient
 from spidy.llm.client import LLMMessage, LLMResponse
 from spidy.logging.logger import get_logger
 
+from pathlib import Path
+
 log = get_logger(__name__)
 
 _DEFAULT_BASE_URL = "https://integrate.api.nvidia.com/v1"
-_DEFAULT_MODEL = "meta/llama-3.1-8b-instruct"
+_DEFAULT_MODEL = "nvidia/nemotron-3-ultra-550b-a55b"
 _ENV_KEY = "NVIDIA_API_KEY"
 
 
@@ -61,7 +63,7 @@ class NvidiaClient(OpenAIClient):
         NVIDIA NIM API key.  Falls back to the ``NVIDIA_API_KEY`` env var.
         Leave empty to use only the env var (recommended).
     model:
-        NIM model name, e.g. ``"meta/llama-3.1-8b-instruct"``,
+        NIM model name, e.g. ``"nvidia/nemotron-3-ultra-550b-a55b"``,
         ``"nvidia/llama-3.1-nemotron-70b-instruct"``.
     base_url:
         NIM API base URL.  Change only if you self-host NIM.
@@ -97,6 +99,8 @@ class NvidiaClient(OpenAIClient):
             max_tokens=max_tokens,
             timeout=timeout,
         )
+        # Explicitly enforce NVIDIA key — never fall back to OPENAI_API_KEY in base class
+        self._api_key = resolved_key
 
         # Log presence only — never the value.
         if resolved_key:

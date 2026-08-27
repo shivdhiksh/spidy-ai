@@ -53,6 +53,7 @@ class TestAppSkillCapabilities:
             "detect_running_apps", "launch_app",
             "bring_app_to_foreground", "close_app",
             "minimize_window", "maximize_window",
+            "run_python_script", "execute_script",
         }
         assert expected == actions
 
@@ -65,7 +66,7 @@ class TestAppSkillCapabilities:
     def test_launch_and_foreground_are_t1(self):
         skill = _make_skill()
         for cap in skill.capabilities():
-            if cap.action in ("launch_app", "bring_app_to_foreground"):
+            if cap.action in ("launch_app", "bring_app_to_foreground", "run_python_script", "execute_script"):
                 assert cap.permission_tier == "T1", f"{cap.action} should be T1"
 
     def test_close_is_t2(self):
@@ -81,8 +82,10 @@ class TestAppSkillCapabilities:
     def test_all_actions_supported(self):
         skill = _make_skill()
         for action in ("detect_running_apps", "launch_app",
-                       "bring_app_to_foreground", "close_app"):
+                       "bring_app_to_foreground", "close_app",
+                       "run_python_script", "execute_script"):
             assert skill.supports(action)
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -404,3 +407,30 @@ class TestAppSkillInternals:
             result = AppSkill._find_processes_by_name("notepad")
         assert len(result) == 1
         assert result[0]["name"] == "notepad.exe"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 8. Script execution
+# ──────────────────────────────────────────────────────────────────────────────
+
+
+class TestScriptExecution:
+    @pytest.mark.asyncio
+    async def test_run_python_script_inline(self, tmp_path):
+        script = tmp_path / "calc_area.py"
+        script.write_text("w = 10\nh = 5\nprint(f'Area: {w * h}')", encoding="utf-8")
+
+        skill = _make_skill()
+        ctx = _ctx("run_python_script", {"path": str(script)})
+        result = await skill.execute("run_python_script", ctx)
+        assert result.success is True
+        assert "Area: 50" in result.message
+
+    @pytest.mark.asyncio
+    async def test_run_python_script_missing(self):
+        skill = _make_skill()
+        ctx = _ctx("run_python_script", {"path": "non_existent_file_xyz_123.py"})
+        result = await skill.execute("run_python_script", ctx)
+        assert result.success is False
+        assert "not found" in result.message.lower()
+

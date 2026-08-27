@@ -124,47 +124,87 @@ class StreamingTTSWrapper:
             self._speaking = True
 
             try:
-                sentences = self._split_sentences(text)
+                sentences = [s for s in self._split_sentences(text) if s.strip()]
                 _n = len(sentences)
-                _total_synth_ms = 0.0
-                _total_play_ms = 0.0
-                _response_start = time.monotonic()
+                if _n == 0:
+                    return
 
+                _response_start = time.monotonic()
                 log.info(
-                    "[TTS] response: chars={c} sentences={n}",
+                    "[TTS] response_received=0ms | chars={c} | sentences={n}",
                     c=len(text),
                     n=_n,
                 )
 
-                for i, sentence in enumerate(sentences):
-                    # Check for interrupt between sentences
+                # Pipelined sentence synthesis & playback:
+                # 1. Synthesize sentence 0 immediately.
+                # 2. While sentence i is playing, concurrently synthesize sentence i+1 in the background.
+                # 3. Sentence i+1 begins playing with 0ms gap when sentence i finishes.
+                t_syn0 = time.monotonic()
+                current_buf = await self._safe_synthesize(sentences[0])
+                syn0_ms = (time.monotonic() - t_syn0) * 1000
+                first_sound_latency = (time.monotonic() - _response_start) * 1000
+
+                log.info(
+                    "[TTS] sentence 0/{total}: synth_complete={syn:.0f}ms | "
+                    "first_sound_latency={fsl:.0f}ms | chars={c}",
+                    total=_n - 1,
+                    syn=syn0_ms,
+                    fsl=first_sound_latency,
+                    c=len(sentences[0]),
+                )
+
+                next_task: asyncio.Task | None = None
+                for i in range(_n):
                     if self._interrupt_flag.is_set():
-                        log.debug("StreamingTTS: interrupted at sentence {i}.", i=i)
+                        log.debug("StreamingTTS: interrupted before sentence {i}.", i=i)
+                        if next_task is not None and not next_task.done():
+                            next_task.cancel()
                         break
 
-                    if not sentence.strip():
-                        continue
+                    # Start synthesizing next sentence concurrently during current playback
+                    if i + 1 < _n and not self._interrupt_flag.is_set():
+                        next_task = asyncio.create_task(
+                            self._safe_synthesize(sentences[i + 1])
+                        )
 
-                    log.debug("StreamingTTS: sentence {i}: '{s}'", i=i, s=sentence[:50])
+                    # Play current sentence buffer
+                    t_play = time.monotonic()
+                    await self._safe_play(current_buf, sentences[i])
+                    play_ms = (time.monotonic() - t_play) * 1000
 
-                    # -- Per-sentence timing: measure synthesis vs playback separately
-                    # synthesize() is async (runs Piper in a thread); _play_buffer is
-                    # also threaded. We wrap them individually so we can log each stage.
-                    _syn_start = time.monotonic()
-                    await self._engine.speak(sentence)
-                    _elapsed = (time.monotonic() - _syn_start) * 1000
-
-                    # Piper.speak() = synthesize + play sequentially; we can't split
-                    # them without patching Piper internals. Log total per-sentence time
-                    # and estimate audio duration from the synthesized length.
                     log.info(
-                        "[TTS] sentence {i}/{n}: chars={c} elapsed={ms:.0f}ms",
+                        "[TTS] sentence {i}/{total}: playback_complete={play:.0f}ms | "
+                        "dur={dur:.0f}ms | chars={c}",
                         i=i,
-                        n=_n - 1,
-                        c=len(sentence),
-                        ms=_elapsed,
+                        total=_n - 1,
+                        play=play_ms,
+                        dur=getattr(current_buf, "duration_seconds", 0.0) * 1000,
+                        c=len(sentences[i]),
                     )
-                    _total_synth_ms += _elapsed
+
+                    # Await next sentence buffer if any
+                    if next_task is not None:
+                        try:
+                            t_wait = time.monotonic()
+                            current_buf = await next_task
+                            wait_ms = (time.monotonic() - t_wait) * 1000
+                            log.debug(
+                                "[TTS] sentence {next_i} buffer ready after wait={wait:.0f}ms",
+                                next_i=i + 1,
+                                wait=wait_ms,
+                            )
+                        except asyncio.CancelledError:
+                            break
+                        except Exception as synth_exc:
+                            log.error(
+                                "StreamingTTS: synthesis failed for sentence {next_i}: {exc}",
+                                next_i=i + 1,
+                                exc=synth_exc,
+                            )
+                            break
+                        finally:
+                            next_task = None
 
                 _total_ms = (time.monotonic() - _response_start) * 1000
                 log.info(
@@ -175,6 +215,29 @@ class StreamingTTSWrapper:
 
             finally:
                 self._speaking = False
+
+    async def _safe_synthesize(self, text: str) -> Any:
+        """Safely invoke engine synthesize whether async, sync, or mock."""
+        try:
+            if hasattr(self._engine, "synthesize"):
+                res = self._engine.synthesize(text)
+                if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                    return await res
+                return res
+        except Exception as exc:
+            log.debug("StreamingTTS: synthesize error: {exc}", exc=exc)
+        return None
+
+    async def _safe_play(self, buffer: Any, sentence: str) -> None:
+        """Safely play buffer via play_buffer if available, or fall back to speak."""
+        if buffer is not None and hasattr(self._engine, "play_buffer"):
+            res = self._engine.play_buffer(buffer)
+            if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                await res
+        elif hasattr(self._engine, "speak"):
+            res = self._engine.speak(sentence)
+            if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                await res
 
     async def synthesize(self, text: str):
         """Delegate to the underlying engine (for compatibility)."""

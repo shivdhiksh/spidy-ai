@@ -107,21 +107,43 @@ class BrowserAgent:
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
-    async def start(self) -> None:
+    @property
+    def active_browser_type(self) -> str:
+        """Return the active browser canonical type."""
+        return getattr(self._backend, "active_browser_type", "") or self._browser_type
+
+    @property
+    def active_channel(self) -> str:
+        """Return the active Playwright channel (e.g. 'msedge', 'chrome')."""
+        return getattr(self._backend, "active_channel", "")
+
+    def set_browser_type(self, browser_type: str) -> None:
+        """Update the default browser type for upcoming operations."""
+        self._browser_type = browser_type
+
+    async def start(self, browser_type: str | None = None) -> None:
         """
         Start the browser session.
 
-        Safe to call multiple times — no-op if already running.
+        Safe to call multiple times — reuses running session if browser_type matches.
         """
+        target_type = browser_type or self._browser_type
+        self._browser_type = target_type
+
         if self._backend.is_running:
-            return
+            active = getattr(self._backend, "active_browser_type", "")
+            if not active or active == target_type:
+                return
+            log.info("BrowserAgent: switching browser from {old} to {new}", old=active, new=target_type)
+            await self._backend.stop()
+
         log.info(
             "BrowserAgent.start(): launching {bt} (headless={h})",
-            bt=self._browser_type,
+            bt=target_type,
             h=self._headless,
         )
         await self._backend.start(
-            browser_type=self._browser_type,
+            browser_type=target_type,
             headless=self._headless,
             download_dir=self._download_dir,
             cdp_endpoint=self._cdp_endpoint,
@@ -140,16 +162,27 @@ class BrowserAgent:
         """Return True if the browser session is active."""
         return self._backend.is_running
 
+    async def verify_process_identity(self) -> tuple[bool, str]:
+        """Verify that the running browser matches the expected browser identity."""
+        if hasattr(self._backend, "verify_process_identity"):
+            return await self._backend.verify_process_identity()
+        return True, "Backend does not support process identity verification"
+
     # ── Auto-start helper ─────────────────────────────────────────────────
 
-    async def _ensure_running(self) -> None:
-        """Start the backend if it is not already running."""
+    async def _ensure_running(self, browser_type: str | None = None) -> None:
+        """Start the backend if it is not already running, or restart if target changed."""
+        target_type = browser_type or self._browser_type
         if not self._backend.is_running:
-            await self.start()
+            await self.start(browser_type=target_type)
+        elif browser_type:
+            active = getattr(self._backend, "active_browser_type", "")
+            if active and active != target_type:
+                await self.start(browser_type=target_type)
 
     # ── Navigation ────────────────────────────────────────────────────────
 
-    async def open_url(self, url: str, new_tab: bool = False) -> PageInfo:
+    async def open_url(self, url: str, new_tab: bool = False, browser_type: str | None = None) -> PageInfo:
         """
         Open a URL in the current or a new tab.
 
@@ -159,13 +192,15 @@ class BrowserAgent:
             Target URL. Scheme (``https://``) is added if missing.
         new_tab:
             Open in a new tab if True.
+        browser_type:
+            Optional browser target override (e.g. 'edge', 'chrome').
 
         Returns
         -------
         PageInfo
             Info about the resulting page.
         """
-        await self._ensure_running()
+        await self._ensure_running(browser_type=browser_type)
         log.info("BrowserAgent.open_url: '{url}' (new_tab={nt})", url=url, nt=new_tab)
         return await self._backend.open_url(url, new_tab=new_tab)
 
@@ -206,7 +241,7 @@ class BrowserAgent:
 
     # ── Search ────────────────────────────────────────────────────────────
 
-    async def search_google(self, query: str, new_tab: bool = False) -> PageInfo:
+    async def search_google(self, query: str, new_tab: bool = False, browser_type: str | None = None) -> PageInfo:
         """
         Open Google search results for ``query``.
 
@@ -216,6 +251,8 @@ class BrowserAgent:
             The search query string.
         new_tab:
             Open in a new tab.
+        browser_type:
+            Optional browser target override.
 
         Returns
         -------
@@ -225,9 +262,9 @@ class BrowserAgent:
         from urllib.parse import quote_plus
         url = _GOOGLE_SEARCH_URL.format(query=quote_plus(query))
         log.info("BrowserAgent.search_google: '{q}'", q=query)
-        return await self.open_url(url, new_tab=new_tab)
+        return await self.open_url(url, new_tab=new_tab, browser_type=browser_type)
 
-    async def search_youtube(self, query: str, new_tab: bool = False) -> PageInfo:
+    async def search_youtube(self, query: str, new_tab: bool = False, browser_type: str | None = None) -> PageInfo:
         """
         Open YouTube search results for ``query``.
 
@@ -237,6 +274,8 @@ class BrowserAgent:
             The search query string.
         new_tab:
             Open in a new tab.
+        browser_type:
+            Optional browser target override.
 
         Returns
         -------
@@ -246,7 +285,7 @@ class BrowserAgent:
         from urllib.parse import quote_plus
         url = _YOUTUBE_SEARCH_URL.format(query=quote_plus(query))
         log.info("BrowserAgent.search_youtube: '{q}'", q=query)
-        return await self.open_url(url, new_tab=new_tab)
+        return await self.open_url(url, new_tab=new_tab, browser_type=browser_type)
 
     # ── Content ───────────────────────────────────────────────────────────
 

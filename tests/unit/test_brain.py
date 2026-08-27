@@ -928,19 +928,21 @@ class TestLLMClient:
             tokens.append(token)
         assert tokens == []
 
-    def test_llm_client_factory_builds_ollama(self):
+    def test_llm_client_factory_builds_ollama_raises_deprecated(self):
+        """Ollama is deprecated — factory must raise ValueError, not build a client."""
+        import pytest
         from spidy.llm.client import LLMClientFactory
-        from spidy.llm.backends.ollama import OllamaClient
         config = make_reasoning_config(provider="ollama")
-        client = LLMClientFactory.build(config)
-        assert isinstance(client, OllamaClient)
+        with pytest.raises(ValueError, match="deprecated"):
+            LLMClientFactory.build(config)
 
-    def test_llm_client_factory_unknown_provider_falls_back_to_ollama(self):
+    def test_llm_client_factory_unknown_provider_raises_value_error(self):
+        """Unknown provider must raise ValueError — no silent fallback to Ollama."""
+        import pytest
         from spidy.llm.client import LLMClientFactory
-        from spidy.llm.backends.ollama import OllamaClient
         config = make_reasoning_config(provider="unknown_provider_xyz")
-        client = LLMClientFactory.build(config)
-        assert isinstance(client, OllamaClient)
+        with pytest.raises(ValueError, match="Unknown LLM provider"):
+            LLMClientFactory.build(config)
 
 
 # ─── TestBrainEvents ──────────────────────────────────────────────────────────

@@ -107,12 +107,16 @@ class BrowserSkill(BaseSkill):
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
-    def _get_or_create_agent(self) -> "BrowserAgent":
-        """Lazily create the BrowserAgent on first use."""
+    def _get_or_create_agent(self, browser_type: str | None = None) -> "BrowserAgent":
+        """Lazily create the BrowserAgent on first use or update target browser."""
+        from spidy.browser.types import normalize_browser_target
+
+        target = normalize_browser_target(browser_type or self._browser_type)
+
         if self._agent is None:
             from spidy.browser.agent import BrowserAgent
             self._agent = BrowserAgent(
-                browser_type=self._browser_type,
+                browser_type=target,
                 headless=self._headless,
                 download_dir=self._download_dir,
                 connect_to_existing=self._connect_to_existing,
@@ -121,6 +125,8 @@ class BrowserSkill(BaseSkill):
                 navigation_timeout_ms=self._navigation_timeout_ms,
                 read_page_max_chars=self._read_page_max_chars,
             )
+        elif browser_type:
+            self._agent.set_browser_type(target)
         return self._agent
 
     async def on_unload(self) -> None:
@@ -505,20 +511,49 @@ class BrowserSkill(BaseSkill):
     # ── T1 Actions ────────────────────────────────────────────────────────
 
     async def _open_browser(self, context: SkillContext) -> SkillResult:
-        agent = self._get_or_create_agent()
-        if agent.is_running:
+        from spidy.browser.types import normalize_browser_target
+        b_type = context.get("browser_type") or context.get("browser") or context.get("app_name") or ""
+        agent = self._get_or_create_agent(browser_type=b_type if b_type else None)
+
+        if agent.is_running and (not b_type or agent.active_browser_type == normalize_browser_target(b_type)):
             # Just open an optional URL
             url = context.get("url", "")
             if url:
-                return await self._do_open_url(agent, url, new_tab=False, context=context)
-            return SkillResult.ok("Browser is already open.", data={"running": True})
+                return await self._do_open_url(agent, url, new_tab=False, context=context, browser_type=b_type if b_type else None)
+            return SkillResult.ok(
+                f"Browser is already open ({agent.active_browser_type}).",
+                data={"running": True, "browser_type": agent.active_browser_type, "channel": getattr(agent, "active_channel", "")},
+            )
 
-        await agent.start()
+        try:
+            if b_type:
+                await agent.start(browser_type=b_type)
+            else:
+                await agent.start()
+        except Exception as exc:
+            log.error("BrowserSkill._open_browser failed: {exc}", exc=exc)
+            return SkillResult.fail(
+                f"Browser launch failed: {exc}",
+                data={"success": False, "error": str(exc)},
+            )
+
+        # Verify process identity where applicable
+        if hasattr(agent, "verify_process_identity"):
+            res = agent.verify_process_identity()
+            if hasattr(res, "__await__"):
+                verified, vmsg = await res
+            elif isinstance(res, tuple):
+                verified, vmsg = res
+            else:
+                verified, vmsg = True, ""
+            if not verified:
+                log.warning("BrowserSkill: process identity warning: {msg}", msg=vmsg)
+
         await self._emit_event_obj(
             __import__(
                 "spidy.skills.browser.events", fromlist=["BrowserLaunchedEvent"]
             ).BrowserLaunchedEvent(
-                browser_type=self._browser_type,
+                browser_type=agent.active_browser_type,
                 headless=self._headless,
                 session_id=context.session_id,
             )
@@ -526,10 +561,10 @@ class BrowserSkill(BaseSkill):
 
         url = context.get("url", "")
         if url:
-            return await self._do_open_url(agent, url, new_tab=False, context=context)
+            return await self._do_open_url(agent, url, new_tab=False, context=context, browser_type=b_type if b_type else None)
         return SkillResult.ok(
-            f"Browser launched ({self._browser_type}).",
-            data={"browser_type": self._browser_type, "running": True},
+            f"Browser launched ({agent.active_browser_type}).",
+            data={"browser_type": agent.active_browser_type, "channel": getattr(agent, "active_channel", ""), "running": True},
             action_taken="open_browser",
         )
 
@@ -537,20 +572,25 @@ class BrowserSkill(BaseSkill):
         url = context.get("url", "")
         if not url:
             return SkillResult.fail("BrowserSkill.open_url: 'url' parameter is required.")
-        agent = self._get_or_create_agent()
-        return await self._do_open_url(agent, url, new_tab=False, context=context)
+        b_type = context.get("browser_type") or context.get("browser") or context.get("app_name") or ""
+        agent = self._get_or_create_agent(browser_type=b_type if b_type else None)
+        return await self._do_open_url(agent, url, new_tab=False, context=context, browser_type=b_type if b_type else None)
 
     async def _open_new_tab(self, context: SkillContext) -> SkillResult:
         url = context.get("url", "")
         if not url:
             return SkillResult.fail("BrowserSkill.open_new_tab: 'url' parameter is required.")
-        agent = self._get_or_create_agent()
-        return await self._do_open_url(agent, url, new_tab=True, context=context)
+        b_type = context.get("browser_type") or context.get("browser") or context.get("app_name") or ""
+        agent = self._get_or_create_agent(browser_type=b_type if b_type else None)
+        return await self._do_open_url(agent, url, new_tab=True, context=context, browser_type=b_type if b_type else None)
 
     async def _do_open_url(
-        self, agent: "BrowserAgent", url: str, new_tab: bool, context: SkillContext
+        self, agent: "BrowserAgent", url: str, new_tab: bool, context: SkillContext, browser_type: str | None = None
     ) -> SkillResult:
-        info = await agent.open_url(url, new_tab=new_tab)
+        if browser_type:
+            info = await agent.open_url(url, new_tab=new_tab, browser_type=browser_type)
+        else:
+            info = await agent.open_url(url, new_tab=new_tab)
         from spidy.skills.browser.events import PageNavigatedEvent
         await self._emit_event_obj(PageNavigatedEvent(
             title=info.title,
@@ -563,7 +603,7 @@ class BrowserSkill(BaseSkill):
         tab_word = "new tab" if new_tab else "tab"
         return SkillResult.ok(
             f"Opened \"{info.title}\" in {tab_word}. URL: {info.url}",
-            data=info.to_dict(),
+            data={**info.to_dict(), "browser_type": agent.active_browser_type, "channel": getattr(agent, "active_channel", "")},
             action_taken="open_url",
         )
 
@@ -620,8 +660,12 @@ class BrowserSkill(BaseSkill):
         if not query:
             return SkillResult.fail("BrowserSkill.search_google: 'query' parameter is required.")
         new_tab = bool(context.get("new_tab", False))
-        agent = self._get_or_create_agent()
-        info = await agent.search_google(query, new_tab=new_tab)
+        b_type = context.get("browser_type") or context.get("browser") or context.get("app_name") or ""
+        agent = self._get_or_create_agent(browser_type=b_type if b_type else None)
+        if b_type:
+            info = await agent.search_google(query, new_tab=new_tab, browser_type=b_type)
+        else:
+            info = await agent.search_google(query, new_tab=new_tab)
         from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
         await self._emit_event_obj(SearchResultsEvent(
             engine="google", query=query, results_url=info.url,
@@ -634,7 +678,7 @@ class BrowserSkill(BaseSkill):
         ))
         return SkillResult.ok(
             f"Searched Google for \"{query}\". Page: {info.url}",
-            data={"query": query, "engine": "google", "page": info.to_dict()},
+            data={"query": query, "engine": "google", "page": info.to_dict(), "browser_type": agent.active_browser_type, "channel": getattr(agent, "active_channel", "")},
             action_taken="search_google",
         )
 
@@ -643,8 +687,12 @@ class BrowserSkill(BaseSkill):
         if not query:
             return SkillResult.fail("BrowserSkill.search_youtube: 'query' parameter is required.")
         new_tab = bool(context.get("new_tab", False))
-        agent = self._get_or_create_agent()
-        info = await agent.search_youtube(query, new_tab=new_tab)
+        b_type = context.get("browser_type") or context.get("browser") or context.get("app_name") or ""
+        agent = self._get_or_create_agent(browser_type=b_type if b_type else None)
+        if b_type:
+            info = await agent.search_youtube(query, new_tab=new_tab, browser_type=b_type)
+        else:
+            info = await agent.search_youtube(query, new_tab=new_tab)
         from spidy.skills.browser.events import SearchResultsEvent, PageNavigatedEvent
         await self._emit_event_obj(SearchResultsEvent(
             engine="youtube", query=query, results_url=info.url,
@@ -657,7 +705,7 @@ class BrowserSkill(BaseSkill):
         ))
         return SkillResult.ok(
             f"Searched YouTube for \"{query}\". Page: {info.url}",
-            data={"query": query, "engine": "youtube", "page": info.to_dict()},
+            data={"query": query, "engine": "youtube", "page": info.to_dict(), "browser_type": agent.active_browser_type, "channel": getattr(agent, "active_channel", "")},
             action_taken="search_youtube",
         )
 

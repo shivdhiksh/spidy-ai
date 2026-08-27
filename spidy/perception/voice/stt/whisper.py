@@ -12,9 +12,17 @@ Why faster-whisper?
 - VAD filter: skips silent segments automatically
 - Fully offline — no API calls
 
-Performance targets:
-  GPU (RTX 3050): base.en transcription < 300ms for 5-second utterance
-  CPU (fallback): base.en transcription < 1200ms for 5-second utterance
+CUDA Device Detection
+---------------------
+Device resolution uses ctranslate2 directly (NOT torch.cuda.is_available()),
+because torch may be installed as a CPU-only build while ctranslate2 retains
+full CUDA support. The helper ``_detect_cuda_via_ctranslate2()`` probes
+ctranslate2's own compute-type registry and attempts a lightweight runtime
+check. If cublas/cudart DLLs are absent, the probe fails and CPU is used.
+
+Performance targets (RTX 3050):
+  GPU float16: base.en transcription < 350ms for 3-second utterance
+  CPU int8:    base.en transcription < 2500ms for 3-second utterance
 
 Model sizes:
   tiny.en   ~39M params  — fastest, less accurate
@@ -40,6 +48,51 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 _SAMPLE_RATE = 16000
+
+
+def _detect_cuda_via_ctranslate2() -> tuple[bool, str]:
+    """
+    Probe CUDA availability via ctranslate2 — independent of torch.
+
+    ctranslate2 bundles its own CUDA detection and does not require
+    ``torch.cuda.is_available()`` to return True.  This matters when torch
+    is installed as a CPU-only build (``torch==x.y.z+cpu``) while
+    ctranslate2 was built with CUDA support.
+
+    Returns
+    -------
+    (cuda_ok, reason)
+        cuda_ok:  True if CUDA is usable by ctranslate2.
+        reason:   Human-readable explanation for the startup log.
+    """
+    try:
+        from spidy.core.device import ensure_cuda_dlls
+        ensure_cuda_dlls()
+    except Exception:
+        pass
+
+    try:
+        import ctranslate2
+        if ctranslate2.get_cuda_device_count() <= 0:
+            return False, "no CUDA GPU device detected by ctranslate2"
+        supported = ctranslate2.get_supported_compute_types("cuda")
+        if "float16" not in supported:
+            return False, "ctranslate2 CUDA build does not support float16"
+    except Exception as exc:
+        return False, f"ctranslate2 CUDA probe failed: {exc}"
+
+    # Second check: try to verify that the required CUDA runtime DLLs are
+    # accessible.  We do this by attempting to import ctypes and load
+    # nvcuda.dll (the NVIDIA CUDA driver interface — always present when a
+    # driver is installed).  The real runtime DLL (cublas) is validated
+    # lazily at model load time with a graceful CPU fallback.
+    try:
+        import ctypes
+        ctypes.CDLL("nvcuda.dll")
+    except OSError:
+        return False, "NVIDIA driver (nvcuda.dll) not accessible"
+
+    return True, "ctranslate2 CUDA + NVIDIA driver available"
 
 
 class FasterWhisperRecognizer(SpeechRecognizer):
@@ -103,8 +156,22 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         """
         Load the Whisper model into memory.
 
-        Resolves device and compute_type from "auto" based on CUDA
-        availability. This is a blocking call — run at startup only.
+        Resolves device and compute_type from "auto" using ctranslate2-native
+        CUDA detection (independent of torch).  This is a blocking call —
+        run at startup only via asyncio.to_thread or the voice factory.
+
+        Device resolution order
+        -----------------------
+        "cuda"  (explicit)  → always try CUDA; CPU fallback on failure.
+        "cpu"   (explicit)  → always CPU, no CUDA attempt.
+        "auto"              → probe ctranslate2; cuda if available, else cpu.
+
+        Startup diagnostic log
+        ----------------------
+        Always emits a clear one-line summary:
+          [STT] model=base.en | device=cuda | compute_type=float16
+        or on CPU fallback:
+          [STT] model=base.en | device=cpu | compute_type=int8 | reason=<why>
         """
         try:
             from faster_whisper import WhisperModel
@@ -114,23 +181,47 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                 "Install it with: pip install faster-whisper"
             ) from exc
 
-        # Resolve device
+        # Idempotency guard — model already loaded, nothing to do.
+        if self._model is not None:
+            return
+
+        # ── Resolve device ────────────────────────────────────────────────
+        cuda_reason = ""
         if self._requested_device == "auto":
-            try:
-                import torch
-                self._resolved_device = "cuda" if torch.cuda.is_available() else "cpu"
-            except ImportError:
-                self._resolved_device = "cpu"
+            cuda_ok, cuda_reason = _detect_cuda_via_ctranslate2()
+            self._resolved_device = "cuda" if cuda_ok else "cpu"
         else:
             self._resolved_device = self._requested_device
 
-        # Resolve compute type
-        if self._requested_compute_type == "auto":
-            self._resolved_compute_type = (
-                "float16" if self._resolved_device == "cuda" else "int8"
-            )
+        # ── Resolve compute type ──────────────────────────────────────────
+        if self._requested_compute_type in ("auto", "int8"):
+            # Always use int8 on CPU.  On CUDA, prefer float16 (best
+            # accuracy/speed on Ampere+), but respect explicit overrides.
+            if self._requested_compute_type == "auto":
+                self._resolved_compute_type = (
+                    "float16" if self._resolved_device == "cuda" else "int8"
+                )
+            else:
+                # explicit "int8" requested — honour it on both CPU and GPU
+                self._resolved_compute_type = "int8"
         else:
             self._resolved_compute_type = self._requested_compute_type
+
+        # ── Startup diagnostic log ────────────────────────────────────────
+        if self._resolved_device == "cuda":
+            log.info(
+                "[STT] model={model} | device=cuda | compute_type={ct}",
+                model=self._model_size,
+                ct=self._resolved_compute_type,
+            )
+        else:
+            reason_suffix = f" | reason={cuda_reason}" if cuda_reason else ""
+            log.info(
+                "[STT] model={model} | device=cpu | compute_type={ct}{reason}",
+                model=self._model_size,
+                ct=self._resolved_compute_type,
+                reason=reason_suffix,
+            )
 
         log.info(
             "Loading faster-whisper '{model}' | device={dev} | compute={ct}",
@@ -146,23 +237,38 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                 compute_type=self._resolved_compute_type,
                 download_root=self._model_dir,
             )
-            log.info("faster-whisper model loaded successfully.")
+            log.info(
+                "faster-whisper '{model}' loaded successfully on {dev}.",
+                model=self._model_size,
+                dev=self._resolved_device,
+            )
         except Exception as exc:
-            # Fallback: if CUDA load fails, try CPU
+            # Fallback: if CUDA inference fails (e.g. missing cublas DLL),
+            # gracefully reload on CPU so Spidy always starts correctly.
             if self._resolved_device == "cuda":
                 log.warning(
-                    "CUDA model load failed ({exc}). Falling back to CPU.",
+                    "[STT] CUDA load failed — falling back to CPU. "
+                    "Install nvidia-cublas-cu12 to enable GPU Whisper. "
+                    "Error: {exc}",
                     exc=exc,
                 )
                 self._resolved_device = "cpu"
                 self._resolved_compute_type = "int8"
+                log.info(
+                    "[STT] model={model} | device=cpu | compute_type=int8 "
+                    "| reason=CUDA inference failed (cublas unavailable)",
+                    model=self._model_size,
+                )
                 self._model = WhisperModel(
                     self._model_size,
                     device="cpu",
                     compute_type="int8",
                     download_root=self._model_dir,
                 )
-                log.info("faster-whisper loaded on CPU (fallback).")
+                log.info(
+                    "faster-whisper '{model}' loaded on CPU (fallback).",
+                    model=self._model_size,
+                )
             else:
                 raise
 
@@ -172,6 +278,30 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             del self._model
             self._model = None
             log.debug("faster-whisper model unloaded.")
+
+    # ── Diagnostic properties ──────────────────────────────────────────────
+
+    @property
+    def device(self) -> str:
+        """
+        The device that was used to load the model.
+
+        Returns the resolved device string (``"cpu"`` or ``"cuda:0"``/``"cuda"``)
+        set by the last successful ``load()`` call.  Returns ``"cpu"`` before
+        ``load()`` is called (the default fallback).
+        """
+        return self._resolved_device
+
+    @property
+    def compute_type(self) -> str:
+        """
+        The compute type that was used to load the model.
+
+        Returns the resolved compute type string (``"int8"`` or ``"float16"``)
+        set by the last successful ``load()`` call.  Returns ``"int8"`` before
+        ``load()`` is called.
+        """
+        return self._resolved_compute_type
 
     async def transcribe(self, audio_data: np.ndarray) -> TranscriptResult:
         """

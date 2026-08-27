@@ -43,27 +43,53 @@ voice:
   # Wake Word
   wake_word:
     enabled: true
-    model: "hey_jarvis"           # Model name. See _MODEL_MAP in openwakeword.py for valid values.
-                                  # Proven: hey_jarvis_v0.1 scored 0.4473 (diagnostics) and
-                                  # 0.3073 (production). Community models (jarvis_v1/v2) are
-                                  # 200KB heads only — NOT clearly better. Do not switch.
-    threshold: 0.35               # Detection confidence threshold (0.0-1.0).
-                                  # Production scored 0.3073 with threshold=0.4 — was 0.07 short.
-                                  # Lowered to 0.35: clear "Hey Jarvis" at normal volume will fire.
-                                  # Raise to 0.45 if false positives occur in your environment.
-    chunk_size: 1280              # Audio frames per chunk (16kHz, 80ms)
-    custom_model_path: null       # Path to a custom .onnx wake word model file.
-                                  # Set this to use a trained "Hey Spidy" model when ready.
-                                  # Example: "assets/models/wake_word/hey_spidy.onnx"
-                                  # When set, bypasses model: field and _MODEL_MAP entirely.
-                                  # score_key will be the model filename stem (e.g. "hey_spidy").
+    # Multi-model wake word configuration
+    models:
+      - name: hey_spidy
+        phrase: "Hey Spidy"
+        model: "hey_spidy"
+        model_path: "assets/models/wake_word/hey_spidy.onnx"
+        threshold: 0.35
+
+      - name: wake_up_spidy
+        phrase: "Wake up Spidy"
+        model: "wake_up_spidy"
+        model_path: "assets/models/wake_word/wake_up_spidy.onnx"
+        threshold: 0.35
+
+      - name: hey_jarvis
+        phrase: "Hey Jarvis"
+        model: "hey_jarvis"
+        threshold: 0.35
+
+    # Active models loaded by the engine.
+    # Note: If custom model files (hey_spidy / wake_up_spidy) are not yet installed in
+    # assets/models/wake_word/, they are safely reported as inactive and the engine falls
+    # back to any available active models (such as hey_jarvis).
+    active_models:
+      - hey_spidy
+      - wake_up_spidy
+      - hey_jarvis
+
+    # Legacy single-model compatibility fields
+    model: "hey_jarvis"
+    threshold: 0.35
+    chunk_size: 1280
+    custom_model_path: null
+
 
 
   # Speech Recognition
   stt:
     model: "base.en"              # tiny.en | base.en | small.en | medium.en
-    device: "auto"                # auto | cpu | cuda
-    compute_type: "int8"          # int8 (CPU) | float16 (GPU)
+    device: "auto"                # cpu | cuda | auto
+                                  # "auto" uses ctranslate2-native CUDA detection on RTX 3050.
+                                  # Real benchmark (RTX 3050 4GB Laptop, CTranslate2 4.8.1):
+                                  #   GPU float16: avg ~165-275ms (4.3x to 7x faster, 100% accurate)
+                                  #   CPU int8:    avg ~1183ms
+                                  # Automatic safe CPU fallback if CUDA initialization fails.
+    compute_type: "auto"          # auto | int8 (CPU) | float16 (GPU) | int8_float16
+                                  # auto → float16 on CUDA, int8 on CPU
     language: "en"
     vad_filter: true              # Voice Activity Detection to skip silence
     vad_threshold: 0.5
@@ -115,6 +141,10 @@ voice:
   # Uses a dedicated tiny.en model (separate from the main base.en STT) to avoid
   # model contention.  Measured latency: ~1.4 s worst case (0.8 s accumulate +
   # 671 ms tiny.en inference).
+  #
+  # RAM optimisation: tiny.en is lazy-loaded 3 seconds after startup completes
+  # (schedule_lazy_load).  This removes ~180 MB from the startup RAM peak.
+  # If TTS fires before the model is ready, barge-in safely skips that cycle.
   barge_in:
     enabled: true                 # Master switch. Set false to revert to IDLE (mic muted during TTS).
     model: "tiny.en"              # faster-whisper model for barge-in STT.
@@ -180,9 +210,9 @@ context:
 # Reasoning Engine                                                            #
 # --------------------------------------------------------------------------- #
 reasoning:
-  provider: "ollama"              # ollama | openai | groq
-  model: "llama3.2:3b"           # Model to use with the provider
-  base_url: "http://localhost:11434"  # Ollama local server URL
+  provider: "nvidia"              # nvidia | openrouter | openai | groq
+  model: "nvidia/nemotron-3-ultra-550b-a55b"  # Model to use with the provider
+  base_url: ""                    # Leave empty to use provider default
   api_key: null                   # Required only for cloud providers
   temperature: 0.7
   max_tokens: 1024
@@ -196,15 +226,18 @@ reasoning:
 # error, network failure) it automatically falls back to the next one.       #
 #                                                                             #
 # Priority with NVIDIA_API_KEY present:                                       #
-#   1. NVIDIA NIM  — primary for ALL LLM requests (chat, code, reasoning...) #
-#   2. Ollama      — local fallback when NVIDIA is unavailable                #
+#   1. NVIDIA NIM   — primary for ALL LLM requests (chat, code, reasoning...) #
+#   2. OpenRouter   — cloud fallback when NVIDIA is unavailable               #
 #                                                                             #
-# Without NVIDIA_API_KEY: only Ollama is used (existing behaviour unchanged). #
+# With only OPENROUTER_API_KEY: only OpenRouter is used.                      #
+# With neither key:             NVIDIA is used but health_check returns False. #
 #                                                                             #
 # SECURITY:                                                                   #
-#   NEVER put your API key here. Leave api_key: "" and set the env var:       #
+#   NEVER put your API keys here. Leave api_key: "" and set env vars:         #
 #   Windows:  $env:NVIDIA_API_KEY = "nvapi-..."                               #
+#             $env:OPENROUTER_API_KEY = "sk-or-..."                           #
 #   .env file: NVIDIA_API_KEY=nvapi-...   (file is git-ignored)               #
+#              OPENROUTER_API_KEY=sk-or-...                                   #
 # --------------------------------------------------------------------------- #
 llm:
   auto_fallback: true             # Automatically try next provider on failure
@@ -214,21 +247,23 @@ llm:
     # ── Primary: NVIDIA NIM ──────────────────────────────────────────────── #
     - name: nvidia
       enabled: true               # Set false to disable NVIDIA even with key
-      model: "meta/llama-3.1-8b-instruct"  # Fast, capable NIM model
+      model: "nvidia/nemotron-3-ultra-550b-a55b"  # Flagship Nemotron Ultra NIM model
       base_url: "https://integrate.api.nvidia.com/v1"
       api_key: ""                 # LEAVE EMPTY — use NVIDIA_API_KEY env var
       temperature: 0.7
       max_tokens: 1024
-      timeout_seconds: 60         # NIM cloud calls may be slower than Ollama
+      timeout_seconds: 60         # NIM cloud calls may be slower than local models
 
-    # ── Fallback: Ollama (local) ─────────────────────────────────────────── #
-    - name: ollama
+    # ── Fallback: OpenRouter (cloud) ──────────────────────────────────────── #
+    - name: openrouter
       enabled: true
-      model: "llama3.2:3b"
-      base_url: "http://localhost:11434"
+      model: "nvidia/nemotron-3-ultra-550b-a55b:free"  # Free-tier fallback model
+      base_url: "https://openrouter.ai/api/v1"
+      api_key: ""                 # LEAVE EMPTY — use OPENROUTER_API_KEY env var
       temperature: 0.7
       max_tokens: 1024
-      timeout_seconds: 30
+      timeout_seconds: 60
+
 
 # --------------------------------------------------------------------------- #
 # Memory Engine                                                               #
@@ -258,9 +293,9 @@ ui:
   enabled: true
   theme: "dark"                   # dark | light
   opacity: 0.92                   # Window opacity (0.0–1.0)
-  position: "top-right"           # top-right | top-left | center | bottom-right
-  width: 420
-  height: 600
+  position: "center"              # center | top-right | top-left | bottom-right
+  width: 0                        # 0 = auto-responsive wide HUD (1400–1700px)
+  height: 0                       # 0 = auto-responsive wide HUD (700–850px)
   always_on_top: true
   animate: true
   hotkey: "ctrl+space"            # Backup wake hotkey

@@ -59,6 +59,40 @@ class WakeAcknowledger:
         # and returns immediately.
         self._lock = asyncio.Lock()
         self._speaking = False
+        self._cached_buffers: dict[str, "AudioBuffer"] = {}
+
+    def precache_phrases(self, engine: "TTSEngine") -> None:
+        """
+        Pre-synthesise configured wake acknowledgement phrases synchronously
+        during startup and cache the resulting AudioBuffers in memory.
+
+        Eliminates runtime synthesis latency (<10ms response to wake detection).
+        """
+        if not self._config.enabled or not self._config.phrases:
+            return
+
+        for phrase in self._config.phrases:
+            phrase = phrase.strip()
+            if not phrase or phrase in self._cached_buffers:
+                continue
+            try:
+                # If engine provides synchronous synthesis helper
+                if hasattr(engine, "_synthesize_sync"):
+                    buf = engine._synthesize_sync(phrase)
+                    if buf.samples.size > 0:
+                        self._cached_buffers[phrase] = buf
+                        log.info(
+                            "WakeAcknowledger: pre-cached ack phrase '{p}' "
+                            "(duration={dur:.2f}s)",
+                            p=phrase,
+                            dur=buf.duration_seconds,
+                        )
+            except Exception as exc:
+                log.warning(
+                    "WakeAcknowledger: failed to pre-cache phrase '{p}': {exc}",
+                    p=phrase,
+                    exc=exc,
+                )
 
     # -- Public API --------------------------------------------------------
 
@@ -97,10 +131,17 @@ class WakeAcknowledger:
             phrase = random.choice(self._config.phrases)
             self._speaking = True
             try:
-                log.info(
-                    "WakeAcknowledger: speaking ack phrase: '{p}'", p=phrase
-                )
-                await streaming_tts.speak(phrase)
+                # Instant playback using pre-cached buffer if available
+                if phrase in self._cached_buffers and hasattr(streaming_tts.engine, "play_buffer"):
+                    log.info(
+                        "WakeAcknowledger: playing pre-cached ack phrase: '{p}'", p=phrase
+                    )
+                    await streaming_tts.engine.play_buffer(self._cached_buffers[phrase])
+                else:
+                    log.info(
+                        "WakeAcknowledger: speaking ack phrase: '{p}' (synthesis fallback)", p=phrase
+                    )
+                    await streaming_tts.speak(phrase)
             except Exception as exc:  # noqa: BLE001
                 # Never let a TTS failure break the wake flow.
                 log.warning(

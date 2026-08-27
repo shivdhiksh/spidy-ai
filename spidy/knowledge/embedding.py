@@ -44,10 +44,17 @@ class EmbeddingEngine:
     model_name:
         Name of the sentence-transformers model to use.
         Default is ``all-MiniLM-L6-v2`` (same as M8 Memory Engine).
+    device:
+        Compute device ("auto", "cpu", "cuda").
     """
 
-    def __init__(self, model_name: str = _DEFAULT_MODEL) -> None:
+    def __init__(
+        self,
+        model_name: str = _DEFAULT_MODEL,
+        device: str = "cpu",
+    ) -> None:
         self._model_name = model_name
+        self._device = device
         self._model: object | None = None
         self._checked_available: bool | None = None
 
@@ -77,15 +84,10 @@ class EmbeddingEngine:
         if not self.is_available:
             return False
         try:
-            from sentence_transformers import SentenceTransformer
-            log.info(
-                "EmbeddingEngine: loading model '{model}'...",
-                model=self._model_name,
-            )
-            self._model = SentenceTransformer(self._model_name)
-            log.info(
-                "EmbeddingEngine: model '{model}' ready.",
-                model=self._model_name,
+            from spidy.core.models import EmbeddingModelRegistry
+            self._model = EmbeddingModelRegistry.get_model(
+                self._model_name,
+                device=self._device,
             )
             return True
         except Exception as exc:
