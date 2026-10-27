@@ -32,3 +32,31 @@ def is_quit_request(text: str) -> bool:
 
 
 QUIT_FAREWELL = "Okay, closing now. Goodbye!"
+
+
+# "Who developed you?" must always get the same answer. The language model would otherwise credit the
+# company whose API powers it (NVIDIA, OpenAI...), so this is answered here and never reaches the model.
+_ASK = r"(?:developed|created|made|built|designed|programmed|coded|trained|invented|owns?|founded|authored|wrote)"
+_YOU = rf"(?:you|u|{_NAME}|this\s+(?:assistant|app|program|software))"
+_CREATOR_RE = re.compile(
+    r"\b(?:"
+    rf"(?:who|whom|which\s+(?:company|person|team)|what\s+(?:company|person|team))\s+(?:\w+\s+){{0,3}}{_ASK}\s+{_YOU}"
+    rf"|who(?:'s|\s+is|\s+was|\s+are)\s+(?:your|{_NAME}(?:'s)?)\s+(?:developer|developers|creator|creators|maker|makers|author|owner|boss|inventor|programmer|founder|parent)"
+    rf"|who(?:'s|\s+is|\s+was)\s+behind\s+{_YOU}"
+    rf"|(?:are|were)\s+you\s+{_ASK}\s+by\b"
+    rf"|(?:tell\s+me\s+)?(?:about\s+)?(?:your|{_NAME}(?:'s)?)\s+(?:developer|creator|maker)"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def is_creator_question(text: str) -> bool:
+    """True if the user asks who developed / created / owns Spidy."""
+    return bool(text and _CREATOR_RE.search(text))
+
+
+CREATOR_REPLY = (
+    "I'm SPIDY, an AI desktop assistant developed by my boss Shiva Dhikshith. My architecture, features, "
+    "and capabilities are built by my developer. I use AI models and services from providers like NVIDIA "
+    "to power some of my intelligence, but Shiva Dhikshith Sir is my creator and developer."
+)

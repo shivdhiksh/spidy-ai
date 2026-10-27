@@ -259,6 +259,15 @@ class Brain:
             self._quit_task = asyncio.create_task(self._quit_after_farewell())
             return QUIT_FAREWELL
 
+        # Who made Spidy: always the same answer, never the model's (it would name the API provider).
+        from spidy.brain.self_commands import CREATOR_REPLY, is_creator_question
+        if is_creator_question(utterance):
+            log.info("Brain: creator question answered deterministically: '{utt}'", utt=utterance[:80])
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid, response_text=CREATOR_REPLY, decision_mode="self_command",
+            ))
+            return CREATOR_REPLY
+
         # ── Step 0: Check if an autonomous goal is waiting for user input ───
         if self._agent is not None and self._agent.has_waiting_goal():
             log.info("Brain: routing input to resume paused autonomous goal.")
