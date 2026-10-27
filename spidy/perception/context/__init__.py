@@ -12,6 +12,10 @@ Usage
     from spidy.perception.context.snapshot import DesktopStateSnapshot
 """
 
+from spidy.perception.context.environment_context import (
+    EnvironmentContext,
+    EnvironmentContextCollector,
+)
 from spidy.perception.context.observer_manager import ObserverManager
 from spidy.perception.context.snapshot import DesktopStateSnapshot, WindowInfo, ResourceInfo
 
@@ -20,4 +24,6 @@ __all__ = [
     "DesktopStateSnapshot",
     "WindowInfo",
     "ResourceInfo",
+    "EnvironmentContext",
+    "EnvironmentContextCollector",
 ]

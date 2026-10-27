@@ -216,3 +216,7 @@ class TaskAuthorityChecker:
             AuthorityLevel.CRITICAL: "T3/CRITICAL",
         }
         return labels[level]
+
+
+# Alias for backward compatibility & testing
+AuthorityManager = TaskAuthorityChecker

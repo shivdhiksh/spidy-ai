@@ -34,6 +34,9 @@ Model sizes:
 from __future__ import annotations
 
 import asyncio
+import gc
+import threading
+import time
 from typing import TYPE_CHECKING, AsyncGenerator
 
 import numpy as np
@@ -146,13 +149,25 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             "Open Spotify. Open Discord. Close this. Minimize. Maximize. "
             "Search for. Play music. Volume up. Volume down."
         )
+        # No prompt on purpose: naming "Spidy" in the prompt made Whisper hear
+        # "Hey Speedy" as "Hi Spidy" and let it through (5/27 vs 1/27 false accepts).
+        self._wake_prompt: str | None = None
         self._model: "FWModel | None" = None
+        # The model can be freed while Spidy idles and reloaded on demand (see prewarm()).
+        self._lock = threading.RLock()
+        self._last_used = time.monotonic()
+        self._warming: threading.Thread | None = None
         self._resolved_device: str = "cpu"
         self._resolved_compute_type: str = "int8"
 
     # ── SpeechRecognizer interface ────────────────────────────────────────
 
     def load(self) -> None:
+        """Load the model (idempotent, thread-safe). See ``_load_locked`` for the details."""
+        with self._lock:
+            self._load_locked()
+
+    def _load_locked(self) -> None:
         """
         Load the Whisper model into memory.
 
@@ -273,11 +288,36 @@ class FasterWhisperRecognizer(SpeechRecognizer):
                 raise
 
     def unload(self) -> None:
-        """Release model resources."""
+        """Release model resources (waits for a transcription in progress)."""
+        with self._lock:
+            if self._model is not None:
+                del self._model
+                self._model = None
+                gc.collect()
+                log.info("[STT] model unloaded (idle) -- RAM/VRAM released.")
+
+    def ensure_loaded(self) -> None:
+        """Make sure the model is in memory, loading it now if needed (blocking)."""
+        with self._lock:
+            if self._model is None:
+                t0 = time.monotonic()
+                self._load_locked()
+                log.info("[STT] model loaded on demand in {ms:.0f}ms.", ms=(time.monotonic() - t0) * 1000)
+
+    def prewarm(self) -> None:
+        """Start loading the model in the background (wake word heard: speech is about to follow)."""
         if self._model is not None:
-            del self._model
-            self._model = None
-            log.debug("faster-whisper model unloaded.")
+            return
+        t = self._warming
+        if t is not None and t.is_alive():
+            return
+        self._warming = threading.Thread(target=self.ensure_loaded, name="spidy-stt-prewarm", daemon=True)
+        self._warming.start()
+
+    @property
+    def idle_seconds(self) -> float:
+        """Seconds since the model last transcribed anything."""
+        return time.monotonic() - self._last_used
 
     # ── Diagnostic properties ──────────────────────────────────────────────
 
@@ -320,14 +360,8 @@ class FasterWhisperRecognizer(SpeechRecognizer):
         TranscriptResult
             The transcription. Returns empty result on any error.
         """
-        if self._model is None:
-            log.error("transcribe() called before load(). Call load() first.")
-            return TranscriptResult(text="", is_empty=True)
-
         try:
-            result = await asyncio.to_thread(
-                self._transcribe_sync, audio_data
-            )
+            result = await asyncio.to_thread(self._transcribe_locked, audio_data)
             return result
         except Exception as exc:  # noqa: BLE001
             log.error("Transcription failed: {exc}", exc=exc)
@@ -442,7 +476,40 @@ class FasterWhisperRecognizer(SpeechRecognizer):
             log.error("Streaming transcription failed: {exc}", exc=exc)
             yield TranscriptResult(text="", is_empty=True)
 
+    def quick_transcribe(self, audio_data: np.ndarray) -> str:
+        """
+        Fast blocking transcription of a short clip, used to verify wake words.
+
+        Greedy decoding with no VAD (the clip is ~2 s and already gated by the
+        wake model).
+        """
+        with self._lock:
+            self.ensure_loaded()
+            try:
+                segments, _ = self._model.transcribe(
+                    audio_data,
+                    language=self._language,
+                    vad_filter=False,
+                    beam_size=1,
+                    best_of=1,
+                    temperature=0.0,
+                    condition_on_previous_text=False,
+                    initial_prompt=self._wake_prompt,
+                )
+                return " ".join(seg.text for seg in segments).strip()
+            finally:
+                self._last_used = time.monotonic()
+
     # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _transcribe_locked(self, audio_data: np.ndarray) -> TranscriptResult:
+        """Load the model if it was released, then transcribe (one transcription at a time)."""
+        with self._lock:
+            self.ensure_loaded()
+            try:
+                return self._transcribe_sync(audio_data)
+            finally:
+                self._last_used = time.monotonic()
 
     def _transcribe_sync(self, audio_data: np.ndarray) -> TranscriptResult:
         """

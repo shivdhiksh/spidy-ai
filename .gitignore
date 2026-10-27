@@ -43,4 +43,10 @@ Thumbs.db
 
 # Large model binaries (exceed GitHub 100MB limit)
 *.onnx
-assets/models/
+assets/models/*
+!assets/models/wake_word/
+!assets/models/wake_word/*.onnx
+!assets/models/wake_word/*.onnx.data
+
+# Windows folder metadata
+desktop.ini

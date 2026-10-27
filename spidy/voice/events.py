@@ -33,6 +33,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from spidy.core.event_bus import Event
+from spidy.perception.voice.engine import (
+    WakeWordDetectedEvent,
+    VoiceListeningEvent,
+    VoiceTranscriptEvent,
+)
 
 
 # ── Streaming STT ─────────────────────────────────────────────────────────────

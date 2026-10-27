@@ -94,15 +94,15 @@ class SpidyCoreWidget(QWidget):
         # Boot animation
         self._boot_scale  = 1.0       # 0.0..1.0 for expand-in
 
-        # Colors (defaults = dark HUD theme)
-        self._c_primary   = QColor("#00E5FF")  # luminous cyan
-        self._c_secondary = QColor("#00ACC1")  # teal
-        self._c_dim       = QColor("#004D5E")  # dim
-        self._c_grid      = QColor("#060D1A")  # near-black
-        self._c_text      = QColor("#B2EBF2")  # soft cyan-white
-        self._c_working   = QColor("#E8A020")  # amber
-        self._c_error     = QColor("#FF2444")  # red
-        self._c_nucleus   = QColor("#00E5FF")  # changes per state
+        # Colors (defaults = Spider-Verse HUD theme)
+        self._c_primary   = QColor("#E62429")  # Spider-red
+        self._c_secondary = QColor("#1B2A4A")  # Web-blue navy
+        self._c_dim       = QColor("#3A1014")  # Dim red
+        self._c_grid      = QColor("#0A0A0E")  # Void near-black
+        self._c_text      = QColor("#F5F5F7")  # High-contrast text
+        self._c_working   = QColor("#E62429")  # Red
+        self._c_error     = QColor("#FF4D4F")  # Danger red
+        self._c_nucleus   = QColor("#E62429")  # Changes per state
 
         self._logo: QPixmap | None = self._try_load_logo()
 

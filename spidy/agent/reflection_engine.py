@@ -76,6 +76,29 @@ _RETRY_PATTERNS: list[re.Pattern] = [
 _MIN_SUCCESS_RESPONSE_LENGTH = 8
 
 
+from enum import Enum
+
+class RecoveryCategory(str, Enum):
+    WINDOW_NOT_FOUND = "WINDOW_NOT_FOUND"
+    CONTROL_NOT_FOUND = "CONTROL_NOT_FOUND"
+    WRONG_WINDOW = "WRONG_WINDOW"
+    FOCUS_LOST = "FOCUS_LOST"
+    TIMEOUT = "TIMEOUT"
+    APP_NOT_READY = "APP_NOT_READY"
+    NAVIGATION_FAILED = "NAVIGATION_FAILED"
+    ELEMENT_CHANGED = "ELEMENT_CHANGED"
+    FILE_NOT_FOUND = "FILE_NOT_FOUND"
+    PERMISSION_DENIED = "PERMISSION_DENIED"
+    TEXT_NOT_ENTERED = "TEXT_NOT_ENTERED"
+    SAVE_FAILED = "SAVE_FAILED"
+    PROCESS_CRASHED = "PROCESS_CRASHED"
+    TEST_FAILED = "TEST_FAILED"
+    CODE_ERROR = "CODE_ERROR"
+    SCREEN_UNREADABLE = "SCREEN_UNREADABLE"
+    VISION_UNCERTAIN = "VISION_UNCERTAIN"
+    UNKNOWN_ERROR = "UNKNOWN_ERROR"
+
+
 class ReflectionEngine:
     """
     Evaluates a task result and decides the next ExecutionLoop action.
@@ -89,6 +112,30 @@ class ReflectionEngine:
     def __init__(self, max_retries: int = 2) -> None:
         self._max_retries = max_retries
 
+    @staticmethod
+    def diagnose_error(text: str) -> RecoveryCategory:
+        """Categorize error for deterministic recovery routing."""
+        t = text.lower()
+        if "window" in t and ("not found" in t or "could not find" in t):
+            return RecoveryCategory.WINDOW_NOT_FOUND
+        if "element" in t or "control" in t or "button" in t:
+            return RecoveryCategory.CONTROL_NOT_FOUND
+        if "focus" in t or "foreground" in t:
+            return RecoveryCategory.FOCUS_LOST
+        if "timed out" in t or "timeout" in t:
+            return RecoveryCategory.TIMEOUT
+        if "file not found" in t or "no such file" in t or "could not find file" in t:
+            return RecoveryCategory.FILE_NOT_FOUND
+        if "permission" in t or "access denied" in t:
+            return RecoveryCategory.PERMISSION_DENIED
+        if "syntaxerror" in t or "nameerror" in t or "typeerror" in t or "traceback" in t:
+            return RecoveryCategory.CODE_ERROR
+        if "test" in t and ("failed" in t or "failure" in t):
+            return RecoveryCategory.TEST_FAILED
+        if "navigate" in t or "dns" in t or "url" in t:
+            return RecoveryCategory.NAVIGATION_FAILED
+        return RecoveryCategory.UNKNOWN_ERROR
+
     def reflect(
         self,
         task: TaskRecord,
@@ -97,20 +144,6 @@ class ReflectionEngine:
     ) -> tuple[ReflectionDecision, str]:
         """
         Evaluate the outcome of a completed task.
-
-        Parameters
-        ----------
-        task:
-            The TaskRecord (with current attempt count).
-        response_text:
-            The Brain's response text for this task.
-        result_success:
-            Whether the ToolResult indicated success.
-
-        Returns
-        -------
-        tuple[ReflectionDecision, str]
-            (decision, human-readable reason for logging/events)
         """
         text = (response_text or "").strip()
 
@@ -155,9 +188,6 @@ class ReflectionEngine:
                 f"Task '{task.description}' failed after {task.attempt} attempts. Cannot recover.",
             )
 
-        # ── Default: trust the Brain ───────────────────────────────────────
-        # If the Brain produced a response and it doesn't look like an error,
-        # consider the task done and move on.
         if text:
             return (ReflectionDecision.CONTINUE, "Task completed (response received).")
 
@@ -175,9 +205,6 @@ class ReflectionEngine:
     def build_alternative_utterance(self, task: TaskRecord) -> str:
         """
         Generate an alternative utterance for a failed task.
-
-        Tries to rephrase the original utterance to get a different result.
-        Falls back to the original utterance prefixed with "please try to".
         """
         original = task.utterance
         alternatives: dict[str, str] = {

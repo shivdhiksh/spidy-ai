@@ -219,26 +219,41 @@ class ComputerControlSkill(BaseSkill):
 
     async def execute(self, action: str, context: SkillContext) -> SkillResult:
         handler_map = {
-            "get_active_window": self._exec_get_active_window,
-            "mouse_click":       self._exec_mouse_click,
-            "click":             self._exec_mouse_click,
-            "mouse_move":        self._exec_mouse_move,
-            "mouse_scroll":      self._exec_mouse_scroll,
-            "keyboard_type":     self._exec_keyboard_type,
-            "type_text":         self._exec_keyboard_type,
-            "key_press":         self._exec_key_press,
-            "hotkey":            self._exec_hotkey,
-            "focus_window":      self._exec_focus_window,
-            "focus":             self._exec_focus_window,
-            "minimize_window":   self._exec_minimize_window,
-            "maximize_window":   self._exec_maximize_window,
-            "close_window":      self._exec_close_window,
-            "click_element":     self._exec_click_element,
-            "copy":              self._exec_copy,
-            "paste":             self._exec_paste,
-            "get_clipboard":     self._exec_get_clipboard,
-            "set_clipboard":     self._exec_set_clipboard,
-            "screenshot":        self._exec_screenshot,
+            "get_active_window":    self._exec_get_active_window,
+            "mouse_click":          self._exec_mouse_click,
+            "click":                self._exec_mouse_click,
+            "double_click":         self._exec_mouse_double_click,
+            "right_click":          self._exec_mouse_right_click,
+            "mouse_move":           self._exec_mouse_move,
+            "mouse_scroll":         self._exec_mouse_scroll,
+            "drag_and_drop":        self._exec_drag_and_drop,
+            "drag":                 self._exec_drag_and_drop,
+            "keyboard_type":        self._exec_keyboard_type,
+            "type_text":            self._exec_keyboard_type,
+            "safe_type_text":       self._exec_safe_type_text,
+            "key_press":            self._exec_key_press,
+            "hotkey":               self._exec_hotkey,
+            "select_all":           self._exec_select_all,
+            "undo":                 self._exec_undo,
+            "redo":                 self._exec_redo,
+            "focus_window":         self._exec_focus_window,
+            "focus":                self._exec_focus_window,
+            "switch_window":        self._exec_focus_window,
+            "switch_app":           self._exec_focus_window,
+            "minimize_window":      self._exec_minimize_window,
+            "maximize_window":      self._exec_maximize_window,
+            "restore_window":       self._exec_restore_window,
+            "close_window":         self._exec_close_window,
+            "click_element":        self._exec_click_element,
+            "click_ui_element":     self._exec_click_element,
+            "copy":                 self._exec_copy,
+            "paste":                self._exec_paste,
+            "get_clipboard":        self._exec_get_clipboard,
+            "set_clipboard":        self._exec_set_clipboard,
+            "preserve_clipboard":   self._exec_get_clipboard,
+            "restore_clipboard":    self._exec_set_clipboard,
+            "screenshot":           self._exec_screenshot,
+            "wait_for_window_ready": self._exec_wait_for_window_ready,
         }
 
         handler = handler_map.get(action)
@@ -626,6 +641,67 @@ class ComputerControlSkill(BaseSkill):
         if ok:
             return SkillResult.ok("Clipboard updated successfully.")
         return SkillResult.fail("Failed to set clipboard.")
+
+    async def _exec_mouse_double_click(self, context: SkillContext) -> SkillResult:
+        x = context.get("x")
+        y = context.get("y")
+        ok = await asyncio.to_thread(self._controller.double_click, x=x, y=y)
+        if ok:
+            return SkillResult.ok("Double-clicked mouse.")
+        return SkillResult.fail("Failed to double-click mouse.")
+
+    async def _exec_mouse_right_click(self, context: SkillContext) -> SkillResult:
+        x = context.get("x")
+        y = context.get("y")
+        ok = await asyncio.to_thread(self._controller.right_click, x=x, y=y)
+        if ok:
+            return SkillResult.ok("Right-clicked mouse.")
+        return SkillResult.fail("Failed to right-click mouse.")
+
+    async def _exec_drag_and_drop(self, context: SkillContext) -> SkillResult:
+        x1 = int(context.get("x1", context.get("from_x", 0)))
+        y1 = int(context.get("y1", context.get("from_y", 0)))
+        x2 = int(context.get("x2", context.get("to_x", 0)))
+        y2 = int(context.get("y2", context.get("to_y", 0)))
+        dur = float(context.get("duration", 0.2))
+        ok = await asyncio.to_thread(self._controller.drag_and_drop, x1, y1, x2, y2, duration=dur)
+        if ok:
+            return SkillResult.ok(f"Dragged from ({x1},{y1}) to ({x2},{y2}).")
+        return SkillResult.fail("Failed to drag and drop.")
+
+    async def _exec_safe_type_text(self, context: SkillContext) -> SkillResult:
+        text = context.get("text", "")
+        win = context.get("window") or context.get("target") or ""
+        enter = bool(context.get("press_enter", False))
+        ok = await asyncio.to_thread(self._controller.safe_type_text, text, target_window=win, press_enter=enter)
+        if ok:
+            return SkillResult.ok(f"Typed text safely into window '{win or 'active'}'.")
+        return SkillResult.fail(f"Failed to focus and type into window '{win}'.")
+
+    async def _exec_select_all(self, context: SkillContext) -> SkillResult:
+        ok = await asyncio.to_thread(self._controller.select_all)
+        return SkillResult.ok("Selected all text (Ctrl+A).") if ok else SkillResult.fail("Select all failed.")
+
+    async def _exec_undo(self, context: SkillContext) -> SkillResult:
+        ok = await asyncio.to_thread(self._controller.undo)
+        return SkillResult.ok("Undid last action (Ctrl+Z).") if ok else SkillResult.fail("Undo failed.")
+
+    async def _exec_redo(self, context: SkillContext) -> SkillResult:
+        ok = await asyncio.to_thread(self._controller.redo)
+        return SkillResult.ok("Redid last action (Ctrl+Y).") if ok else SkillResult.fail("Redo failed.")
+
+    async def _exec_restore_window(self, context: SkillContext) -> SkillResult:
+        title = context.get("title", "")
+        ok = await asyncio.to_thread(self._controller.restore_window, title or None)
+        return SkillResult.ok(f"Restored window '{title or 'active'}'.") if ok else SkillResult.fail("Restore window failed.")
+
+    async def _exec_wait_for_window_ready(self, context: SkillContext) -> SkillResult:
+        title = context.get("title") or context.get("target") or ""
+        timeout = float(context.get("timeout", 3.0))
+        ok = await asyncio.to_thread(self._controller.wait_for_window_ready, title, timeout=timeout)
+        if ok:
+            return SkillResult.ok(f"Window '{title}' is ready.")
+        return SkillResult.fail(f"Timed out waiting for window '{title}'.")
 
     async def _exec_screenshot(self, context: SkillContext) -> SkillResult:
         path = context.get("path") or context.get("file_path") or ""

@@ -1,20 +1,8 @@
-﻿"""
-ConfirmationCard -- Interactive confirmation overlay
-====================================================
-Appears when a task requires user approval before the AutonomousAgent
-can proceed.  Floats over the content area with a clear glass card.
-
-Signals
--------
-confirmed(task_id: str, goal_id: str)  -- User pressed CONFIRM
-cancelled(task_id: str, goal_id: str)  -- User pressed CANCEL
-
-Design
-------
-- Frosted glass card with amber border (high-contrast -- clearly important)
-- Task description + optional prompt text
-- Two full-width buttons: CANCEL (secondary) and CONFIRM (primary)
-- Does NOT bypass authority logic -- it only publishes events
+"""
+ConfirmationCard -- Spider-Verse Interactive Action Authorization Overlay
+==========================================================================
+Appears when a task requires user approval before AutonomousAgent proceeds.
+High-contrast tactical card with Spider-red border and explicit ALLOW/DENY buttons.
 """
 
 from __future__ import annotations
@@ -37,16 +25,10 @@ class ConfirmationCard(QWidget):
     """
     Glass confirmation card overlaid on the content area.
 
-    Usage
-    -----
-        card.show_confirmation(
-            task_id="t1",
-            goal_id="g1",
-            description="Upload photo to Instagram",
-            prompt="This action requires your confirmation."
-        )
-        card.confirmed.connect(on_confirmed)
-        card.cancelled.connect(on_cancelled)
+    Signals
+    -------
+    confirmed(task_id: str, goal_id: str)
+    cancelled(task_id: str, goal_id: str)
     """
 
     confirmed = Signal(str, str)   # task_id, goal_id
@@ -60,9 +42,9 @@ class ConfirmationCard(QWidget):
         self._task_id = ""
         self._goal_id = ""
 
-        self._bg_color     = QColor("#1A1B2E")
-        self._border_color = QColor("#E8A020")
-        self._radius       = 16
+        self._bg_color     = QColor("#12141C")
+        self._border_color = QColor("#E62429")
+        self._radius       = 14
 
         # Layout
         outer = QVBoxLayout(self)
@@ -73,10 +55,10 @@ class ConfirmationCard(QWidget):
         inner.setSpacing(12)
 
         # Header label
-        self._header = QLabel("\u26a0  CONFIRMATION REQUIRED")
+        self._header = QLabel("⚠  ACTION AUTHORIZATION")
         self._header.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._header.setStyleSheet(
-            "color: #E8A020; font-size: 11px; letter-spacing: 2px;"
+            "color: #E62429; font-family: 'Rajdhani', sans-serif; font-size: 13px; font-weight: bold; letter-spacing: 2px;"
         )
         inner.addWidget(self._header)
 
@@ -85,7 +67,7 @@ class ConfirmationCard(QWidget):
         self._desc_label.setWordWrap(True)
         self._desc_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._desc_label.setStyleSheet(
-            "color: #E8E9F0; font-size: 14px;"
+            "color: #F5F5F7; font-family: 'Inter', sans-serif; font-size: 14px; font-weight: 600;"
         )
         inner.addWidget(self._desc_label)
 
@@ -94,23 +76,23 @@ class ConfirmationCard(QWidget):
         self._prompt_label.setWordWrap(True)
         self._prompt_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._prompt_label.setStyleSheet(
-            "color: #8A8BA0; font-size: 12px;"
+            "color: #9A9AA5; font-family: 'JetBrains Mono', monospace; font-size: 11px;"
         )
         inner.addWidget(self._prompt_label)
 
         # Buttons
         btn_row = QHBoxLayout()
-        btn_row.setSpacing(12)
+        btn_row.setSpacing(14)
 
-        self._btn_cancel = QPushButton("CANCEL")
-        self._btn_cancel.setFixedHeight(40)
+        self._btn_cancel = QPushButton("DENY")
+        self._btn_cancel.setFixedHeight(36)
         self._btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_cancel.clicked.connect(self._on_cancel)
         self._style_button(self._btn_cancel, primary=False)
         btn_row.addWidget(self._btn_cancel)
 
-        self._btn_confirm = QPushButton("CONFIRM")
-        self._btn_confirm.setFixedHeight(40)
+        self._btn_confirm = QPushButton("AUTHORIZE")
+        self._btn_confirm.setFixedHeight(36)
         self._btn_confirm.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_confirm.clicked.connect(self._on_confirm)
         self._style_button(self._btn_confirm, primary=True)
@@ -118,8 +100,6 @@ class ConfirmationCard(QWidget):
 
         inner.addLayout(btn_row)
         outer.addLayout(inner)
-
-    # ---- Public API ----------------------------------------------------------
 
     def show_confirmation(
         self,
@@ -132,8 +112,8 @@ class ConfirmationCard(QWidget):
         self._task_id = task_id
         self._goal_id = goal_id
         self._desc_label.setText(description)
-        self._prompt_label.setText(prompt)
-        self._prompt_label.setVisible(bool(prompt))
+        self._prompt_label.setText(prompt or "Autonomous action requires explicit user permission.")
+        self._prompt_label.setVisible(True)
         self.setVisible(True)
         self.raise_()
 
@@ -145,23 +125,21 @@ class ConfirmationCard(QWidget):
 
     def apply_theme(self, theme: "Theme") -> None:
         c = theme.colors
-        self._bg_color     = QColor(c.bg_primary)
-        self._border_color = QColor(c.working_glow)
+        self._bg_color     = QColor(c.bg_secondary)
+        self._border_color = QColor(c.accent_primary)
         self._header.setStyleSheet(
-            f"color: {c.working_glow}; font-size: {theme.fonts.size_xs}px;"
-            " letter-spacing: 2px;"
+            f"color: {c.accent_primary}; font-family: 'Rajdhani', sans-serif; font-size: {theme.fonts.size_sm}px;"
+            " font-weight: bold; letter-spacing: 2px;"
         )
         self._desc_label.setStyleSheet(
-            f"color: {c.text_primary}; font-size: {theme.fonts.size_md}px;"
+            f"color: {c.text_primary}; font-family: 'Inter', sans-serif; font-size: {theme.fonts.size_md}px; font-weight: 600;"
         )
         self._prompt_label.setStyleSheet(
-            f"color: {c.text_muted}; font-size: {theme.fonts.size_sm}px;"
+            f"color: {c.text_secondary}; font-family: 'JetBrains Mono', monospace; font-size: {theme.fonts.size_xs}px;"
         )
         self._style_button(self._btn_cancel, primary=False, theme=theme)
         self._style_button(self._btn_confirm, primary=True, theme=theme)
         self.update()
-
-    # ---- Painting ------------------------------------------------------------
 
     def paintEvent(self, event) -> None:
         painter = QPainter(self)
@@ -173,17 +151,15 @@ class ConfirmationCard(QWidget):
         path.addRoundedRect(0, 0, self.width(), self.height(), self._radius, self._radius)
 
         bg = QColor(self._bg_color)
-        bg.setAlphaF(0.96)
+        bg.setAlphaF(0.95)
         painter.fillPath(path, QBrush(bg))
 
         border = QColor(self._border_color)
-        border.setAlphaF(0.70)
-        painter.setPen(QPen(border, 1.5))
+        border.setAlphaF(0.85)
+        painter.setPen(QPen(border, 1.8))
         painter.drawPath(path)
 
         painter.end()
-
-    # ---- Internal ------------------------------------------------------------
 
     def _on_confirm(self) -> None:
         self.confirmed.emit(self._task_id, self._goal_id)
@@ -200,38 +176,39 @@ class ConfirmationCard(QWidget):
         primary: bool,
         theme: "Theme | None" = None,
     ) -> None:
-        if theme:
-            c = theme.colors
-            if primary:
-                bg = c.working_glow
-                fg = "#0D0E1A"
-                hover_bg = c.accent_primary
-            else:
-                bg = "transparent"
-                fg = c.text_muted
-                hover_bg = c.bg_tertiary
+        if primary:
+            color = "#2ECC71"  # Tactical green for authorize
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {color}22;
+                    color: {color};
+                    border: 1.5px solid {color};
+                    border-radius: 6px;
+                    font-family: 'JetBrains Mono', Consolas, monospace;
+                    font-size: 11px;
+                    font-weight: bold;
+                    letter-spacing: 1px;
+                }}
+                QPushButton:hover {{
+                    background: {color}44;
+                    color: #FFFFFF;
+                }}
+            """)
         else:
-            if primary:
-                bg = "#E8A020"
-                fg = "#0D0E1A"
-                hover_bg = "#6C63FF"
-            else:
-                bg = "transparent"
-                fg = "#6B6D88"
-                hover_bg = "#1A1B2E"
-
-        btn.setStyleSheet(
-            f"QPushButton {{"
-            f"  background: {bg};"
-            f"  color: {fg};"
-            f"  border: 1px solid {'#E8A020' if primary else '#2A2B45'};"
-            f"  border-radius: 8px;"
-            f"  font-size: 12px;"
-            f"  letter-spacing: 1px;"
-            f"  font-weight: bold;"
-            f"}}"
-            f"QPushButton:hover {{"
-            f"  background: {hover_bg};"
-            f"  color: {'#FFFFFF' if primary else '#E8E9F0'};"
-            f"}}"
-        )
+            color = "#FF4D4F"  # Red for deny
+            btn.setStyleSheet(f"""
+                QPushButton {{
+                    background: {color}22;
+                    color: {color};
+                    border: 1.5px solid {color};
+                    border-radius: 6px;
+                    font-family: 'JetBrains Mono', Consolas, monospace;
+                    font-size: 11px;
+                    font-weight: bold;
+                    letter-spacing: 1px;
+                }}
+                QPushButton:hover {{
+                    background: {color}44;
+                    color: #FFFFFF;
+                }}
+            """)

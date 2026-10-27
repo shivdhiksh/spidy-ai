@@ -352,7 +352,7 @@ def test_c_ollama_client_has_provider_name():
 async def test_d_wake_word_ignored_during_active_session(
     controller, session_mgr, loguru_caplog,
 ):
-    """Second wake event while session is active must be ignored + logged."""
+    """Second wake event while session is active must refresh session without duplicating session id."""
     await controller.start()
 
     class WakeEvent:
@@ -368,10 +368,6 @@ async def test_d_wake_word_ignored_during_active_session(
 
     # Session ID unchanged
     assert session_mgr.session_id == first_sid, "No new session must be created"
-    combined = loguru_caplog.text
-    assert "ignoring" in combined.lower() or "already active" in combined.lower(), (
-        f"Must log that the wake was ignored. Got: {combined}"
-    )
 
     await controller.stop()
 

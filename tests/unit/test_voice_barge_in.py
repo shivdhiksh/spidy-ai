@@ -120,36 +120,46 @@ class TestCaptureModeRouting:
 
 
 class TestEnergyGate:
-    """Tests 4-5: Self-talk guard — chunks below RMS threshold are discarded."""
+    """Tests 4-5: Self-talk guard -- only speech clearly louder than Spidy's own echo opens a candidate."""
 
     def _detector(self, enabled=True):
-        return BargeInDetector(
+        det = BargeInDetector(
             interruption_handler=_make_handler(),
             bus=_make_bus(),
             enabled=enabled,
             min_rms_threshold=0.015,
         )
+        det._active = True
+        return det
+
+    @staticmethod
+    def _echo(det, n=10, rms=0.03):
+        for _ in range(n):
+            det.feed_chunk(_audio_chunk(rms=rms))
 
     def test_feed_chunk_discards_silent_chunk(self):
-        """Chunk with RMS=0 (silence/TTS-bleed) is discarded — buffer stays empty."""
+        """Silence / steady TTS bleed never opens a candidate."""
         det = self._detector()
-        det._active = True
-        det.feed_chunk(np.zeros(1280, dtype=np.float32))  # RMS = 0
-        assert det._buf_samples == 0
+        for _ in range(30):
+            det.feed_chunk(np.zeros(1280, dtype=np.float32))
+        self._echo(det, n=30)
+        assert not det._cand_active and det._cand_samples == 0
 
     def test_feed_chunk_accepts_speech_chunk(self):
-        """Chunk with RMS > threshold is accepted — buffer grows."""
+        """Speech well above the echo level opens a candidate and its audio is kept."""
         det = self._detector()
-        det._active = True
-        det.feed_chunk(_audio_chunk(rms=0.08))  # well above 0.015
-        assert det._buf_samples > 0
+        self._echo(det)
+        for _ in range(5):
+            det.feed_chunk(_audio_chunk(rms=0.2))
+        assert det._cand_active and det._cand_samples > 0
 
     def test_feed_chunk_noop_when_inactive(self):
         """feed_chunk does nothing when detector is not active."""
         det = self._detector()
         det._active = False
-        det.feed_chunk(_audio_chunk(rms=0.5))
-        assert det._buf_samples == 0
+        for _ in range(20):
+            det.feed_chunk(_audio_chunk(rms=0.5))
+        assert not det._cand_active and det._cand_samples == 0
 
 
 # ─── Group 3: Stop detection ──────────────────────────────────────────────────
@@ -180,17 +190,14 @@ class TestStopDetection:
         return det, handler, bus, tts
 
     def _run_detection(self, det, tts, stop_text: str) -> None:
-        """Start detector, feed one full window, let worker run, stop detector."""
-        window_samples = int(det._window_seconds * 16000)
-        # Feed enough audio to fill the window
-        chunk = _audio_chunk(rms=0.1, samples=window_samples)
-
+        """Start detector, feed echo then loud speech, let the worker run, stop detector."""
         with patch.object(det, "_transcribe", return_value=stop_text):
             det.start(tts=tts)
-            det._active = True
-            det.feed_chunk(chunk)
-            # Give worker thread time to detect
-            time.sleep(0.5)
+            for _ in range(10):
+                det.feed_chunk(_audio_chunk(rms=0.03))       # Spidy's own echo
+            for _ in range(14):
+                det.feed_chunk(_audio_chunk(rms=0.2))        # the user, much louder
+            time.sleep(0.6)                                  # give the worker time to detect
             det.stop()
 
     def test_spidy_stop_detected_tts_stopped(self):

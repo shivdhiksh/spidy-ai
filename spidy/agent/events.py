@@ -262,6 +262,25 @@ class AgentReplanningEvent(Event):
 
 
 @dataclass
+class GoalWaitingForUserEvent(Event):
+    """Emitted when a goal transitions to WAITING_FOR_USER state."""
+    topic = "agent.goal_waiting_for_user"
+    goal_id: str = ""
+    description: str = ""
+    prompt: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class GoalResumedEvent(Event):
+    """Emitted when a goal in WAITING_FOR_USER resumes execution."""
+    topic = "agent.goal_resumed"
+    goal_id: str = ""
+    description: str = ""
+    session_id: str = ""
+
+
+@dataclass
 class AgentConfirmationRequiredEvent(Event):
     """
     Emitted when a task requires explicit user confirmation before proceeding.

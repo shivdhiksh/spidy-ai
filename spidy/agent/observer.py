@@ -161,6 +161,7 @@ class TaskObserver:
         task: "TaskRecord",
         response_text: str,
         skip_for_terminal: bool = True,
+        result_data: dict[str, Any] | None = None,
     ) -> Observation:
         """
         Observe the environment after a task execution.
@@ -181,6 +182,8 @@ class TaskObserver:
         Observation
             Environment observation result. Never raises.
         """
+        result_data = result_data or {}
+
         # ── Fast path: terminal single-step tasks (never skip browser tasks) ─
         is_browser_task = False
         if task.action and isinstance(task.action, dict):
@@ -191,16 +194,12 @@ class TaskObserver:
         elif any(kw in (task.utterance or "").lower() for kw in ("youtube", "google", "browser", "navigate", "search")):
             is_browser_task = True
 
-        if skip_for_terminal and task.terminal and task.attempt <= 1 and not is_browser_task:
-            log.debug(
-                "[AGENT] Observer: skipping observation for terminal task '{desc}'",
-                desc=task.description[:60],
-            )
-            # Still analyse response text (zero cost)
+        # Fast path: only skip detailed checks for terminal tasks without structured action contracts
+        if skip_for_terminal and task.terminal and not task.action and not is_browser_task:
             sig = self._analyse_response(response_text)
             return Observation(
-                method="skipped",
-                summary=f"Terminal task — using response text signal only.",
+                method="response_text",
+                summary=f"Terminal task — response text analysis.",
                 success_signal=sig,
             )
 
@@ -275,6 +274,19 @@ class TaskObserver:
                     browser_verified = None
                     browser_reason = "Browser search state unverified (URL not extracted)"
 
+            elif act in ("play_youtube_video", "play_video", "play") or any(k in task.description.lower() for k in ("play video", "play youtube", "play any video", "play one video")):
+                playback_ok = bool(
+                    result_data.get("playback_verified")
+                    or (result_data.get("status") == "SUCCEEDED" and result_data.get("step") == "play_youtube_video")
+                    or (browser_url and "/watch?v=" in browser_url.lower() and "error" not in response_text.lower() and "could not play" not in response_text.lower())
+                )
+                if playback_ok:
+                    browser_verified = True
+                    browser_reason = f"Verified YouTube video playback confirmed ({browser_url or 'watch page'})"
+                else:
+                    browser_verified = False
+                    browser_reason = f"YouTube video playback failed or unverified (URL: {browser_url or 'unknown'})"
+
         # ── Step 3: App state check ─────────────────────────────────────────
         app_running: bool | None = None
         app_name: str | None = None
@@ -289,7 +301,11 @@ class TaskObserver:
 
         # ── Step 4: File existence check ────────────────────────────────────
         file_exists: bool | None = None
-        file_path = self._extract_file_path(utterance_lower, response_text)
+        # A skill's structured result is authoritative.  Response prose is
+        # only a display string and must not decide whether a file exists.
+        file_path = str(result_data.get("file_path") or result_data.get("path") or "")
+        if not file_path:
+            file_path = self._extract_file_path(utterance_lower, response_text)
         if file_path:
             file_exists = os.path.exists(file_path)
             log.debug(
@@ -297,6 +313,16 @@ class TaskObserver:
                 path=file_path[:80],
                 exists=file_exists,
             )
+
+        requires_file = bool(
+            task.action
+            and isinstance(task.action, dict)
+            and (task.action.get("action") or "").lower() in ("create_file", "write_file", "save_file", "save")
+        )
+        if requires_file and not file_path:
+            # Missing an exact output path is a verification failure, not a
+            # reason to believe friendly response text.
+            file_exists = False
 
         # ── Step 5: Visual observation (screenshot) ─────────────────────────
         screenshot_path = ""
@@ -336,7 +362,7 @@ class TaskObserver:
             file_exists=file_exists,
             browser_url=browser_url,
             screenshot_path=screenshot_path,
-            extra=extra,
+            extra={**extra, "result_data": result_data},
         )
 
         log.info(
@@ -399,29 +425,29 @@ class TaskObserver:
                 return None
             output_lower = result.stdout.lower()
             # Map app names to process names
-            _PROCESS_MAP = {
-                "chrome": "chrome.exe",
-                "google chrome": "chrome.exe",
-                "edge": "msedge.exe",
-                "microsoft edge": "msedge.exe",
-                "firefox": "firefox.exe",
-                "notepad": "notepad.exe",
-                "calculator": "calculatorapp.exe",
-                "vs code": "code.exe",
-                "vscode": "code.exe",
-                "visual studio code": "code.exe",
-                "discord": "discord.exe",
-                "spotify": "spotify.exe",
-                "paint": "mspaint.exe",
-                "task manager": "taskmgr.exe",
-                "powershell": "powershell.exe",
-                "cmd": "cmd.exe",
-                "terminal": "windowsterminal.exe",
-                "command prompt": "cmd.exe",
+            _PROCESS_MAP: dict[str, tuple[str, ...]] = {
+                "chrome": ("chrome.exe",),
+                "google chrome": ("chrome.exe",),
+                "edge": ("msedge.exe",),
+                "microsoft edge": ("msedge.exe",),
+                "firefox": ("firefox.exe",),
+                "notepad": ("notepad.exe",),
+                "calculator": ("calculatorapp.exe", "calc.exe", "calculator.exe"),
+                "vs code": ("code.exe",),
+                "vscode": ("code.exe",),
+                "visual studio code": ("code.exe",),
+                "discord": ("discord.exe",),
+                "spotify": ("spotify.exe",),
+                "paint": ("mspaint.exe",),
+                "task manager": ("taskmgr.exe",),
+                "powershell": ("powershell.exe",),
+                "cmd": ("cmd.exe",),
+                "terminal": ("windowsterminal.exe", "wt.exe"),
+                "command prompt": ("cmd.exe",),
             }
-            process = _PROCESS_MAP.get(app_name.lower(), "")
-            if process:
-                return process in output_lower
+            procs = _PROCESS_MAP.get(app_name.lower())
+            if procs:
+                return any(p in output_lower for p in procs)
             return None
         except Exception:  # noqa: BLE001
             return None
@@ -535,4 +561,3 @@ class TaskObserver:
             )
 
         return None, "response_text", "Inconclusive — no strong signal."
-

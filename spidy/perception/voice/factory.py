@@ -145,27 +145,43 @@ class VoiceEngineFactory:
         recognizer.load()
 
         # ── TTS ───────────────────────────────────────────────────────────
-        log.info("Building TTS engine: voice='{v}'", v=voice_cfg.tts.voice)
+        log.info("Building TTS engine: engine='{e}' voice='{v}'", e=voice_cfg.tts.engine, v=voice_cfg.tts.voice)
 
         # Select TTS engine from config — failure is non-fatal;
         # a silent NullTTS is used so wake-word and STT still work.
-        tts_engine_name = voice_cfg.tts.engine.lower()
+        from spidy.perception.voice.tts.elevenlabs import ElevenLabsTTSEngine
+        from spidy.perception.voice.tts.manager import TTSManager
+
         try:
+            piper_engine = PiperTTSEngine(
+                voice=voice_cfg.tts.voice,
+                speed=voice_cfg.tts.speed,
+                volume=voice_cfg.tts.volume,
+            )
+
+            elevenlabs_engine = ElevenLabsTTSEngine(
+                api_key=getattr(voice_cfg.tts, "elevenlabs_api_key", ""),
+                voice_id=getattr(voice_cfg.tts, "elevenlabs_voice_id", "ZYk9CB0JtzXJrxcnt9Oz"),
+                model_id=getattr(voice_cfg.tts, "elevenlabs_model_id", "eleven_turbo_v2_5"),
+                speed=voice_cfg.tts.speed,
+                volume=voice_cfg.tts.volume,
+            )
+
+            tts_engine_name = voice_cfg.tts.engine.lower()
             if tts_engine_name == "piper":
-                tts: TTSEngine = PiperTTSEngine(
-                    voice=voice_cfg.tts.voice,
-                    speed=voice_cfg.tts.speed,
-                    volume=voice_cfg.tts.volume,
+                tts = piper_engine
+                tts.load()
+            elif tts_engine_name == "elevenlabs":
+                tts = elevenlabs_engine
+                tts.load()
+            else:  # "hybrid" (default)
+                tts = TTSManager(
+                    primary_engine=elevenlabs_engine,
+                    fallback_engine=piper_engine,
+                    prefer_online=True,
                 )
                 tts.load()
-            else:
-                log.warning(
-                    "Unknown TTS engine '{name}'. Falling back to Piper.",
-                    name=tts_engine_name,
-                )
-                tts = PiperTTSEngine(voice=voice_cfg.tts.voice)
-                tts.load()
-            log.info("TTS engine loaded successfully.")
+            log.info("TTS engine loaded successfully: {name}", name=tts.voice_name)
         except Exception as tts_exc:  # noqa: BLE001
             log.error(
                 "[VOICE DIAG] TTS failed to load (voice pipeline will run without TTS): {exc}",
@@ -191,8 +207,12 @@ class VoiceEngineFactory:
             sample_rate=voice_cfg.audio.sample_rate,
             wake_threshold=voice_cfg.wake_word.threshold,
             mic_gain=getattr(voice_cfg.audio, "mic_gain", 1.0),
+            min_speech_ratio=getattr(voice_cfg.session, "min_speech_ratio", 0.0),
+            wake_verify=getattr(voice_cfg.wake_word, "verify_with_stt", False),
+            wake_verify_window=getattr(voice_cfg.wake_word, "verify_window_seconds", 2.0),
             # M14: VAD settings
             silence_timeout_seconds=voice_cfg.vad.silence_timeout_seconds,
+            idle_unload_seconds=getattr(voice_cfg.stt, "idle_unload_seconds", 0.0),
         )
 
         log.info("VoiceEngine assembled successfully.")
@@ -274,14 +294,24 @@ class VoiceEngineFactory:
                 window_seconds=barge_in_cfg.window_seconds,
                 min_rms_threshold=barge_in_cfg.min_rms_threshold,
                 enabled=True,
+                interrupt_on_speech=barge_in_cfg.interrupt_on_speech,
+                trigger_ratio=barge_in_cfg.trigger_ratio,
             )
             # Lazy-load: schedule tiny.en to load 3s after startup completes.
             # This removes ~180 MB from the startup RAM peak while ensuring the
             # model is ready long before the user's first TTS interaction.
-            barge_in.schedule_lazy_load(delay_seconds=3.0)
+            if getattr(barge_in_cfg, "load_on_wake", True):
+                # Phone-style: loaded when a wake word starts to sound, freed when idle (see VoiceEngine).
+                voice_engine.add_resource_hooks(prewarm=barge_in.prewarm, unload=barge_in.unload_model)
+            else:
+                barge_in.schedule_lazy_load(delay_seconds=3.0)
 
             # Register barge-in audio callback on the capture engine
             voice_engine._capture_engine._on_barge_in_chunk = barge_in.feed_chunk  # noqa: SLF001
+            voice_engine._capture_engine._on_other_chunk = barge_in.train_chunk    # noqa: SLF001
+            if not barge_in_cfg.interrupt_on_speech:
+                # Feature off: leave the mic exactly as it was while Spidy speaks.
+                voice_engine._capture_engine.barge_in_gain_scale = 1.0              # noqa: SLF001
             log.info(
                 "[STT BARGE-IN] model={m} | device={dev} | compute_type={ct} | "
                 "lazy_load=3s | window={w}s | min_rms={r}",

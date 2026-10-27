@@ -213,6 +213,25 @@ def _extract_youtube_query(text: str) -> list[Entity]:
     return []
 
 
+def _extract_play_youtube_query(text: str) -> list[Entity]:
+    """Extract query or playback target for YouTube video playback."""
+    entities: list[Entity] = []
+    text_lower = text.lower()
+    if any(phrase in text_lower for phrase in ("random", "any video", "any one video", "whichever", "which you like", "any")):
+        entities.append(Entity(name="random_pick", value="true"))
+
+    cleaned = re.sub(
+        r"^(?:play\s+any\s+one\s+video\s+random\s+which\s+you\s+like|play\s+a\s+random\s+video|play\s+random\s+video|"
+        r"play\s+any\s+video|play\s+any\s+one\s+video|play\s+a\s+video|play\s+the\s+video|play\s+video|"
+        r"play\s+youtube\s+video|play\s+one\s+video|play)\s*",
+        "", text_lower
+    ).strip()
+    cleaned = re.sub(r"\b(?:on\s+youtube|which\s+you\s+like|randomly|random)\b", "", cleaned).strip()
+    if cleaned and cleaned not in ("video", "videos", "one", "a"):
+        entities.append(Entity(name="query", value=cleaned))
+    return entities
+
+
 def _extract_bing_query(text: str) -> list[Entity]:
     """Extract the search query for a Bing search."""
     cleaned = re.sub(
@@ -277,9 +296,41 @@ def _extract_app_name(text: str) -> list[Entity]:
     if match:
         name = match.group(1).strip()
         name = re.sub(r"^the\s+", "", name).strip()
+        # "open spotify please" / "open VS Code for me" → just the app name
+        name = re.sub(r"(?:\s+(?:please|for\s+me|now|again|app|application))+[.?!]*$", "", name).strip(" .?!")
         if name:
             return [Entity(name="name", value=name)]
     return []
+
+
+_OPEN_ANY_RE = re.compile(
+    r"\b(?:open|launch|start|run|fire\s+up|bring\s+up)\s+(?:up\s+)?(?:the\s+|my\s+)?"
+    r"([a-z0-9][\w .'+&-]*?)"
+    r"(?:\s+(?:app|application|program|for\s+me|please|now|again))*\s*[.?!]*$"
+)
+# Things that are not apps: handled by other rules or better answered by chat.
+_NOT_AN_APP = re.compile(
+    r"^(?:it|that|this|them|something|anything|a\b|an\b|new\b|up\b|http|www\.|"
+    r"files?\b|folders?\b|documents?\b|downloads?\b|desktop\b|pictures?\b|music\b|videos?\b|"
+    r"links?\b|urls?\b|web\s?sites?\b|sites?\b|pages?\b|tabs?\b|the\s+web\b|my\s+computer\b)"
+)
+
+
+def _generic_open_app(text: str) -> list[Entity]:
+    """
+    "open <anything>" → launch_app, so apps outside the fixed phrase list (WhatsApp,
+    Store apps, mis-heard names) still reach the real launcher instead of falling
+    through to chat, where the language model used to invent "Done: opened X".
+    """
+    match = _OPEN_ANY_RE.search(text.lower().strip())
+    if not match:
+        return []
+    name = match.group(1).strip(" .'-")
+    if not name or len(name.split()) > 4 or _NOT_AN_APP.match(name):
+        return []
+    if re.search(r"\b(?:and|then|search|google|for)\b", name):
+        return []   # compound / search requests are handled by the planner
+    return [Entity(name="name", value=name)]
 
 
 def _extract_app_and_query(text: str) -> list[Entity]:
@@ -315,8 +366,57 @@ def _extract_filename(text: str) -> list[Entity]:
         text.lower().strip()
     )
     if match:
-        return [Entity(name="filename", value=match.group(1).strip())]
+        val = match.group(1).strip().rstrip(".?!,;:")
+        return [
+            Entity(name="filename", value=val),
+            Entity(name="query", value=val),
+            Entity(name="path", value=val),
+        ]
     return []
+
+
+def _extract_file_search_entities(text: str) -> list[Entity]:
+    """Extract query, path, and extension entities for search_files."""
+    entities: list[Entity] = []
+    ext_entities = _extract_file_type(text)
+    if ext_entities:
+        entities.extend(ext_entities)
+
+    cleaned = re.sub(
+        r"^(?:find\s+my|find\s+the|find\s+all|find\s+files?|find|search\s+for|search\s+all|search\s+files?|search|look\s+for|locate|where\s+is\s+my|where\s+is\s+the|where\s+is)\s+",
+        "", text.strip(), flags=re.IGNORECASE
+    )
+    cleaned = cleaned.rstrip(".?!,;:")
+    if cleaned:
+        entities.append(Entity(name="query", value=cleaned))
+        entities.append(Entity(name="filename", value=cleaned))
+        entities.append(Entity(name="path", value=cleaned))
+    elif ext_entities:
+        entities.append(Entity(name="query", value=f"*.{ext_entities[0].value}"))
+
+    return entities
+
+
+def _extract_create_file(text: str) -> list[Entity]:
+    """Extract filename and optional content from file creation commands."""
+    cleaned = re.sub(
+        r"^(?:create\s+a\s+python\s+file\s+called|create\s+a\s+file\s+called|create\s+python\s+file|create\s+file|create\s+a\s+file|create|make\s+file|make\s+a\s+file|save\s+file)\s+",
+        "", text.strip(), flags=re.IGNORECASE
+    )
+    cleaned = cleaned.rstrip(".?!,;:")
+    write_match = re.search(r"^(.*?)(?:\s+(?:with\s+content|and\s+write)\s+['\"]?([\s\S]+?)['\"]?(?:\s+into\s+it)?)?$", cleaned, re.I)
+    if write_match:
+        fn = write_match.group(1).strip().strip("'\"`")
+        content = write_match.group(2) or ""
+        return [
+            Entity(name="filename", value=fn),
+            Entity(name="path", value=fn),
+            Entity(name="content", value=content),
+        ]
+    return [
+        Entity(name="filename", value=cleaned),
+        Entity(name="path", value=cleaned),
+    ]
 
 
 def _extract_note_content(text: str) -> list[Entity]:
@@ -545,6 +645,45 @@ _RULES: list[_Rule] = [
         confidence=_HIGH_CONFIDENCE,
     ),
 
+    # ── Time / Date / Day ── HIGH priority so it routes directly to TimeSkill ──
+    _Rule(
+        action="get_time",
+        patterns=(
+            "what time is it", "what time is it now", "what's the time", "whats the time",
+            "what is the time", "what is the time now", "tell me the time", "current time",
+            "what time do you have", "time now", "tell time", "get time", "the time",
+            "what time is it right now", "what's the time right now", "tell me what time it is",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="get_date",
+        patterns=(
+            "what's today's date", "whats today's date", "what is today's date",
+            "what's the date", "what is the date", "what date is it", "what date is today",
+            "today's date", "todays date", "tell me today's date", "current date",
+            "what is today date", "tell me the date",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="get_day",
+        patterns=(
+            "what day is it", "what day is today", "what day is it today",
+            "what day of the week is it", "what day of the week is today",
+            "what day of the week", "which day is today", "tell me what day it is",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="get_datetime",
+        patterns=(
+            "what is the date and time", "what's the date and time", "date and time",
+            "what is the current time and date", "current date and time", "time and date",
+        ),
+        confidence=_HIGH_CONFIDENCE,
+    ),
+
     # ── Screenshot ─────────────────────────────────────────────────────────
     _Rule(
         action="take_screenshot",
@@ -570,18 +709,15 @@ _RULES: list[_Rule] = [
 
     # ── File / Folder operations ────────────────────────────────────────────
     _Rule(
-        action="open_file",
-        patterns=("open file", "open the file", "read file", "read the file"),
-        entity_extractor=_extract_filename,
-    ),
-    _Rule(
         action="search_files",
         patterns=(
             # Generic
             "find file", "search file", "find files", "look for file",
             "search for file", "where is the file", "where is my",
-            "find my resume", "find my document", "find my pdf",
-            "locate file", "find the document",
+            "find my resume", "search for resume", "find resume",
+            "find my cv", "find cv", "search for cv",
+            "find my resume pdf", "where is my resume", "locate resume",
+            "find my document", "find my pdf", "locate file", "find the document",
             # PDF-specific (M13.1)
             "find all pdf", "find pdf", "search for pdf",
             "find all pdf files", "find pdf files",
@@ -593,7 +729,41 @@ _RULES: list[_Rule] = [
             # General type search
             "find all files", "search for files",
         ),
-        entity_extractor=lambda t: _extract_file_type(t) or _extract_filename(t),
+        entity_extractor=_extract_file_search_entities,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="create_file",
+        patterns=(
+            "create file", "create a file", "create a python file",
+            "create python file", "make a file", "make file",
+            "save file", "save a file", "write file", "write a file",
+            "create test.py", "create hello.py", "create main.py",
+        ),
+        entity_extractor=_extract_create_file,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    _Rule(
+        action="read_file",
+        patterns=(
+            "read file", "read the file", "view file", "view the file",
+            "show file", "cat file", "display file", "open and read file",
+        ),
+        entity_extractor=_extract_filename,
+        confidence=_HIGH_CONFIDENCE,
+    ),
+    # Open / reveal folder (M13.1)
+    _Rule(
+        action="open_folder",
+        patterns=(
+            "open downloads", "open the downloads folder", "open downloads folder",
+            "open documents", "open documents folder", "open the documents folder",
+            "open desktop folder", "show me the desktop folder",
+            "open pictures folder", "open music folder", "open videos folder",
+            "open my documents", "open my downloads", "open my desktop",
+            "show folder", "browse folder", "open folder in explorer",
+        ),
+        entity_extractor=_extract_folder_path,
         confidence=_HIGH_CONFIDENCE,
     ),
     # Create folder (M13.1)
@@ -620,18 +790,13 @@ _RULES: list[_Rule] = [
         entity_extractor=_extract_folder_name,
         confidence=_HIGH_CONFIDENCE,
     ),
-    # Open / reveal folder (M13.1)
     _Rule(
-        action="open_folder",
+        action="open_file",
         patterns=(
-            "open downloads", "open the downloads folder", "open downloads folder",
-            "open documents", "open documents folder", "open the documents folder",
-            "open desktop folder", "show me the desktop folder",
-            "open pictures folder", "open music folder", "open videos folder",
-            "open my documents", "open my downloads", "open my desktop",
-            "show folder", "browse folder", "open folder in explorer",
+            "open file", "open the file", "launch file", "launch the file",
+            "open resume.pdf", "open test.py",
         ),
-        entity_extractor=_extract_folder_path,
+        entity_extractor=_extract_filename,
         confidence=_HIGH_CONFIDENCE,
     ),
     # List recent files (M13.1)
@@ -661,6 +826,32 @@ _RULES: list[_Rule] = [
     ),
 
     # ── YouTube ── before generic search ───────────────────────────────────
+    _Rule(
+        action="play_youtube_video",
+        patterns=(
+            "play any one video random which you like",
+            "play any one video random",
+            "play any one video",
+            "play any video",
+            "play random video",
+            "play a random video",
+            "play video random",
+            "play a video",
+            "play video",
+            "play the video",
+            "play the first video",
+            "play first video",
+            "play youtube video",
+            "play one video",
+            "play a video on youtube",
+            "play video on youtube",
+            "play next video",
+            "start playing video",
+            "resume video",
+        ),
+        entity_extractor=_extract_play_youtube_query,
+        confidence=_HIGH_CONFIDENCE,
+    ),
     _Rule(
         action="search_youtube",
         patterns=(
@@ -1185,6 +1376,11 @@ def _split_compound_utterance(text: str) -> list[str] | None:
     Returns None if the utterance doesn't look compound (single intent).
     Returns a list of 2+ non-empty part strings if compound.
     """
+    # "open VS Code and open WhatsApp" → two steps ("and" alone is too ambiguous to
+    # split on, but "and" followed by a new open/launch/start verb is a new command).
+    text = re.sub(
+        r",?\s+and\s+(?=(?:open|launch|start|run)\b)", "; ", text.strip(), flags=re.IGNORECASE,
+    )
     parts = _COMPOUND_SPLIT_RE.split(text.strip())
     # Filter out empty / trivial parts
     cleaned = [
@@ -1422,6 +1618,13 @@ class IntentClassifier:
                             else []
                         )
                     break  # Found a match for this rule, stop checking patterns
+
+        if best_action == "chat":
+            generic_app = _generic_open_app(utterance)
+            if generic_app:
+                best_action = "launch_app"
+                best_confidence = _HIGH_CONFIDENCE
+                best_entities = generic_app
 
         if best_action != "chat":
             log.debug(

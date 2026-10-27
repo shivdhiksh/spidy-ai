@@ -53,12 +53,14 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, Any
 
 from spidy.brain.context_resolver import ContextResolver
 from spidy.brain.conversation_manager import ConversationManager
 from spidy.brain.decision_engine import DecisionEngine
+from spidy.brain.events import BrainContextResolvedEvent, BrainResponseReadyEvent
 from spidy.brain.intent_classifier import IntentClassifier
 from spidy.brain.planner import Planner
 from spidy.brain.response_composer import ResponseComposer
@@ -247,6 +249,29 @@ class Brain:
 
         _pipeline_start = time.monotonic()
 
+        # ── Step -1: commands addressed to Spidy itself ("close yourself") ──
+        from spidy.brain.self_commands import QUIT_FAREWELL, is_quit_request
+        if is_quit_request(utterance):
+            log.info("Brain: quit request recognised: '{utt}'", utt=utterance[:80])
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid, response_text=QUIT_FAREWELL, decision_mode="self_command",
+            ))
+            self._quit_task = asyncio.create_task(self._quit_after_farewell())
+            return QUIT_FAREWELL
+
+        # ── Step 0: Check if an autonomous goal is waiting for user input ───
+        if self._agent is not None and self._agent.has_waiting_goal():
+            log.info("Brain: routing input to resume paused autonomous goal.")
+            agent_response = await self._agent.resume_with_user_input(utterance)
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid,
+                response_text=agent_response,
+                intent="autonomous_goal_resumed",
+                stage_latencies_ms={"resume_ms": (time.monotonic() - _pipeline_start) * 1000},
+                total_latency_ms=(time.monotonic() - _pipeline_start) * 1000,
+            ))
+            return agent_response
+
         # ── Step 1: Context resolution ──────────────────────────────────────
         #
         # Resolve pronouns and references ("it", "that", "the file") against
@@ -405,6 +430,12 @@ class Brain:
 
         return response_text
 
+    async def _quit_after_farewell(self, delay_seconds: float = 3.5) -> None:
+        """Give the spoken goodbye time to play, then ask the app to shut down."""
+        from spidy.core.event_bus import SpidyQuitRequestedEvent
+        await asyncio.sleep(delay_seconds)
+        await self._bus.publish(SpidyQuitRequestedEvent())
+
     # ── EventBus handler ──────────────────────────────────────────────────
 
     async def _on_user_spoke(self, event: Any) -> None:
@@ -485,7 +516,20 @@ class Brain:
             Natural language response describing what was accomplished.
         """
         if self._agent is not None:
-            return await self._agent.run_goal(goal, session_id=session_id)
+            sid = session_id or self._conversation.session_id
+            response_text = await self._agent.run_goal(goal, session_id=sid)
+            self._conversation.add_turn(TurnRole.USER, goal)
+            self._conversation.add_turn(TurnRole.ASSISTANT, response_text)
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid,
+                response_text=response_text,
+                decision_mode="goal",
+            ))
+            log.info(
+                "Response ready [goal]: '{resp}'",
+                resp=response_text[:80],
+            )
+            return response_text
 
         # Graceful fallback when no agent is attached:
         # treat the goal as a single Brain.process() call
@@ -506,6 +550,25 @@ class Brain:
         if self._agent is not None:
             return await self._agent.cancel_current_goal()
         return False
+
+    def has_waiting_goal(self) -> bool:
+        """True if an autonomous goal is waiting for user input."""
+        return self._agent is not None and self._agent.has_waiting_goal()
+
+    async def resume_goal(self, user_input: str) -> str:
+        """Resume an active autonomous goal waiting for clarification."""
+        if self._agent is not None:
+            sid = self._conversation.session_id
+            response_text = await self._agent.resume_with_user_input(user_input)
+            self._conversation.add_turn(TurnRole.USER, user_input)
+            self._conversation.add_turn(TurnRole.ASSISTANT, response_text)
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid,
+                response_text=response_text,
+                decision_mode="goal_resume",
+            ))
+            return response_text
+        return "No autonomous agent attached."
 
     @property
     def autonomous_agent(self) -> "AutonomousAgent | None":

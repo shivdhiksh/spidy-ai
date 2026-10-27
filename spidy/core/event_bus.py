@@ -100,6 +100,12 @@ class SpidyShuttingDownEvent(Event):
 
 
 @dataclass
+class SpidyQuitRequestedEvent(Event):
+    """Published when the user asks Spidy to close itself (voice or text)."""
+    topic = "system.quit_requested"
+
+
+@dataclass
 class ErrorEvent(Event):
     """Published when a module encounters an unrecoverable error."""
     topic = "system.error"

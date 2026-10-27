@@ -1,15 +1,11 @@
 """
-hud_chat.py -- HUDChatOverlay: Scrollable Conversation History Panel
-====================================================================
-Provides a dedicated, readable conversation history region for the HUD:
-- Full multi-turn conversation history without artificial truncation
-- Distinct visual appearance for user ("YOU") vs assistant ("SPIDY")
-- Proper word wrapping and selectable text
-- Natural mouse-wheel and trackpad scrolling across the entire panel
-- Visible, high-contrast, comfortable scrollbar hit zone
-- Smart auto-scrolling (preserves scroll position when reading history)
-- Unobtrusive "↓ New message" jump indicator when scrolled up
-- Glassmorphism aesthetic matching the futuristic HUD theme
+hud_chat.py -- HUDChatOverlay: Spider-Verse Conversation History Panel
+======================================================================
+Scrollable conversation history panel with Spider-Verse styling:
+- Glassmorphic message bubbles with Spider-red and Navy accents
+- Distinct typography for YOU vs SPIDY
+- Natural wheel scrolling and smart auto-scrolling
+- High-contrast Spider-Verse scrollbar and jump button
 """
 
 from __future__ import annotations
@@ -50,7 +46,7 @@ class _LegacyCard:
 
 
 class _ChatMessageBubble(QFrame):
-    """Individual conversation message bubble."""
+    """Individual Spider-Verse conversation message bubble."""
 
     def __init__(
         self,
@@ -64,12 +60,12 @@ class _ChatMessageBubble(QFrame):
         self.text = text
         self.timestamp = datetime.datetime.now().strftime("%H:%M")
 
-        # Color defaults
-        self._c_primary = QColor("#00E5FF")
-        self._c_dim = QColor("#004D5E")
-        self._c_text = QColor("#E0F7FA")
-        self._c_bg = QColor("#0A1929")
-        self._c_user_bg = QColor("#102A43")
+        # Color defaults (Spider-Verse HUD)
+        self._c_primary = QColor("#E62429")   # Spider-red
+        self._c_dim = QColor("#1B2A4A")       # Navy web-blue
+        self._c_text = QColor("#F5F5F7")
+        self._c_bg = QColor("#12141C")        # Dark glass
+        self._c_user_bg = QColor("#161924")   # Cool contrast slate
 
         if theme_colors:
             self._apply_colors(theme_colors)
@@ -79,7 +75,7 @@ class _ChatMessageBubble(QFrame):
 
         # Layout
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(12, 8, 12, 10)
+        layout.setContentsMargins(14, 8, 14, 10)
         layout.setSpacing(4)
 
         # Header: Role + Timestamp
@@ -88,34 +84,34 @@ class _ChatMessageBubble(QFrame):
 
         role_display = "SPIDY" if self.role == "assistant" else ("YOU" if self.role == "user" else "SYSTEM")
         self._lbl_role = QLabel(role_display)
-        self._lbl_role.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self._lbl_role.setFont(QFont("Rajdhani", 10, QFont.Weight.Bold))
         self._lbl_role.setStyleSheet(
-            f"color: {'#00E5FF' if self.role == 'assistant' else '#80DEEA'}; background: transparent;"
+            f"color: {'#E62429' if self.role == 'assistant' else '#3FA9F5'}; background: transparent; letter-spacing: 1px;"
         )
         header_layout.addWidget(self._lbl_role)
 
         self._lbl_time = QLabel(self.timestamp)
-        self._lbl_time.setFont(QFont("Consolas", 8))
-        self._lbl_time.setStyleSheet("color: rgba(178, 235, 242, 0.5); background: transparent;")
+        self._lbl_time.setFont(QFont("JetBrains Mono", 8))
+        self._lbl_time.setStyleSheet("color: rgba(245, 245, 247, 0.45); background: transparent;")
         header_layout.addWidget(self._lbl_time, 0, Qt.AlignmentFlag.AlignRight)
 
         layout.addLayout(header_layout)
 
         # Message Text
         self._lbl_text = QLabel(self.text)
-        self._lbl_text.setFont(QFont("Segoe UI", 10))
+        self._lbl_text.setFont(QFont("Inter", 10))
         self._lbl_text.setWordWrap(True)
         self._lbl_text.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         self._lbl_text.setStyleSheet(
-            "color: #E0F7FA; background: transparent; line-height: 130%;"
+            "color: #F5F5F7; background: transparent; line-height: 135%;"
         )
         layout.addWidget(self._lbl_text)
 
     def _apply_colors(self, c: dict[str, str]) -> None:
         if "hud_primary" in c:
             self._c_primary = QColor(c["hud_primary"])
-        if "hud_dim" in c:
-            self._c_dim = QColor(c["hud_dim"])
+        if "hud_secondary" in c:
+            self._c_dim = QColor(c["hud_secondary"])
         if "hud_text" in c:
             self._c_text = QColor(c["hud_text"])
         if "hud_grid" in c:
@@ -129,16 +125,26 @@ class _ChatMessageBubble(QFrame):
 
         w, h = self.width(), self.height()
         bg_col = QColor(self._c_bg if self.role == "assistant" else self._c_user_bg)
-        bg_col.setAlphaF(0.85)
+        bg_col.setAlphaF(0.90)
 
         border_col = QColor(self._c_primary if self.role == "assistant" else self._c_dim)
-        border_col.setAlphaF(0.55 if self.role == "assistant" else 0.35)
+        border_col.setAlphaF(0.40)
 
         path = QPainterPath()
-        path.addRoundedRect(QRectF(1, 1, w - 2, h - 2), 6, 6)
+        path.addRoundedRect(QRectF(1, 1, w - 2, h - 2), 8, 8)
         painter.setBrush(QBrush(bg_col))
         painter.setPen(QPen(border_col, 1.0))
         painter.drawPath(path)
+
+        # Left accent stripe
+        stripe_col = QColor(self._c_primary if self.role == "assistant" else "#3FA9F5")
+        stripe_col.setAlphaF(0.85)
+        stripe_path = QPainterPath()
+        stripe_path.addRoundedRect(QRectF(1, 4, 3, h - 8), 1.5, 1.5)
+        painter.setBrush(QBrush(stripe_col))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawPath(stripe_path)
+
         painter.end()
 
 
@@ -173,19 +179,19 @@ class HUDChatOverlay(QWidget):
                 border: none;
             }
             QScrollBar:vertical {
-                background: rgba(10, 25, 41, 0.5);
-                width: 10px;
-                border-radius: 5px;
+                background: rgba(18, 20, 28, 0.6);
+                width: 8px;
+                border-radius: 4px;
                 margin: 2px 0px 2px 0px;
             }
             QScrollBar::handle:vertical {
-                background: rgba(0, 229, 255, 0.45);
-                border-radius: 5px;
+                background: rgba(230, 36, 41, 0.45);
+                border-radius: 4px;
                 min-height: 28px;
             }
             QScrollBar::handle:vertical:hover, QScrollBar::handle:vertical:pressed {
-                background: rgba(0, 229, 255, 0.85);
-                border-radius: 5px;
+                background: rgba(230, 36, 41, 0.90);
+                border-radius: 4px;
             }
             QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
                 height: 0px;
@@ -217,19 +223,19 @@ class HUDChatOverlay(QWidget):
         self._btn_new_msg.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_new_msg.setStyleSheet("""
             QPushButton {
-                background-color: rgba(10, 25, 41, 0.94);
-                color: #00E5FF;
-                border: 1px solid #00E5FF;
+                background-color: rgba(18, 20, 28, 0.95);
+                color: #E62429;
+                border: 1px solid #E62429;
                 border-radius: 12px;
-                font-family: "Segoe UI", "Consolas", sans-serif;
+                font-family: 'Rajdhani', 'JetBrains Mono', sans-serif;
                 font-size: 9pt;
                 font-weight: bold;
                 padding: 4px 14px;
             }
             QPushButton:hover {
-                background-color: rgba(0, 229, 255, 0.25);
+                background-color: rgba(230, 36, 41, 0.25);
                 color: #FFFFFF;
-                border: 1px solid #80DEEA;
+                border: 1px solid #FF3B3F;
             }
         """)
         self._btn_new_msg.clicked.connect(self._on_new_msg_btn_clicked)
@@ -250,119 +256,104 @@ class HUDChatOverlay(QWidget):
         return super().eventFilter(watched, event)
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        """Direct wheel handler for the chat overlay widget."""
         self._handle_wheel(event)
 
     def _handle_wheel(self, event: QWheelEvent) -> None:
-        """Process wheel / touchpad gestures smoothly."""
         vsb = self._scroll.verticalScrollBar()
         if not vsb:
             return
+        pixel_delta = event.pixelDelta().y()
+        if pixel_delta != 0:
+            step = -pixel_delta
+        else:
+            angle_delta = event.angleDelta().y()
+            step = int(-angle_delta / 120.0 * 60.0) if angle_delta != 0 else 0
+        vsb.setValue(vsb.value() + step)
+        event.accept()
 
-        p_delta = event.pixelDelta().y()
-        a_delta = event.angleDelta().y()
+    def _is_near_bottom(self) -> bool:
+        vsb = self._scroll.verticalScrollBar()
+        if not vsb:
+            return True
+        return (vsb.maximum() - vsb.value()) <= 60
 
-        if p_delta != 0:
-            # Precision trackpad scrolling
-            vsb.setValue(vsb.value() - p_delta)
-            event.accept()
-        elif a_delta != 0:
-            # Standard mouse wheel scrolling (~120 delta units per notch)
-            step = int((a_delta / 120.0) * max(28, vsb.singleStep() * 3))
-            vsb.setValue(vsb.value() - step)
-            event.accept()
+    # ---- Scroll Position Tracking & Jump Button -----------------------------
+
+    def _on_scroll_value_changed(self, value: int) -> None:
+        vsb = self._scroll.verticalScrollBar()
+        if not vsb:
+            return
+        max_val = vsb.maximum()
+        # If user scrolled near bottom, hide jump button
+        if max_val - value <= 40:
+            self._btn_new_msg.hide()
+
+    def _on_new_msg_btn_clicked(self) -> None:
+        self._scroll_to_bottom()
+        self._btn_new_msg.hide()
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
-        self._reposition_new_msg_btn()
-
-    def _reposition_new_msg_btn(self) -> None:
-        if self._btn_new_msg.isVisible():
-            btn_w = self._btn_new_msg.sizeHint().width() + 10
-            btn_h = 28
-            self._btn_new_msg.setGeometry(
-                (self.width() - btn_w) // 2,
-                self.height() - btn_h - 10,
-                btn_w,
-                btn_h,
-            )
-            self._btn_new_msg.raise_()
+        # Position floating button at bottom-center
+        bw = self._btn_new_msg.sizeHint().width() + 10
+        bh = 28
+        bx = (self.width() - bw) // 2
+        by = self.height() - bh - 10
+        self._btn_new_msg.setGeometry(bx, by, bw, bh)
 
     # ---- Public API ---------------------------------------------------------
 
     def add_message(self, role: str, text: str) -> None:
-        """Add a new conversation message, auto-scrolling if already at bottom."""
-        if not text.strip():
-            return
-
-        was_at_bottom = self._is_near_bottom()
-
         self._messages.append((role, text))
-        self._cards.append(_LegacyCard(opacity=1.0))
-        if len(self._cards) > _MAX_CARDS:
-            self._cards.pop(0)
+        bubble = _ChatMessageBubble(role, text, self._theme_colors, self._container)
 
-        n = len(self._cards)
-        for i, c in enumerate(self._cards):
-            c.opacity = 0.3 + 0.7 * ((i + 1) / n)
+        # Update legacy _cards for test compatibility
+        n = min(len(self._messages), _MAX_CARDS)
+        self._cards = []
+        for i in range(n):
+            op = 0.35 + 0.65 * ((i + 1) / n) if n > 1 else 1.0
+            self._cards.append(_LegacyCard(op))
 
-        bubble = _ChatMessageBubble(role=role, text=text, theme_colors=self._theme_colors)
-        bubble.installEventFilter(self)
-        for child in bubble.findChildren(QWidget):
-            child.installEventFilter(self)
+        # Insert before the stretch at the end
+        idx = max(0, self._msg_layout.count() - 1)
+        self._msg_layout.insertWidget(idx, bubble)
 
-        # Insert before stretch item at the end
-        self._msg_layout.insertWidget(self._msg_layout.count() - 1, bubble)
-
-        if was_at_bottom:
-            QTimer.singleShot(20, self._scroll_to_bottom)
-            self._btn_new_msg.hide()
-        else:
-            # User was reading older messages: do NOT disrupt view, show indicator
-            self._btn_new_msg.show()
-            self._reposition_new_msg_btn()
+        # Auto-scroll logic: only auto-scroll if user was already near the bottom
+        vsb = self._scroll.verticalScrollBar()
+        if vsb:
+            was_at_bottom = (vsb.maximum() - vsb.value()) <= 60
+            if was_at_bottom:
+                QTimer.singleShot(50, self._scroll_to_bottom)
+            else:
+                self._btn_new_msg.show()
+                self._btn_new_msg.raise_()
 
     def clear(self) -> None:
-        """Clear conversation history."""
         self._messages.clear()
         self._cards.clear()
-        self._btn_new_msg.hide()
         while self._msg_layout.count() > 1:
             item = self._msg_layout.takeAt(0)
-            if item.widget():
+            if item and item.widget():
                 item.widget().deleteLater()
-
-    def apply_theme(self, theme: "Theme") -> None:
-        """Apply colors from Theme."""
-        c = theme.colors
-        self._theme_colors = {
-            "hud_primary": c.hud_primary,
-            "hud_secondary": c.hud_secondary,
-            "hud_dim": c.hud_dim,
-            "hud_text": c.hud_text,
-            "hud_grid": c.hud_grid,
-        }
-
-    # ---- Internal -----------------------------------------------------------
-
-    def _is_near_bottom(self) -> bool:
-        """Return True if scroll position is within 40px of the bottom."""
-        vsb = self._scroll.verticalScrollBar()
-        if not vsb:
-            return True
-        if vsb.maximum() <= 0:
-            return True
-        return (vsb.maximum() - vsb.value()) <= 40
+        self.update()
 
     def _scroll_to_bottom(self) -> None:
         vsb = self._scroll.verticalScrollBar()
         if vsb:
             vsb.setValue(vsb.maximum())
-            self._btn_new_msg.hide()
 
-    def _on_scroll_value_changed(self, value: int) -> None:
-        if self._is_near_bottom():
-            self._btn_new_msg.hide()
-
-    def _on_new_msg_btn_clicked(self) -> None:
-        self._scroll_to_bottom()
+    def apply_theme(self, theme: "Theme") -> None:
+        c = theme.colors
+        self._theme_colors = {
+            "hud_primary": c.hud_primary,
+            "hud_secondary": c.hud_secondary,
+            "hud_dim": c.hud_dim,
+            "hud_grid": c.bg_secondary,
+            "hud_text": c.text_primary,
+        }
+        for i in range(self._msg_layout.count()):
+            item = self._msg_layout.itemAt(i)
+            if item and item.widget() and isinstance(item.widget(), _ChatMessageBubble):
+                item.widget()._apply_colors(self._theme_colors)
+                item.widget().update()
+        self.update()

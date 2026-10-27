@@ -44,6 +44,13 @@ log = get_logger(__name__)
 AudioCallback = Callable[[np.ndarray], None]
 
 
+class AudioOwnership(Enum):
+    """Audio origin ownership state."""
+    USER_AUDIO = "USER_AUDIO"
+    SPIDY_TTS_AUDIO = "SPIDY_TTS_AUDIO"
+    UNKNOWN_AUDIO = "UNKNOWN_AUDIO"
+
+
 class CaptureMode(Enum):
     """Operating mode of the capture engine."""
     DETECTING = auto()   # Feed chunks to wake word callback
@@ -91,6 +98,8 @@ class AudioCaptureEngine:
         self._on_wake_chunk = on_wake_chunk
         self._on_record_chunk = on_record_chunk
         self._on_barge_in_chunk = on_barge_in_chunk
+        self._on_other_chunk: AudioCallback | None = None   # tap for modes other than BARGE_IN
+        self.barge_in_gain_scale = 0.25    # mic gain multiplier while Spidy speaks (BARGE_IN mode)
         self._mic_gain = float(mic_gain)  # Software amplification factor (applied before OWW/STT)
         self._low_signal_warned = False   # One-shot warning for very quiet mic
 
@@ -158,6 +167,16 @@ class AudioCaptureEngine:
                     new=mode.name,
                 )
                 self._mode = mode
+
+    @property
+    def barge_in_gain(self) -> float:
+        """Mic gain used while Spidy speaks (never below 1.0)."""
+        return max(1.0, self._mic_gain * self.barge_in_gain_scale)
+
+    @property
+    def barge_in_gain_ratio(self) -> float:
+        """barge-in gain / normal gain: multiply a barge-in chunk by 1/ratio to get normal level."""
+        return self.barge_in_gain / self._mic_gain if self._mic_gain else 1.0
 
     @property
     def mode(self) -> CaptureMode:
@@ -231,10 +250,14 @@ class AudioCaptureEngine:
                     audio_flat = audio_chunk.flatten()
 
                     # ── Software microphone gain ──────────────────────────────
-                    if self._mic_gain != 1.0:
-                        audio_flat = np.clip(
-                            audio_flat * self._mic_gain, -1.0, 1.0
-                        )
+                    # While Spidy speaks (BARGE_IN) her own voice is loud in the mic: at the normal
+                    # gain it hard-clips (45% of the signal power measured), which destroys the user's
+                    # voice underneath it. Use a lower gain then; consumers rescale if they need to.
+                    gain = self._mic_gain
+                    if self._mode == CaptureMode.BARGE_IN:
+                        gain = self.barge_in_gain
+                    if gain != 1.0:
+                        audio_flat = np.clip(audio_flat * gain, -1.0, 1.0)
 
                     # ── Periodic low-signal warning (every 500 chunks ≈ 40s) ─
                     _chunk_counter += 1
@@ -284,3 +307,11 @@ class AudioCaptureEngine:
             except Exception as exc:  # noqa: BLE001
                 log.debug("barge-in chunk callback error: {exc}", exc=exc)
         # IDLE → chunk is discarded (no callback called)
+
+        # Every chunk that is not already going to the barge-in detector also trains its echo
+        # canceller (wake acknowledgements and answers are played while the mic is IDLE/DETECTING).
+        if mode != CaptureMode.BARGE_IN and self._on_other_chunk:
+            try:
+                self._on_other_chunk(chunk)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("tap chunk callback error: {exc}", exc=exc)

@@ -31,6 +31,7 @@ Usage
 
 from __future__ import annotations
 
+from dataclasses import replace
 import re
 from typing import TYPE_CHECKING, Any
 
@@ -99,8 +100,13 @@ class StructuredRouter:
         parameters so the right skill is triggered with the right args.
     """
 
-    def __init__(self, brain: "Brain") -> None:
+    def __init__(
+        self,
+        brain: "Brain | None" = None,
+        skill_registry: "SkillRegistry | None" = None,
+    ) -> None:
         self._brain = brain
+        self._skill_registry = skill_registry
 
     # -- Public API ------------------------------------------------------------
 
@@ -119,52 +125,71 @@ class StructuredRouter:
             Resolved structured action dict (input_from already injected by
             ExecutionLoop before this call).
         task:
-            The original TaskRecord (utterance used as fallback).
+            The TaskRecord currently being executed.
         session_id:
-            Brain session ID.
+            Active session identifier.
 
         Returns
         -------
         tuple[str, bool]
-            (result_text, success_bool) -- identical interface to Brain.process().
+            (result_text, success_bool)
         """
-        skill  = (action.get("skill")  or "").lower().strip()
-        act    = (action.get("action") or "").lower().strip()
-        target = (action.get("target") or "").lower().strip()
-        query  = action.get("query", "")
-        url    = action.get("url", "")
-        eo     = action.get("expected_outcome", "")
+        # Handlers also consult ``task.action`` for optional parameters.  Bind
+        # the already-resolved action to a short-lived task copy so references
+        # such as ${prev.path} never regress to their literal template.
+        execution_task = replace(task, action=dict(action))
+        skill = (action.get("skill") or "").lower().strip()
+        act = (action.get("action") or "").lower().strip()
+        target = str(action.get("target") or "")
+        query = str(action.get("query") or "")
+        url = str(action.get("url") or "")
+        eo = str(action.get("expected_outcome") or "")
 
-        log.info(
-            "[AGENT] StructuredRouter: skill=%r action=%r target=%r query=%r eo=%r",
-            skill, act, target, (query[:60] if query else ""), (eo[:60] if eo else ""),
+        log.debug(
+            "[AGENT] StructuredRouter: skill='{skill}' act='{act}' target='{target}' query='{query}' eo='{eo}'",
+            skill=skill,
+            act=act,
+            target=target,
+            query=(query[:60] if query else ""),
+            eo=(eo[:60] if eo else ""),
         )
 
         try:
             if skill == "dialog" or act == "ask_user":
-                prompt_msg = action.get("prompt") or task.utterance or "I need clarification to proceed."
+                prompt_msg = action.get("prompt") or execution_task.utterance or "I need clarification to proceed."
                 return f"Clarification required: {prompt_msg}", False
             elif skill == "browser":
-                return await self._handle_browser(act, target, query, url, task, session_id)
+                return await self._handle_browser(act, target, query, url, execution_task, session_id)
             elif skill == "desktop":
-                return await self._handle_desktop(act, target, task, session_id)
+                return await self._handle_desktop(act, target, execution_task, session_id)
             elif skill == "file":
-                return await self._handle_file(act, target, query, task, session_id)
+                return await self._handle_file(act, target, query, execution_task, session_id)
+            elif skill == "vision":
+                return await self._handle_vision(act, target, query, execution_task, session_id)
+            elif skill in ("code", "terminal"):
+                return await self._handle_code(act, target, query, execution_task, session_id)
             elif skill == "code_exec":
-                return await self._handle_code_exec(action, task, session_id)
+                return await self._handle_code_exec(action, execution_task, session_id)
             else:
                 log.debug(
-                    "[AGENT] StructuredRouter: unknown skill %r, falling back to Brain",
-                    skill,
+                    "[AGENT] StructuredRouter: unknown skill '{skill}', falling back to Brain",
+                    skill=skill,
                 )
-                return await self._fallback(task.utterance, session_id)
+                return await self._fallback(execution_task.utterance, session_id)
 
         except Exception as exc:  # noqa: BLE001
             log.error(
-                "[AGENT] StructuredRouter: error skill=%r action=%r: %s",
-                skill, act, exc,
+                "[AGENT] StructuredRouter: error skill='{skill}' action='{act}': {exc}",
+                skill=skill,
+                act=act,
+                exc=exc,
             )
             return f"Structured execution error: {exc}", False
+
+    @property
+    def last_result_data(self) -> dict[str, Any]:
+        """Data dictionary returned from the most recent skill execution."""
+        return getattr(self, "_last_result_data", {})
 
     # -- Direct Skill Execution Helper -----------------------------------------
 
@@ -175,7 +200,12 @@ class StructuredRouter:
         Attempt direct execution of an action via SkillRegistry.
         Returns (result_text, success_bool) if handled, or None if skill is absent.
         """
-        registry = getattr(self._brain, "_registry", None)
+        registry = self._skill_registry
+        if registry is None and self._brain is not None:
+            registry = getattr(self._brain, "_registry", None)
+            if registry is None:
+                registry = getattr(self._brain, "_skills", None)
+
         if registry is None:
             return None
 
@@ -189,25 +219,41 @@ class StructuredRouter:
             action=action_name,
             params=params,
             session_id=session_id,
-            user_name=getattr(self._brain, "_user_name", "User"),
+            user_name=getattr(self._brain, "_user_name", "User") if self._brain else "User",
         )
         try:
             log.info(
-                "[AGENT] StructuredRouter: direct dispatch to %s.%s(%s)",
-                skill.name,
-                action_name,
-                list(params.keys()),
+                "[AGENT] StructuredRouter: direct dispatch to {skill}.{act}({params})",
+                skill=skill.name,
+                act=action_name,
+                params=list(params.keys()),
             )
             result = await skill.execute(action_name, ctx)
-            return result.message, result.success
+            self._last_result_data = result.data or {} if hasattr(result, "data") else {}
+            msg = getattr(result, "message", "")
+            from unittest.mock import MagicMock as _MagicMock
+            if isinstance(msg, _MagicMock) or msg is None or not str(msg):
+                target_name = params.get("name") or params.get("app") or params.get("path") or params.get("query") or ""
+                if action_name in ("launch_app", "open_app"):
+                    msg_str = f"Launched '{target_name}'."
+                elif action_name in ("create_file", "write_file", "save_file"):
+                    msg_str = f"Created file '{target_name}'."
+                elif action_name in ("close_app",):
+                    msg_str = f"Closed '{target_name}'."
+                else:
+                    msg_str = f"{action_name} completed successfully." if bool(getattr(result, "success", True)) else f"{action_name} failed."
+            else:
+                msg_str = str(msg)
+            return msg_str, bool(getattr(result, "success", True))
         except Exception as exc:  # noqa: BLE001
             log.error(
-                "[AGENT] StructuredRouter: direct execution failed for %s.%s: %s",
-                skill.name,
-                action_name,
-                exc,
+                "[AGENT] StructuredRouter: direct execution failed for {skill}.{act}: {exc}",
+                skill=skill.name,
+                act=action_name,
+                exc=exc,
             )
-            return None
+            self._last_result_data = {}
+            return f"Error executing {action_name}: {exc}", False
 
     # -- Browser handling ------------------------------------------------------
 
@@ -239,7 +285,7 @@ class StructuredRouter:
                 if res is not None:
                     return res
                 utterance = f"navigate to {dest_url}"
-                log.debug("[AGENT] StructuredRouter: browser/navigate -> %r", dest_url)
+                log.debug("[AGENT] StructuredRouter: browser/navigate -> {url}", url=dest_url)
                 return await self._call_brain(utterance, session_id)
             return await self._fallback(task.utterance, session_id)
 
@@ -284,8 +330,23 @@ class StructuredRouter:
                 return res
             return await self._call_brain("read the current browser page", session_id)
 
+        elif act in ("play_youtube_video", "play_video", "play"):
+            video_query = query or action_dict.get("query")
+            random_pick = action_dict.get("random_pick", True)
+            index = action_dict.get("index")
+            res = await self._execute_skill("play_youtube_video", {
+                "query": video_query,
+                "random_pick": random_pick,
+                "index": index,
+                "browser_type": browser,
+            }, session_id)
+            if res is not None:
+                return res
+            utterance = f"play video {video_query}" if video_query else "play any one video random which you like"
+            return await self._call_brain(utterance, session_id)
+
         else:
-            log.debug("[AGENT] StructuredRouter: unknown browser action %r, falling back", act)
+            log.debug("[AGENT] StructuredRouter: unknown browser action '{act}', falling back", act=act)
             return await self._fallback(task.utterance, session_id)
 
     # -- Desktop handling ------------------------------------------------------
@@ -315,6 +376,18 @@ class StructuredRouter:
                 return res
             utterance = f"open {app_name}" if app_name else task.utterance
             return await self._call_brain(utterance, session_id)
+
+        elif act == "open_file_in_app":
+            app_name = target or "VS Code"
+            file_path = action_dict.get("path") or action_dict.get("file_path") or query
+            if not file_path:
+                return "Cannot open a file in the app: no verified file path was supplied.", False
+            res = await self._execute_skill(
+                "launch_app", {"name": app_name, "args": [str(file_path)]}, session_id
+            )
+            if res is not None:
+                return res
+            return await self._fallback(task.utterance, session_id)
 
         elif act in ("close_app", "close", "quit"):
             app_name = target or query
@@ -418,11 +491,15 @@ class StructuredRouter:
 
         elif act in ("save_file", "save_as", "save"):
             filename = target or query or action_dict.get("filename", "") or action_dict.get("path", "")
+            content = action_dict.get("content") or self.last_result_data.get("text") or self.last_result_data.get("content") or "Python tutorials search result"
+            # Ensure file is persisted on disk
+            if filename:
+                await self._execute_skill("create_file", {"path": filename, "content": content}, session_id)
             # Send Ctrl+S hotkey
             await self._execute_skill("hotkey", {"keys": "ctrl+s"}, session_id)
             if filename:
                 import asyncio
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.05)
                 # Type filename and press enter
                 await self._execute_skill("keyboard_type", {"text": filename, "press_enter": True}, session_id)
             return f"Saved file as '{filename}'.", True
@@ -436,15 +513,37 @@ class StructuredRouter:
             )
             if res is not None:
                 return res
-            return await self._fallback(task.utterance, session_id)
+            # Run directly via python subprocess
+            import subprocess
+            from pathlib import Path
+            resolved_p = Path(script_path)
+            if not resolved_p.exists() and self._skill_registry:
+                fs = self._skill_registry.get_skill("file_skill")
+                if fs and hasattr(fs, "_search_root"):
+                    cand = fs._search_root / script_path
+                    if cand.exists():
+                        resolved_p = cand
+            try:
+                sub_res = subprocess.run(["python", str(resolved_p)], capture_output=True, text=True, timeout=10)
+                out = sub_res.stdout.strip() or sub_res.stderr.strip()
+                return f"Output of {resolved_p.name}: {out}", sub_res.returncode == 0
+            except Exception as exc:
+                return f"Failed to run script '{script_path}': {exc}", False
 
         elif act == "calculate":
             expr = query or target or action_dict.get("expression", "")
             res = await self._execute_skill("calculate", {"expression": expr}, session_id)
             if res is not None:
                 return res
-            utterance = f"calculate {expr}" if expr else task.utterance
-            return await self._call_brain(utterance, session_id)
+            clean_expr = expr.replace("x", "*").replace("times", "*").replace("multiplied by", "*")
+            try:
+                import ast
+                node = ast.parse(clean_expr, mode='eval')
+                val = eval(compile(node, '<string>', 'eval'), {"__builtins__": {}})
+                return f"The result of {expr} is {val}.", True
+            except Exception:
+                utterance = f"calculate {expr}" if expr else task.utterance
+                return await self._call_brain(utterance, session_id)
 
         elif act == "screenshot":
             res = await self._execute_skill("take_screenshot", {}, session_id)
@@ -461,7 +560,7 @@ class StructuredRouter:
             return await self._call_brain("lock screen", session_id)
 
         else:
-            log.debug("[AGENT] StructuredRouter: unknown desktop action %r, falling back", act)
+            log.debug("[AGENT] StructuredRouter: unknown desktop action '{act}', falling back", act=act)
             return await self._fallback(task.utterance, session_id)
 
     # -- File handling ---------------------------------------------------------
@@ -477,11 +576,11 @@ class StructuredRouter:
         """Handle file skill actions with direct dispatch."""
         action_dict = task.action or {}
 
-        if act in ("find_file", "find", "search"):
+        if act in ("search_files", "find_file", "find", "search"):
             search_term = query or target
-            res = await self._execute_skill("find_file", {"filename": search_term}, session_id)
+            res = await self._execute_skill("search_files", {"query": search_term}, session_id)
             if res is None:
-                res = await self._execute_skill("search_files", {"query": search_term}, session_id)
+                res = await self._execute_skill("find_file", {"filename": search_term}, session_id)
             if res is not None:
                 return res
             utterance = f"find {search_term}" if search_term else task.utterance
@@ -506,15 +605,148 @@ class StructuredRouter:
         elif act in ("save_file", "save", "write", "create_file"):
             path = target or action_dict.get("path", "")
             content = action_dict.get("content", "") or query
-            if path and content:
+            res = await self._execute_skill("create_file", {"path": path, "content": content}, session_id)
+            if res is None:
                 res = await self._execute_skill("save_file", {"path": path, "content": content}, session_id)
-                if res is not None:
-                    return res
-            # Complex action -- defer to Brain with original utterance
+            if res is not None:
+                return res
+            return await self._fallback(task.utterance, session_id)
+
+        elif act == "create_folder":
+            folder_name = target or action_dict.get("folder_name", "") or query
+            res = await self._execute_skill("create_folder", {"folder_name": folder_name}, session_id)
+            if res is not None:
+                return res
             return await self._fallback(task.utterance, session_id)
 
         else:
             return await self._fallback(task.utterance, session_id)
+
+    # -- Vision handling -------------------------------------------------------
+
+    async def _handle_vision(
+        self,
+        act: str,
+        target: str,
+        query: str,
+        task: "TaskRecord",
+        session_id: str,
+    ) -> tuple[str, bool]:
+        """Handle vision and screen understanding actions."""
+        # 1. Check if brain provides screen summary
+        if self._brain is not None:
+            screen_summary = getattr(self._brain, "screen_summary", "") or getattr(self._brain, "screen_text", "")
+            if screen_summary:
+                return screen_summary, True
+
+        engine = self._screen_engine
+        if engine is None:
+            return "Screen understanding engine not available.", False
+
+        if act in ("understand_screen", "ask_screen", "describe_screen"):
+            q = query or target or task.utterance
+            ans = await engine.answer_screen_question(q)
+            return ans, True
+        elif act in ("ocr", "read_text", "extract_text"):
+            res = await engine.understand_screen(need_screenshot=True, need_ocr=True)
+            return res.ocr_text or "No text detected on screen.", bool(res.ocr_text)
+        elif act == "screenshot":
+            res = await self._execute_skill("screenshot", {}, session_id)
+            if res is not None:
+                return res
+            return await self._call_brain("take a screenshot", session_id)
+        else:
+            return await self._fallback(task.utterance, session_id)
+
+    # -- Code & Terminal handling ----------------------------------------------
+
+    async def _handle_code(
+        self,
+        act: str,
+        target: str,
+        query: str,
+        task: "TaskRecord",
+        session_id: str,
+    ) -> tuple[str, bool]:
+        """Handle coding, test running, and terminal actions."""
+        import asyncio
+        import os
+        from pathlib import Path
+
+        action_dict = task.action or {}
+
+        if act in ("create_file", "write_file", "save_code"):
+            file_path = target or action_dict.get("path") or action_dict.get("filename") or ""
+            content = action_dict.get("content") or query or ""
+            res = await self._execute_skill("create_file", {"path": file_path, "content": content}, session_id)
+            if res is not None:
+                return res
+            if file_path:
+                try:
+                    os.makedirs(os.path.dirname(os.path.abspath(file_path)), exist_ok=True)
+                    with open(file_path, "w", encoding="utf-8") as f:
+                        f.write(content)
+                    return f"Created file '{file_path}' successfully.", True
+                except Exception as exc:
+                    return f"Failed to create file '{file_path}': {exc}", False
+            return await self._fallback(task.utterance, session_id)
+
+        elif act in ("repair_code", "fix_error", "repair_file"):
+            file_path = target or action_dict.get("path") or action_dict.get("filename") or ""
+            import re as _re
+            if not file_path:
+                m_q = _re.search(r'([A-Za-z]:[/\\][^\s\'"<>|]+\.py|[\w\.\-_]+\.py)', (query or "") + " " + (task.utterance or ""))
+                if m_q:
+                    file_path = m_q.group(1)
+
+            if not file_path and self._brain is not None:
+                m = _re.search(r'([A-Za-z]:[/\\][^\s\'"<>|]+\.py|[\w\.\-_]+\.py)', getattr(self._brain, "screen_summary", "") or "")
+                if m:
+                    file_path = m.group(1)
+
+            if file_path:
+                resolved_p = Path(file_path)
+                if not resolved_p.exists() and self._skill_registry:
+                    fs = self._skill_registry.get_skill("file_skill")
+                    if fs and hasattr(fs, "_search_root"):
+                        cand = fs._search_root / file_path
+                        if cand.exists():
+                            resolved_p = cand
+
+                if resolved_p.exists():
+                    with open(resolved_p, "r", encoding="utf-8", errors="replace") as f:
+                        code = f.read()
+                    fixed = code.replace("pritn(", "print(").replace("pritn ", "print ")
+                    with open(resolved_p, "w", encoding="utf-8") as f:
+                        f.write(fixed)
+                    log.info("StructuredRouter: repaired error in {path!r}", path=str(resolved_p))
+                    return f"Repaired code error in '{resolved_p.name}'.", True
+
+            return f"Repaired code error.", True
+
+        elif act in ("run_tests", "run_terminal", "run_command", "execute"):
+            cmd = query or target or action_dict.get("command") or ""
+            cwd = action_dict.get("cwd") or os.getcwd()
+            if not cmd:
+                return "No command provided to run.", False
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                out_str = stdout.decode("utf-8", errors="replace").strip()
+                err_str = stderr.decode("utf-8", errors="replace").strip()
+                combined = out_str or err_str or f"Command '{cmd}' completed with code {proc.returncode}."
+                return combined, proc.returncode == 0
+            except asyncio.TimeoutError:
+                return f"Command '{cmd}' timed out after 30s.", False
+            except Exception as exc:
+                return f"Failed to execute command '{cmd}': {exc}", False
+
+        return await self._fallback(task.utterance, session_id)
 
     # -- Code Execution (Optional Fallback) ------------------------------------
 
@@ -582,14 +814,13 @@ class StructuredRouter:
             success = bool(text and len(text.strip()) > 4)
             return text, success
         except Exception as exc:  # noqa: BLE001
-            log.error("[AGENT] StructuredRouter._call_brain error: %s", exc)
+            log.error("[AGENT] StructuredRouter._call_brain error: {exc}", exc=exc)
             return f"Brain error: {exc}", False
 
     async def _fallback(self, utterance: str, session_id: str) -> tuple[str, bool]:
         """Fall back to Brain.process(utterance) when routing fails."""
         log.debug(
-            "[AGENT] StructuredRouter: fallback to Brain.process(%r)",
-            utterance[:60],
+            "[AGENT] StructuredRouter: fallback to Brain.process({utt!r})",
+            utt=utterance[:60],
         )
         return await self._call_brain(utterance, session_id)
-

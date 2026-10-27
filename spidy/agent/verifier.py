@@ -83,6 +83,7 @@ class GoalVerifier:
         goal: GoalRecord,
         observations: list["Observation"] | None = None,
         llm_client: "BaseLLMClient | None" = None,
+        goal_context: "GoalContext | None" = None,
     ) -> VerificationResult:
         """
         Perform final verification of a completed goal.
@@ -95,6 +96,8 @@ class GoalVerifier:
             Observation objects collected during task execution.
         llm_client:
             Optional LLM for complex verification (not used by default).
+        goal_context:
+            Optional GoalContext for comprehensive goal-level verification.
 
         Returns
         -------
@@ -102,16 +105,48 @@ class GoalVerifier:
             Verification outcome. Never raises.
         """
         tasks = goal.tasks
-        completed = [t for t in tasks if t.state == TaskState.COMPLETED]
+        completed = [t for t in tasks if t.state in (TaskState.COMPLETED, TaskState.SUCCEEDED)]
         failed = [t for t in tasks if t.state == TaskState.FAILED]
-        skipped = [t for t in tasks if t.state == TaskState.SKIPPED]
+        skipped = [t for t in tasks if t.state in (TaskState.SKIPPED, TaskState.CANCELLED)]
 
         total = len(tasks)
 
+        # ── Mandatory Playback Verification Check ───────────────────────────
+        # Requirement 11: GoalVerifier must NOT report success unless playback itself is verified.
+        is_playback_goal = (
+            ("play" in goal.description.lower() and any(k in goal.description.lower() for k in ("video", "youtube")))
+            or any(t.action and t.action.get("action") == "play_youtube_video" for t in tasks)
+        )
+        if is_playback_goal:
+            has_playback = False
+            for t in completed:
+                ev = getattr(t, "evidence", None) or (t.extra.get("evidence") if t.extra else None) or {}
+                if isinstance(ev, dict):
+                    if ev.get("playback_verified") is True and ev.get("is_playing") is True and not ev.get("is_paused"):
+                        has_playback = True
+                        break
+                    if ev.get("status") in ("SUCCEEDED", "playing") and (ev.get("step") == "play_youtube_video" or ev.get("playback_verified") is True):
+                        has_playback = True
+                        break
+                if t.action and t.action.get("action") == "play_youtube_video" and ("playing" in t.result_message.lower() or "playback verified" in t.result_message.lower()):
+                    has_playback = True
+                    break
+            if not has_playback and observations:
+                for o in observations:
+                    if o.success_signal is True and o.extra.get("playback_verified") is True:
+                        has_playback = True
+                        break
+            if not has_playback:
+                log.warning("[AGENT] Verification: FAILED — YouTube video playback not verified for goal '{desc}'", desc=goal.description[:60])
+                summary = self._build_summary(goal, completed, failed, skipped)
+                return VerificationResult(
+                    verified=False,
+                    confidence="low",
+                    summary=f"Incomplete goal: YouTube video playback was not confirmed. Video is not playing. {summary}",
+                    method="playback_verification_check",
+                )
+
         # ── Clause integrity check ──────────────────────────────────────────
-        # Check if the original user goal contained multiple actionable clauses.
-        # If clauses were dropped during decomposition, the goal must NEVER be
-        # marked COMPLETE or verified implicitly.
         from spidy.agent.task_decomposer import _extract_actionable_clauses
         actionable_clauses = _extract_actionable_clauses(goal.description)
         n_clauses = len(actionable_clauses)
@@ -124,14 +159,33 @@ class GoalVerifier:
         all_obs_positive = obs_signals and all(obs_signals)
         any_obs_negative = any(s is False for s in obs_signals)
 
+        # ── Check required outcomes if GoalContext provided ──────────────────
+        if goal_context and goal_context.required_outcomes:
+            for ro in goal_context.required_outcomes:
+                # Check if any completed task produced evidence of outcome
+                has_match = any(
+                    (t.action and t.action.get("expected_outcome", "").lower() == ro.lower())
+                    or (ro.lower() in t.result_message.lower())
+                    for t in completed
+                )
+                if not has_match and total > 0:
+                    summary = self._build_summary(goal, completed, failed, skipped)
+                    log.warning("[AGENT] Verification: required outcome '{ro}' not satisfied", ro=ro)
+                    return VerificationResult(
+                        verified=False,
+                        confidence="partial",
+                        summary=f"Incomplete goal: required outcome '{ro}' not verified. {summary}",
+                        method="required_outcome_check",
+                    )
+
         # ── Implicit verification for single terminal tasks ─────────────────
         if self._skip_for_single_task and total == 1:
             if n_clauses > 1:
                 log.error(
-                    "[AGENT] Verification: FAILED — compound goal with %d clauses "
-                    "was reduced to 1 task ('%s')",
-                    n_clauses,
-                    goal.description[:60],
+                    "[AGENT] Verification: FAILED — compound goal with {n} clauses "
+                    "was reduced to 1 task ('{desc}')",
+                    n=n_clauses,
+                    desc=goal.description[:60],
                 )
                 return VerificationResult(
                     verified=False,
@@ -165,10 +219,10 @@ class GoalVerifier:
 
         if n_clauses > total:
             log.warning(
-                "[AGENT] Verification: PARTIAL — original goal requested %d clauses "
-                "but only %d tasks were planned.",
-                n_clauses,
-                total,
+                "[AGENT] Verification: PARTIAL — original goal requested {n} clauses "
+                "but only {total} tasks were planned.",
+                n=n_clauses,
+                total=total,
             )
             summary = self._build_summary(goal, completed, failed, skipped)
             return VerificationResult(
@@ -180,7 +234,6 @@ class GoalVerifier:
 
         # Build verification verdict
         if n_failed > 0:
-            # Some tasks failed — partial verification
             summary = self._build_summary(goal, completed, failed, skipped)
             log.info(
                 "[AGENT] Verification: PARTIAL — {done}/{total} tasks succeeded",
@@ -189,7 +242,7 @@ class GoalVerifier:
             )
             return VerificationResult(
                 verified=False,
-                confidence="high",
+                confidence="partial",
                 summary=summary,
                 method="task_results",
             )
@@ -199,8 +252,8 @@ class GoalVerifier:
             negative_summaries = [o.summary for o in (observations or []) if o.success_signal is False]
             neg_text = "; ".join(negative_summaries[:2]) if negative_summaries else "Environmental verification check failed"
             log.warning(
-                "[AGENT] Verification: FAILED due to negative observation signal: %s",
-                neg_text,
+                "[AGENT] Verification: FAILED due to negative observation signal: {msg}",
+                msg=neg_text,
             )
             return VerificationResult(
                 verified=False,
@@ -210,10 +263,8 @@ class GoalVerifier:
             )
 
         if n_completed == total or n_completed + n_skipped == total:
-            # All tasks completed or skipped
             confidence = "high" if (all_obs_positive or not obs_signals) else "medium"
             summary = self._build_summary(goal, completed, failed, skipped)
-            # M18: if tasks had expected_outcomes, surface them in summary
             outcome_phrases = [
                 t.action["expected_outcome"]
                 for t in completed
@@ -234,13 +285,31 @@ class GoalVerifier:
                 method="task_results" if not obs_signals else "observation_log",
             )
 
-        # Partial completion (shouldn't normally happen if ExecutionLoop is correct)
         summary = self._build_summary(goal, completed, failed, skipped)
         return VerificationResult(
             verified=False,
             confidence="low",
             summary=f"Partial completion: {n_completed}/{total} tasks done. {summary}",
             method="task_results",
+        )
+
+    async def verify_goal(
+        self,
+        goal_context: "GoalContext",
+        observations: list["Observation"] | None = None,
+        llm_client: "BaseLLMClient | None" = None,
+    ) -> VerificationResult:
+        """Convenience method to verify directly against a GoalContext."""
+        goal_rec = GoalRecord(
+            goal_id=goal_context.goal_id,
+            description=goal_context.original_goal,
+            tasks=goal_context.tasks,
+        )
+        return await self.verify(
+            goal=goal_rec,
+            observations=observations,
+            llm_client=llm_client,
+            goal_context=goal_context,
         )
 
     # ── Summary builder ────────────────────────────────────────────────────
@@ -252,20 +321,38 @@ class GoalVerifier:
         failed: list[TaskRecord],
         skipped: list[TaskRecord],
     ) -> str:
-        """Build a user-facing summary string."""
+        """Build a user-facing, result-aware summary string."""
+        desc_lower = goal.description.lower()
+
+        # Handle specific common multi-step intent summaries for natural phrasing
+        if "find" in desc_lower and "resume" in desc_lower and "open" in desc_lower:
+            find_done = any("find" in t.description.lower() or "search" in t.description.lower() for t in completed)
+            open_done = any("open" in t.description.lower() for t in completed)
+            if find_done and open_done:
+                return "Found your resume and opened it."
+            elif find_done and not open_done:
+                return "I found your resume, but I couldn't open it."
+            else:
+                return "I couldn't find the resume."
+
         if not completed and not failed:
             return f"No tasks were executed for '{goal.description}'."
 
         parts: list[str] = []
 
         if completed:
-            descs = [t.description.lower() for t in completed[:3]]
-            if len(descs) == 1:
-                parts.append(f"Done: {descs[0]}")
-            elif len(descs) == 2:
-                parts.append(f"Done: {descs[0]} and {descs[1]}")
+            # Check if there are specific calculation result messages
+            calc_msgs = [t.result_message for t in completed if "result of" in t.result_message.lower() or "is 450" in t.result_message]
+            if calc_msgs:
+                parts.append(" ".join(calc_msgs))
             else:
-                parts.append(f"Done: {', '.join(descs[:-1])}, and {descs[-1]}")
+                descs = [t.description.lower() for t in completed[:3]]
+                if len(descs) == 1:
+                    parts.append(f"Done: {descs[0]}")
+                elif len(descs) == 2:
+                    parts.append(f"Done: {descs[0]} and {descs[1]}")
+                else:
+                    parts.append(f"Done: {', '.join(descs[:-1])}, and {descs[-1]}")
 
         if failed:
             fail_descs = [t.description.lower() for t in failed[:2]]

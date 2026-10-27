@@ -28,9 +28,11 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from typing import Any
+from urllib.parse import quote_plus, urlparse
 
 from spidy.browser.backends.base import BrowserBackend
 from spidy.browser.types import (
@@ -620,6 +622,330 @@ class PlaywrightBackend(BrowserBackend):
         except Exception as exc:  # noqa: BLE001
             log.debug("get_browser_history failed: {exc}", exc=exc)
             return []
+
+    # ── YouTube Media Actions ─────────────────────────────────────────────
+
+    async def get_youtube_video_results(self) -> list[dict[str, str]]:
+        """
+        Inspect current page and discover available YouTube video results.
+        """
+        page = await self._get_or_heal_page()
+        try:
+            # Wait briefly if page is still rendering items
+            eval_script = """
+            () => {
+                const selectors = [
+                    'ytd-video-renderer a#video-title',
+                    'ytd-rich-item-renderer a#video-title-link',
+                    'a#video-title',
+                    'ytd-video-renderer a[href*="/watch?v="]',
+                    'a[href*="/watch?v="]'
+                ];
+                const found = [];
+                const seen = new Set();
+                for (const sel of selectors) {
+                    const elements = document.querySelectorAll(sel);
+                    for (const el of elements) {
+                        const rawHref = el.getAttribute('href') || el.href || '';
+                        const title = (el.getAttribute('title') || el.innerText || el.textContent || '').trim();
+                        if (!rawHref.includes('/watch?v=')) continue;
+                        if (rawHref.includes('&list=') || rawHref.includes('/shorts/')) continue;
+                        const cleanHref = rawHref.startsWith('http') ? rawHref : 'https://www.youtube.com' + rawHref;
+                        const videoId = (cleanHref.split('v=')[1] || '').split('&')[0];
+                        if (videoId && !seen.has(videoId) && title.length > 0) {
+                            seen.add(videoId);
+                            found.push({
+                                title: title.replace(/\\s+/g, ' '),
+                                url: cleanHref,
+                                video_id: videoId
+                            });
+                        }
+                    }
+                }
+                return found;
+            }
+            """
+            results = await page.evaluate(eval_script)
+            if not results:
+                # Try waiting for selector if initial evaluate was too quick
+                try:
+                    await page.wait_for_selector('a#video-title, ytd-video-renderer', timeout=3000)
+                    results = await page.evaluate(eval_script)
+                except Exception:
+                    pass
+            return results or []
+        except Exception as exc:  # noqa: BLE001
+            log.warning("get_youtube_video_results error: {exc}", exc=exc)
+            return []
+
+    async def _inspect_youtube_player(self, page: "Page") -> dict[str, Any]:
+        """Inspect HTML5 video player and YouTube player API state."""
+        try:
+            script = """
+            () => {
+                const video = document.querySelector('video.html5-main-video') || document.querySelector('video');
+                const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                const errorElem = document.querySelector('.ytp-error, ytd-player-error-message-renderer, #error-screen');
+                const isError = Boolean(errorElem && (errorElem.offsetParent !== null || errorElem.textContent.trim().length > 0));
+
+                let playerState = null;
+                if (player && typeof player.getPlayerState === 'function') {
+                    try { playerState = player.getPlayerState(); } catch (e) {}
+                }
+
+                if (!video) {
+                    return {
+                        has_video: false,
+                        has_player: Boolean(player),
+                        is_unavailable: isError,
+                        unavailable_reason: isError ? 'Error banner detected' : 'No video element found',
+                        playerState: playerState,
+                        paused: true,
+                        currentTime: 0.0,
+                        duration: 0.0,
+                    };
+                }
+
+                const duration = video.duration || 0;
+                const isUnavailable = isError || (isNaN(duration) && playerState === -1);
+
+                return {
+                    has_video: true,
+                    has_player: Boolean(player),
+                    paused: Boolean(video.paused),
+                    currentTime: video.currentTime || 0.0,
+                    duration: isNaN(duration) ? 0.0 : duration,
+                    readyState: video.readyState,
+                    playerState: playerState,
+                    is_unavailable: isUnavailable,
+                    unavailable_reason: isUnavailable ? 'Video unavailable or playback error' : '',
+                };
+            }
+            """
+            return await page.evaluate(script)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("_inspect_youtube_player error: {exc}", exc=exc)
+            return {"has_video": False, "paused": True, "currentTime": 0.0, "is_unavailable": False}
+
+    async def _trigger_youtube_play(self, page: "Page") -> str:
+        """Attempt to trigger playback if autoplay was blocked."""
+        try:
+            script = """
+            async () => {
+                // 1. Try clicking YouTube play button element
+                const playBtn = document.querySelector('.ytp-play-button, .ytp-large-play-button');
+                if (playBtn) {
+                    try { playBtn.click(); return 'clicked_play_button'; } catch (e) {}
+                }
+                // 2. Try player API
+                const player = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                if (player && typeof player.playVideo === 'function') {
+                    try { player.playVideo(); return 'called_player_playVideo'; } catch (e) {}
+                }
+                // 3. Try HTML5 video element directly
+                const video = document.querySelector('video.html5-main-video') || document.querySelector('video');
+                if (video) {
+                    try {
+                        await video.play();
+                        return 'called_video_play';
+                    } catch (e) {
+                        video.click();
+                        return 'clicked_video';
+                    }
+                }
+                return 'no_play_trigger_found';
+            }
+            """
+            return await page.evaluate(script)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("_trigger_youtube_play error: {exc}", exc=exc)
+            return f"error: {exc}"
+
+    async def play_youtube_video(
+        self,
+        query: str | None = None,
+        video_index: int | None = None,
+        select_mode: str = "random",
+        max_retries: int = 3,
+    ) -> dict[str, Any]:
+        """
+        Play a YouTube video from search results, handle autoplay, verify progression,
+        and retry with a different video if needed.
+        """
+        page = await self._get_or_heal_page()
+
+        # Step 1: Ensure we are on YouTube search results if query is provided or needed
+        curr_url = page.url or ""
+        if "youtube.com/results" not in curr_url:
+            target_q = query or "Python programming"
+            search_url = f"https://www.youtube.com/results?search_query={quote_plus(target_q)}"
+            log.info("play_youtube_video: navigating to YouTube search results: '{url}'", url=search_url)
+            await page.goto(search_url, wait_until="domcontentloaded", timeout=self._page_load_timeout)
+            await asyncio.sleep(2.0)
+
+        search_page_url = page.url
+
+        # Step 2: Discover candidate videos
+        candidates = await self.get_youtube_video_results()
+        if not candidates:
+            # Re-attempt with a short wait
+            await asyncio.sleep(2.0)
+            candidates = await self.get_youtube_video_results()
+
+        if not candidates:
+            return {
+                "status": "FAILED",
+                "step": "play_youtube_video",
+                "evidence_type": "browser_state",
+                "evidence": f"No video results found on YouTube page ({page.url})",
+                "confidence": "low",
+                "success": False,
+                "error": "No video results found on YouTube search page",
+                "playback_verified": False,
+            }
+
+        log.info("play_youtube_video: discovered {n} video candidates", n=len(candidates))
+
+        attempted_urls: set[str] = set()
+
+        for attempt in range(1, max_retries + 1):
+            available = [c for c in candidates if c["url"] not in attempted_urls]
+            if not available:
+                log.warning("play_youtube_video: no more unattempted videos available")
+                break
+
+            if video_index is not None and 0 <= video_index < len(candidates) and candidates[video_index]["url"] not in attempted_urls:
+                chosen = candidates[video_index]
+            elif select_mode == "random":
+                chosen = random.choice(available)
+            else:
+                chosen = available[0]
+
+            attempted_urls.add(chosen["url"])
+            log.info(
+                "play_youtube_video: attempt {a}/{m}: opening '{title}' ({url})",
+                a=attempt,
+                m=max_retries,
+                title=chosen["title"][:50],
+                url=chosen["url"],
+            )
+
+            try:
+                await page.goto(chosen["url"], wait_until="domcontentloaded", timeout=self._page_load_timeout)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("play_youtube_video: failed to navigate to '{url}': {exc}", url=chosen["url"], exc=exc)
+                continue
+
+            # Wait for player/video to appear
+            try:
+                await page.wait_for_selector("video, #movie_player", timeout=8000)
+            except Exception:
+                pass
+
+            await asyncio.sleep(1.5)
+
+            # Inspect state
+            state = await self._inspect_youtube_player(page)
+
+            # If video is unavailable, classify failure and return to search
+            if state.get("is_unavailable"):
+                reason = state.get("unavailable_reason") or "Video unavailable"
+                log.warning(
+                    "play_youtube_video: video '{t}' failed availability check: {r}. Retrying another result...",
+                    t=chosen["title"][:40],
+                    r=reason,
+                )
+                if attempt < max_retries:
+                    try:
+                        await page.goto(search_page_url, wait_until="domcontentloaded", timeout=self._page_load_timeout)
+                        await asyncio.sleep(1.5)
+                    except Exception:
+                        pass
+                continue
+
+            # If paused or currentTime is 0, handle blocked autoplay
+            if state.get("paused") or state.get("currentTime", 0.0) == 0.0:
+                log.info("play_youtube_video: autoplay appears blocked. Triggering play...")
+                trigger_res = await self._trigger_youtube_play(page)
+                log.debug("play_youtube_video: play trigger result: {tr}", tr=trigger_res)
+                await asyncio.sleep(1.5)
+                state = await self._inspect_youtube_player(page)
+
+            t0 = state.get("currentTime", 0.0)
+
+            # Observation pause: wait 1.5s to verify playback progress
+            await asyncio.sleep(1.5)
+            state_after = await self._inspect_youtube_player(page)
+            t1 = state_after.get("currentTime", 0.0)
+
+            curr_page_url = page.url
+            try:
+                curr_page_title = await page.title()
+            except Exception:
+                curr_page_title = ""
+
+            url_valid = "/watch?v=" in curr_page_url
+            has_player = bool(state_after.get("has_video") or state_after.get("has_player"))
+            not_paused = not state_after.get("paused", True)
+            time_progressed = (t1 > t0 + 0.2) or (t1 > 0.4)
+            player_state = state_after.get("playerState")
+
+            # Verification requires watch URL + player presence + progression or playing state
+            playback_verified = url_valid and has_player and (time_progressed or (not_paused and t1 > 0.0) or player_state == 1)
+
+            if playback_verified:
+                evidence_str = (
+                    f"YouTube watch page loaded ({curr_page_url}) and player currentTime "
+                    f"increased from {t0:.2f}s to {t1:.2f}s"
+                )
+                log.info("play_youtube_video: playback confirmed! {ev}", ev=evidence_str)
+                return {
+                    "status": "SUCCEEDED",
+                    "step": "play_youtube_video",
+                    "evidence_type": "browser_state",
+                    "evidence": evidence_str,
+                    "confidence": "high",
+                    "success": True,
+                    "video_title": chosen["title"],
+                    "video_url": curr_page_url,
+                    "initial_time": t0,
+                    "current_time": t1,
+                    "duration": state_after.get("duration", 0.0),
+                    "paused": state_after.get("paused", False),
+                    "player_state": player_state,
+                    "attempts": attempt,
+                    "page_title": curr_page_title,
+                    "playback_verified": True,
+                }
+            else:
+                log.warning(
+                    "play_youtube_video: playback verification failed on attempt {a} "
+                    "(t0={t0:.2f}, t1={t1:.2f}, paused={p}, state={ps})",
+                    a=attempt,
+                    t0=t0,
+                    t1=t1,
+                    p=state_after.get("paused"),
+                    ps=player_state,
+                )
+                if attempt < max_retries:
+                    try:
+                        await page.goto(search_page_url, wait_until="domcontentloaded", timeout=self._page_load_timeout)
+                        await asyncio.sleep(1.5)
+                    except Exception:
+                        pass
+
+        # All retries exhausted
+        return {
+            "status": "FAILED",
+            "step": "play_youtube_video",
+            "evidence_type": "browser_state",
+            "evidence": f"YouTube video playback failed across all {max_retries} attempts.",
+            "confidence": "high",
+            "success": False,
+            "error": "Playback verification failed across all attempts",
+            "playback_verified": False,
+            "attempts": max_retries,
+        }
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────

@@ -50,6 +50,46 @@ class UIHideEvent(Event):
     """Request the overlay to hide."""
     topic = "ui.hide"
     animate: bool = True
+    source: str = ""
+
+
+@dataclass
+class UIRestoreEvent(Event):
+    """Request the overlay to restore from hidden/minimized state to full normal size."""
+    topic = "ui.restore"
+    source: str = ""
+    session_id: str = ""
+
+
+@dataclass
+class UIMinimizeEvent(Event):
+    """Request the overlay to minimize/hide safely without closing Spidy."""
+    topic = "ui.minimize"
+    source: str = ""
+
+
+@dataclass
+class UIForegroundEvent(Event):
+    """Request the overlay to be brought to the top-most foreground."""
+    topic = "ui.foreground"
+    source: str = ""
+
+
+@dataclass
+class UIWakeReceivedEvent(Event):
+    """Notify UI that wake word was received."""
+    topic = "ui.wake_received"
+    phrase: str = ""
+    confidence: float = 0.0
+    session_id: str = ""
+
+
+@dataclass
+class UIWakeAckEvent(Event):
+    """Notify UI that wake acknowledgement is playing."""
+    topic = "ui.wake_ack"
+    phrase: str = ""
+    session_id: str = ""
 
 
 @dataclass
@@ -130,6 +170,13 @@ class UIHotkeyPressedEvent(Event):
 class UIMicButtonClickedEvent(Event):
     """Published when the user clicks the microphone button."""
     topic = "ui.mic_button_clicked"
+
+
+@dataclass
+class UICommandSubmittedEvent(Event):
+    """A command typed or clicked in the UI (suggestion, dock button, quick action)."""
+    topic = "ui.command_submitted"
+    text: str = ""
 
 
 @dataclass

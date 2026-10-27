@@ -110,6 +110,8 @@ class OpenWakeWordModel(WakeWordModel):
         self._last_detection_times: dict[str, float] = {}
         self._last_global_detection_time: float = 0.0
         self._debounce_seconds: float = 2.0
+        self._consecutive_frames: dict[str, int] = {}
+        self._min_consecutive_frames: int = 2  # Require >= 2 consecutive frames (~160ms)
 
     # ── WakeWordModel interface ───────────────────────────────────────────
 
@@ -166,6 +168,8 @@ class OpenWakeWordModel(WakeWordModel):
         resolved_entries: list[_LoadedModelEntry] = []
         oww_targets: list[str] = []
 
+        from spidy.config.manager import PROJECT_ROOT
+
         for cand in candidates:
             c_name = cand["name"]
             c_phrase = cand["phrase"]
@@ -175,21 +179,27 @@ class OpenWakeWordModel(WakeWordModel):
 
             # 1. Explicit model path provided
             if c_path:
+                target_path = None
                 if os.path.exists(c_path):
-                    stem = Path(c_path).stem
+                    target_path = c_path
+                elif (PROJECT_ROOT / c_path).exists():
+                    target_path = str(PROJECT_ROOT / c_path)
+
+                if target_path:
+                    stem = Path(target_path).stem
                     entry = _LoadedModelEntry(
                         name=c_name,
                         phrase=c_phrase,
-                        oww_target=c_path,
+                        oww_target=target_path,
                         score_key=stem,
                         threshold=c_thresh,
                         is_custom=True,
                     )
                     resolved_entries.append(entry)
-                    oww_targets.append(c_path)
+                    oww_targets.append(target_path)
                     log.info(
                         "Registered custom wake model '{name}' ('{phrase}') from '{path}' (threshold={thresh})",
-                        name=c_name, phrase=c_phrase, path=c_path, thresh=c_thresh,
+                        name=c_name, phrase=c_phrase, path=target_path, thresh=c_thresh,
                     )
                 else:
                     log.warning(
@@ -205,7 +215,10 @@ class OpenWakeWordModel(WakeWordModel):
                 continue
 
             # 2. Check standard assets/models/wake_word/<model>.onnx
-            standard_path = Path("assets/models/wake_word") / f"{c_name}.onnx"
+            standard_path = PROJECT_ROOT / "assets" / "models" / "wake_word" / f"{c_name}.onnx"
+            if not standard_path.exists():
+                standard_path = Path("assets/models/wake_word") / f"{c_name}.onnx"
+
             if standard_path.exists():
                 entry = _LoadedModelEntry(
                     name=c_name,
@@ -333,22 +346,28 @@ class OpenWakeWordModel(WakeWordModel):
                     best_score = score
 
                 if score >= entry.threshold:
-                    # Check per-model & global debounce
-                    last_time = self._last_detection_times.get(entry.name, 0.0)
-                    global_diff = now - self._last_global_detection_time
-                    model_diff = now - last_time
+                    self._consecutive_frames[entry.name] = self._consecutive_frames.get(entry.name, 0) + 1
+                    # Check consecutive frames requirement
+                    if self._consecutive_frames[entry.name] >= self._min_consecutive_frames:
+                        # Check per-model & global debounce
+                        last_time = self._last_detection_times.get(entry.name, 0.0)
+                        global_diff = now - self._last_global_detection_time
+                        model_diff = now - last_time
 
-                    if global_diff >= self._debounce_seconds and model_diff >= self._debounce_seconds:
-                        triggered_entry = entry
-                        triggered_score = score
-                        break
-                    else:
-                        log.debug(
-                            "Wake debounce: model='{m}' score={s:.4f} suppressed (cooldown)",
-                            m=entry.name, s=score,
-                        )
+                        if global_diff >= self._debounce_seconds and model_diff >= self._debounce_seconds:
+                            triggered_entry = entry
+                            triggered_score = score
+                            break
+                        else:
+                            log.debug(
+                                "Wake debounce: model='{m}' score={s:.4f} frames={f} suppressed (cooldown)",
+                                m=entry.name, s=score, f=self._consecutive_frames[entry.name],
+                            )
+                else:
+                    self._consecutive_frames[entry.name] = 0
 
             if triggered_entry is not None:
+                self._consecutive_frames[triggered_entry.name] = 0
                 self._last_detection_times[triggered_entry.name] = now
                 self._last_global_detection_time = now
                 self._last_detected_model = triggered_entry.name
@@ -364,7 +383,8 @@ class OpenWakeWordModel(WakeWordModel):
             return 0.0
 
     def reset_buffer(self) -> None:
-        """Clear the OWW prediction score window."""
+        """Clear the OWW prediction score window and consecutive frame counts."""
+        self._consecutive_frames.clear()
         if self._oww_model is not None:
             try:
                 pb = self._oww_model.prediction_buffer
@@ -383,7 +403,11 @@ class OpenWakeWordModel(WakeWordModel):
         self._loaded_models.clear()
         log.debug("Wake word model unloaded.")
 
-    # ── Inspection Properties & Helpers ───────────────────────────────────
+    @property
+    def active_model_names(self) -> list[str]:
+        if self._loaded_models:
+            return [m.name for m in self._loaded_models]
+        return [self._model_name]
 
     @property
     def model_name(self) -> str:
@@ -497,6 +521,10 @@ class NullWakeWordModel(WakeWordModel):
     def force_trigger(self) -> None:
         """Force the next process_chunk() call to return 1.0."""
         self._forced = True
+
+    @property
+    def active_model_names(self) -> list[str]:
+        return [self._model_name]
 
     @property
     def model_name(self) -> str:

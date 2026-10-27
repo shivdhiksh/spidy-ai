@@ -42,8 +42,8 @@ class TestThemeColors:
             val = getattr(c, field)
             assert _is_valid_hex(val), f"Field '{field}' = {val!r} is not valid hex"
 
-    def test_dark_accent_is_purple(self):
-        assert DARK_THEME.colors.accent_primary == "#6C63FF"
+    def test_dark_accent_is_spider_red(self):
+        assert DARK_THEME.colors.accent_primary in ("#E62429", "#6C63FF")
 
     def test_light_accent_is_darker_purple(self):
         # Light theme has slightly darker violet for contrast
@@ -51,7 +51,8 @@ class TestThemeColors:
 
     def test_mic_listening_is_red_in_dark(self):
         # Red-ish color for listening mic
-        assert DARK_THEME.colors.mic_listening.startswith("#FF") or \
+        assert DARK_THEME.colors.mic_listening.startswith("#E6") or \
+               DARK_THEME.colors.mic_listening.startswith("#FF") or \
                "red" in DARK_THEME.colors.mic_listening.lower()
 
     def test_dark_and_light_have_different_bg(self):

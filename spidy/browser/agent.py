@@ -40,7 +40,7 @@ Design decisions
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING
 
 from spidy.browser.backends.playwright_backend import PlaywrightBackend
 from spidy.browser.types import DownloadResult, HistoryEntry, PageInfo, TabInfo
@@ -356,3 +356,40 @@ class BrowserAgent:
         """
         await self._ensure_running()
         return await self._backend.get_browser_history(limit=limit)
+
+    # ── YouTube Media ─────────────────────────────────────────────────────
+
+    async def get_youtube_video_results(self, browser_type: str | None = None) -> list[dict[str, str]]:
+        """Discover available YouTube video candidates on the current page."""
+        await self._ensure_running(browser_type=browser_type)
+        if hasattr(self._backend, "get_youtube_video_results"):
+            return await self._backend.get_youtube_video_results()
+        return []
+
+    async def play_youtube_video(
+        self,
+        query: str | None = None,
+        video_index: int | None = None,
+        select_mode: str = "random",
+        max_retries: int = 3,
+        browser_type: str | None = None,
+    ) -> dict[str, Any]:
+        """Play a YouTube video from search results with verified playback."""
+        await self._ensure_running(browser_type=browser_type)
+        if hasattr(self._backend, "play_youtube_video"):
+            return await self._backend.play_youtube_video(
+                query=query,
+                video_index=video_index,
+                select_mode=select_mode,
+                max_retries=max_retries,
+            )
+        return {
+            "status": "FAILED",
+            "step": "play_youtube_video",
+            "evidence_type": "browser_state",
+            "evidence": "Backend does not support play_youtube_video",
+            "confidence": "high",
+            "success": False,
+            "error": "Backend does not support play_youtube_video",
+            "playback_verified": False,
+        }

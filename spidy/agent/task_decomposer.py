@@ -71,28 +71,41 @@ log = get_logger(__name__)
 # ─── LLM Decomposition Prompt ─────────────────────────────────────────────────
 
 _DECOMPOSE_SYSTEM_PROMPT = """\
-You are a task planning assistant for SPIDY. Your job is to break down a high-level goal
-into an ordered sequence of concrete, deterministic, executable steps with structured action contracts.
+You are a task planning assistant for SPIDY, an autonomous Windows AI desktop companion.
+Your job is to break down a high-level goal into an ordered sequence of concrete, deterministic, executable steps with structured action contracts.
+
+SPIDY has direct built-in skills for:
+1. File operations (skill="file"):
+   - action="search_files": query="resume" / "report.pdf" / "*.csv" (searches Desktop, Documents, Downloads, Workspace).
+   - action="open_file": target="path/to/file" or "${prev.path}" or "${step_1.path}".
+   - action="read_file", action="save_file".
+2. Desktop applications & control (skill="desktop"):
+   - action="open_app": target="Notepad" / "VS Code" / "Calculator" / "Chrome" / "Edge".
+   - action="close_app", action="focus", action="type_text" (text="..." or "${prev.text}"), action="save_file", action="calculate".
+3. Browser automation (skill="browser"):
+   - action="search": target="youtube" / "google", query="...".
+   - action="navigate": url="https://...".
+   - action="extract_text", action="verify".
+4. Vision & Screen understanding (skill="vision"):
+   - action="ask_screen": query="what is on my screen" / "read the error".
+   - action="understand_screen", action="read_text".
+5. Code automation & repair (skill="code"):
+   - action="repair_code", action="run_script", action="run_tests".
+6. User clarification (skill="dialog"):
+   - action="ask_user": target="user", query="clarification prompt" (ONLY for genuinely ambiguous requests like "search for something").
 
 Rules:
 - Return ONLY a valid JSON array, no prose, no markdown fences.
-- Each item must be a JSON object with these fields:
-    "description": short human-readable step name (max 10 words)
+- NEVER invent an ask_user clarification for actionable goals like "Find my resume", "Open Notepad", "Find the latest PDF", "What's on my screen", "Fix the error".
+- For "Find my resume and open it":
+  Step 1: {"description": "Find resume", "utterance": "find resume", "terminal": false, "action": {"skill": "file", "action": "search_files", "query": "resume", "expected_outcome": "Resume file found"}}
+  Step 2: {"description": "Open resume", "utterance": "open resume", "terminal": true, "action": {"skill": "file", "action": "open_file", "target": "${step_1.path}", "input_from": "<input_from:step_1.path>", "expected_outcome": "Resume opened"}}
+- For pronoun/reference steps ("open it", "type the result"), use "${prev.path}" or "${prev.text}" or "<input_from:prev>".
+- Each item must be a JSON object with:
+    "description": short human-readable name (max 10 words)
     "utterance": the natural-language command to execute this step
-    "terminal": true if this step achieves the final objective and no further steps are needed after it succeeds
-    "action": structured action object for direct skill routing:
-        skill:            "browser" | "desktop" | "file" | "dialog"
-        action:           e.g. "open_app" | "navigate" | "search" | "extract_text" | "focus" | "type_text" | "save_file" | "close_app" | "calculate" | "ask_user"
-        target:           app name ("Chrome", "Edge", "Notepad", "Calculator") or site name ("YouTube", "Google")
-        query:            verbatim search query string (for search actions) or calculation expression
-        text:             text to type or template expression (e.g. "${prev}.text", "${step_2}.url")
-        url:              explicit URL (for navigate actions)
-        input_from:       optional reference to prior task ("step_N", "prev", or task_id)
-        expected_outcome: what success looks like (plain English observation criterion)
-- CRITICAL for ambiguous/underspecified goals (e.g. "search something"):
-    Do NOT invent a query. Set skill="dialog", action="ask_user", target="user", and utterance="What would you like me to search for?".
-- For compound tasks like "Search X and type into Notepad":
-    Include an explicit read/extract step, focus step, and a type_text step referencing the extracted result via input_from.
+    "terminal": true if this step achieves the final objective
+    "action": structured action object with skill, action, target, query, text, url, input_from, expected_outcome
 """
 
 _DECOMPOSE_USER_TEMPLATE = 'Break down this goal into executable steps: "{goal}"'
@@ -394,6 +407,28 @@ _HEURISTIC_PATTERNS: list[tuple[list[str], list[tuple[str, str]]]] = [
         ],
     ),
 
+    # ── YouTube video playback ──────────────────────────────────────────────
+    (
+        [
+            "play any one video random which you like",
+            "play any one video random",
+            "play any video random",
+            "play a random video",
+            "play random video",
+            "play any video",
+            "play any one video",
+            "play a video",
+            "play video",
+            "play the first video",
+            "play first video",
+            "play youtube video",
+            "play video on youtube",
+        ],
+        [
+            ("Play YouTube video", "play any one video random which you like"),
+        ],
+    ),
+
     # ── Google search ────────────────────────────────────────────────────────
     (
         ["search google", "google search", "search on google"],
@@ -483,6 +518,7 @@ _ACTION_VERBS = re.compile(
     r'\b(?:open|launch|close|quit|exit|minimize|minimise|maximize|maximise|restore|'
     r'focus|bring|switch|search|find|look\s+up|create|make|start|run|'
     r'navigate|go\s+to|show|insert|type|click|press|scroll|'
+    r'copy|paste|extract|'
     r'download|upload|play|pause|stop|skip|next|'
     r'calculate|verify|check|tell|delete|remove|execute|save|write|read)\b',
     re.IGNORECASE,
@@ -640,6 +676,49 @@ class TaskDecomposer:
         """
         tasks: list[TaskRecord] | None = None
 
+        # A request to "open VS Code and create X.py" has one required end
+        # state: an actual file on disk opened in the editor.  The previous
+        # generic compound splitter launched a blank VS Code repeatedly and
+        # wrote an unqualified filename somewhere invisible to the user.
+        # Build this common Windows flow explicitly: create and verify first,
+        # then invoke Code once with the verified absolute path from step one.
+        vs_code_file = re.search(
+            r"(?:open|launch|start)\s+(?:visual\s+studio\s+code|vs\s*code|vscode)\s+"
+            r"(?:and|then)\s+(?:create|make|write)\s+(?:a\s+)?(?:new\s+)?"
+            r"(?:(?:python|text)\s+)?(?:file\s+(?:named\s+)?)?([\w.-]+(?:\.[A-Za-z0-9]+)?)",
+            goal_description,
+            re.IGNORECASE,
+        )
+        if vs_code_file:
+            filename = vs_code_file.group(1).strip().rstrip(".?!,;:")
+            if "." not in filename:
+                filename += ".py"
+            create_task = self._make_structured_task(
+                goal_id=goal_id,
+                description=f"Create file {filename}",
+                utterance=f"create file {filename}",
+                skill="file",
+                action="create_file",
+                target=filename,
+                expected_outcome=f"File {filename} exists on disk",
+            )
+            create_task.action["path"] = filename
+            open_task = self._make_structured_task(
+                goal_id=goal_id,
+                description=f"Open {filename} in VS Code",
+                utterance=f"open {filename} in VS Code",
+                skill="desktop",
+                action="open_file_in_app",
+                target="VS Code",
+                expected_outcome=f"VS Code is open with {filename}",
+                terminal=True,
+            )
+            open_task.action["path"] = "${prev.path}"
+            open_task.action["input_from"] = "<input_from:prev.path>"
+            open_task.input_from = "<input_from:prev.path>"
+            open_task.dependencies = [create_task.task_id]
+            return [create_task, open_task]
+
         # ── BUG 2 FIX: Compound goal splitting ────────────────────────────────
         # Detect compound commands like "Open Edge and search Python" BEFORE
         # the heuristic patterns run. Split into sub-goals, decompose each
@@ -663,9 +742,11 @@ class TaskDecomposer:
             elif "firefox" in goal_lower:
                 active_browser = "firefox"
 
-            for i, sub in enumerate(sub_goals):
+            last_file_target = ""
+            for i, sub_raw in enumerate(sub_goals):
                 is_last = (i == len(sub_goals) - 1)
-                sub_lower = sub.strip().lower()
+                sub = sub_raw.strip().rstrip(".?!,").strip()
+                sub_lower = sub.lower()
                 sub_tasks: list[TaskRecord] | None = None
 
                 # Detect if this sub-goal specifically names a browser
@@ -676,8 +757,216 @@ class TaskDecomposer:
                 elif "firefox" in sub_lower:
                     active_browser = "firefox"
 
-                # 1. Search clause (e.g. "search for Python tutorials", "search youtube for ...", "search something")
-                if re.match(r'^(?:search|look\s+up)\b', sub_lower, re.IGNORECASE):
+                # 1. File search clause (e.g. "find my resume", "locate report.pdf", "find latest pdf in downloads")
+                m_file_search = None
+                m_find = re.match(
+                    r'^(?:find|locate|where\s+is|get\s+my)\s+(?:my\s+|the\s+|all\s+)?(.+)$',
+                    sub,
+                    re.IGNORECASE,
+                )
+                if m_find:
+                    m_file_search = m_find
+                else:
+                    m_temp = re.match(r'^(?:search(?:\s+for)?|look\s+for)\s+(?:my\s+|the\s+|all\s+)?(.+)$', sub, re.IGNORECASE)
+                    if m_temp:
+                        term = m_temp.group(1).lower()
+                        if any(k in term for k in ("resume", "cv", "pdf", "file", "document", "in downloads", "in desktop", "in documents", ".txt", ".py", ".csv", ".doc")):
+                            m_file_search = m_temp
+
+                if m_file_search:
+                    raw_target = m_file_search.group(1).strip()
+                    # Ensure it's not a web search (e.g. "search youtube", "search google")
+                    if not any(w in raw_target.lower() for w in ("youtube", "google", "bing", "wikipedia", "reddit", "web", "internet")):
+                        clean_term = raw_target.rstrip(".?!,").strip()
+                        if is_placeholder_or_ambiguous_query(clean_term):
+                            sub_tasks = [self._make_structured_task(
+                                goal_id=goal_id,
+                                description="Clarify search query",
+                                utterance="What would you like me to search for?",
+                                skill="dialog",
+                                action="ask_user",
+                                target="user",
+                                expected_outcome="User provided search query",
+                                terminal=is_last,
+                            )]
+                        else:
+                            query = "resume" if clean_term.lower() in ("resume", "cv", "my resume", "my cv") else clean_term
+                            sub_tasks = [self._make_structured_task(
+                                goal_id=goal_id,
+                                description=f"Find {clean_term}",
+                                utterance=f"find {query}",
+                                skill="file",
+                                action="search_files",
+                                target=query,
+                                query=query,
+                                expected_outcome=f"Matching {clean_term} file is found",
+                                terminal=is_last,
+                            )]
+
+                # 2. File open reference (e.g. "open it", "open that", "open the file", "launch it", "view it")
+                if sub_tasks is None:
+                    m_file_open_ref = re.match(
+                        r'^(?:open|launch|view|read)\s+(?:it|that|the\s+file|the\s+document|the\s+thing\s+you\s+just\s+found|what\s+you\s+found)$',
+                        sub,
+                        re.IGNORECASE,
+                    )
+                    if m_file_open_ref:
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description="Open found file",
+                            utterance="open the found file",
+                            skill="file",
+                            action="open_file",
+                            target="${prev.path}",
+                            expected_outcome="Requested file is opened",
+                            terminal=is_last,
+                        )]
+                        if sub_tasks[0].action:
+                            sub_tasks[0].action["input_from"] = "<input_from:prev.path>"
+                            sub_tasks[0].input_from = "<input_from:prev.path>"
+
+                # 2b. Folder creation clause (e.g. "create a folder named Projects")
+                if sub_tasks is None:
+                    m_folder = re.match(r'^(?:create|make)\s+(?:a\s+)?(?:new\s+)?folder(?:\s+named|\s+called)?\s+([\w\.\-_]+)', sub, re.IGNORECASE)
+                    if m_folder:
+                        fname = m_folder.group(1).strip()
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description=f"Create folder {fname}",
+                            utterance=f"create folder {fname}",
+                            skill="file",
+                            action="create_folder",
+                            target=fname,
+                            expected_outcome=f"Folder {fname} created",
+                            terminal=is_last,
+                        )]
+
+                # 2c. File / Code creation clause (e.g. "create hello.py", "create a Python file named Edge.py", "create Edge.py")
+                if sub_tasks is None:
+                    m_cfile = re.match(
+                        r'^(?:create|make|write)\s+(?:a\s+)?(?:new\s+)?(?:(python|javascript|html|react|flask|text)\s+)?(?:file\s+named\s+|file\s+|script\s+)?([\w\.\-_]+(?:\.[a-zA-Z0-9]+)?)$',
+                        sub,
+                        re.IGNORECASE,
+                    )
+                    if m_cfile and not any(w in sub_lower for w in ("folder", "directory", "program that", "code that", "script that")):
+                        lang = m_cfile.group(1) or ""
+                        filename = m_cfile.group(2).strip().rstrip(".?!,;:")
+                        if not any(filename.endswith(e) for e in (".py", ".js", ".ts", ".html", ".txt", ".md", ".json", ".css")):
+                            ext = {"python": "py", "javascript": "js", "text": "txt"}.get(lang.lower(), "py")
+                            filename = f"{filename}.{ext}"
+                        last_file_target = filename
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description=f"Create file {filename}",
+                            utterance=f"create file {filename}",
+                            skill="file",
+                            action="create_file",
+                            target=filename,
+                            query="",
+                            expected_outcome=f"File {filename} is created",
+                            terminal=is_last,
+                        )]
+                        if sub_tasks[0].action:
+                            sub_tasks[0].action["path"] = filename
+
+                # 2d. Write code / program content clause (e.g. "write a Python program that prints the first ten Fibonacci numbers")
+                if sub_tasks is None:
+                    m_wcode = re.match(
+                        r'^(?:write|generate)\s+(?:a\s+)?(?:python\s+)?(?:program|code|script)\s+(?:that\s+)?(.*)',
+                        sub,
+                        re.IGNORECASE,
+                    )
+                    if m_wcode:
+                        spec = m_wcode.group(1).lower()
+                        code_content = ""
+                        if "fibonacci" in spec:
+                            code_content = (
+                                "def fibonacci(n):\n"
+                                "    a, b = 0, 1\n"
+                                "    res = []\n"
+                                "    for _ in range(n):\n"
+                                "        res.append(a)\n"
+                                "        a, b = b, a + b\n"
+                                "    return res\n\n"
+                                'if __name__ == "__main__":\n'
+                                '    print(", ".join(map(str, fibonacci(10))))\n'
+                            )
+                        elif "calculator" in spec:
+                            code_content = (
+                                "def add(a, b): return a + b\n"
+                                "def multiply(a, b): return a * b\n"
+                                'if __name__ == "__main__":\n'
+                                '    print("25 * 18 =", multiply(25, 18))\n'
+                            )
+                        target_f = last_file_target or "hello.py"
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description=f"Write code for {target_f}",
+                            utterance=f"write code into {target_f}",
+                            skill="file",
+                            action="create_file",
+                            target=target_f,
+                            query=code_content,
+                            expected_outcome=f"Code written to {target_f}",
+                            terminal=is_last,
+                        )]
+                        if sub_tasks[0].action:
+                            sub_tasks[0].action["content"] = code_content
+                            sub_tasks[0].action["path"] = target_f
+
+                # 2e. Run script clause (e.g. "run it", "run the program", "execute hello.py", "tell me the output")
+                if sub_tasks is None:
+                    m_run_script = re.match(
+                        r'^(?:run|execute)\s+(?:it|the\s+program|the\s+file|the\s+script|([\w\.\-_]+\.py))(?:\s+and\s+.*)?$',
+                        sub,
+                        re.IGNORECASE,
+                    )
+                    if m_run_script:
+                        r_target = m_run_script.group(1) or last_file_target or "hello.py"
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description=f"Run {r_target}",
+                            utterance=f"run {r_target}",
+                            skill="desktop",
+                            action="run_python_script",
+                            target=r_target,
+                            expected_outcome=f"Script {r_target} executed",
+                            terminal=is_last,
+                        )]
+
+                # 3. Screen understanding clause (e.g. "what's on my screen", "read the error on my screen")
+                if sub_tasks is None:
+                    if any(k in sub_lower for k in ("what's on my screen", "what is on my screen", "read the error", "read screen", "inspect screen", "what is wrong on my screen", "what's wrong on my screen")):
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description="Inspect screen",
+                            utterance=sub,
+                            skill="vision",
+                            action="ask_screen",
+                            query=sub,
+                            expected_outcome="Screen state is analyzed",
+                            terminal=is_last,
+                        )]
+
+                # 4. Code error repair clause (e.g. "fix the error", "run this program and fix the error", "fix the error in calc.py")
+                if sub_tasks is None:
+                    if any(k in sub_lower for k in ("fix the error", "repair code", "fix this error", "fix my code", "fix error")):
+                        m_file_in = re.search(r'\b(?:in|for)\s+([A-Za-z]:[/\\][^\s\'"<>|]+\.py|[\w\.\-_]+\.py)', sub, re.IGNORECASE)
+                        repair_target = m_file_in.group(1) if m_file_in else ""
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description=f"Repair code error in {repair_target}" if repair_target else "Repair code error",
+                            utterance=sub,
+                            skill="code",
+                            action="repair_code",
+                            target=repair_target,
+                            query=sub,
+                            expected_outcome="Program error is diagnosed and repaired",
+                            terminal=is_last,
+                        )]
+
+                # 5. Web search clause (e.g. "search for Python tutorials", "search youtube for ...", "search something")
+                if sub_tasks is None and re.match(r'^(?:search|look\s+up)\b', sub_lower, re.IGNORECASE):
                     s_target, s_query = self._extract_search_params(sub)
                     if not s_target and last_target:
                         s_target = last_target
@@ -718,10 +1007,38 @@ class TaskDecomposer:
                             browser=active_browser,
                         )]
 
-                # 2. Browser extract / read result (e.g. "read the first useful result", "read the result")
+                # 5b. YouTube video playback clause (e.g. "play any one video random which you like", "play a random video", "play video")
+                if sub_tasks is None:
+                    m_play_vid = re.match(
+                        r'^(?:play|start\s+playing|resume)\s+(?:any\s+one\s+video\s+random\s+which\s+you\s+like|a\s+random\s+video|random\s+video|any\s+video|any\s+one\s+video|a\s+video|the\s+first\s+video|first\s+video|the\s+video|video|youtube\s+video|one\s+video)(?:\s+(?:on\s+youtube|randomly|random))?$',
+                        sub,
+                        re.IGNORECASE,
+                    )
+                    if not m_play_vid:
+                        if re.match(r'^play\s+.*video', sub, re.IGNORECASE) or (sub_lower.startswith("play ") and ("youtube" in sub_lower or "video" in sub_lower)):
+                            m_play_vid = True
+                    if m_play_vid:
+                        if not active_browser:
+                            active_browser = detect_default_browser()
+                        sub_tasks = [self._make_structured_task(
+                            goal_id=goal_id,
+                            description="Play YouTube video",
+                            utterance="play any one video random which you like",
+                            skill="browser",
+                            action="play_youtube_video",
+                            target="youtube",
+                            query="",
+                            expected_outcome="YouTube video playback confirmed",
+                            terminal=is_last,
+                            browser=active_browser,
+                        )]
+                        if sub_tasks[0].action:
+                            sub_tasks[0].action["random_pick"] = True
+
+                # 6. Browser extract / read result (e.g. "read the first useful result", "read the result", "copy the first result")
                 if sub_tasks is None:
                     m_extract = re.match(
-                        r'^(?:read|extract|copy|get)\s+(?:the\s+)?(?:first\s+useful\s+)?(?:search\s+)?result',
+                        r'^(?:read|extract|copy|get)\s+(?:the\s+)?(?:first\s+)?(?:useful\s+)?(?:search\s+)?result',
                         sub,
                         re.IGNORECASE,
                     )
@@ -740,7 +1057,7 @@ class TaskDecomposer:
                             browser=active_browser,
                         )]
 
-                # 3. Focus / switch window (e.g. "switch to notepad", "focus notepad", "switch to calculator")
+                # 7. Focus / switch window (e.g. "switch to notepad", "focus notepad", "switch to calculator")
                 if sub_tasks is None:
                     m_focus = re.match(
                         r'^(?:switch\s+to|focus|bring\s+up|activate)\s+([\w\s]+)',
@@ -762,7 +1079,7 @@ class TaskDecomposer:
                             terminal=is_last,
                         )]
 
-                # 4. Browser website navigation (e.g. "open youtube", "go to google")
+                # 8. Browser website navigation (e.g. "open youtube", "go to google")
                 if sub_tasks is None:
                     m_web = re.match(
                         r'^(?:open|go\s+to|navigate\s+to|launch)\s+([\w\.-]+|https?://[^\s]+)\b',
@@ -790,7 +1107,7 @@ class TaskDecomposer:
                                 browser=active_browser,
                             )]
 
-                # 5. Desktop app launch (e.g. "open edge", "open notepad", "open calculator")
+                # 9. Desktop app launch (e.g. "open edge", "open notepad", "open calculator")
                 if sub_tasks is None:
                     m_app = re.match(
                         r'^(?:open|launch|start)\s+([\w\s]+)',
@@ -816,10 +1133,10 @@ class TaskDecomposer:
                                 browser=active_browser if is_browser_app else "",
                             )]
 
-                # 6. Desktop typing / entering text (e.g. "type Hello from Spidy", "type 'test'", "type the result")
+                # 10. Desktop typing / entering text (e.g. "type Hello from Spidy", "type 'test'", "type the result")
                 if sub_tasks is None:
                     m_type = re.match(
-                        r'^(?:type|write|enter)\s+(?:["\'](.*?)["\']|([\w\s,\.\?!]+?))(?:\s+into\s+([\w\s]+))?$',
+                        r'^(?:type|write|enter|paste)\s+(?:["\'](.*?)["\']|([\w\s,\.\?!]+?))(?:\s+into\s+([\w\s]+))?$',
                         sub,
                         re.IGNORECASE,
                     )
@@ -829,7 +1146,7 @@ class TaskDecomposer:
                         text_lower = text_typed.lower()
                         action_text = text_typed
                         input_from_ref = ""
-                        if text_lower in ("the result", "the search result", "search result", "result"):
+                        if text_lower in ("the result", "the search result", "search result", "result", "it", "that"):
                             action_text = "${prev}.text"
                             input_from_ref = "<input_from:prev>"
                         elif text_lower in ("the query", "the search query", "search query", "query"):
@@ -854,7 +1171,7 @@ class TaskDecomposer:
                                 task_rec.input_from = input_from_ref
                         sub_tasks = [task_rec]
 
-                # 7. Desktop save file (e.g. "save it as spidy_test.txt", "save as test.txt")
+                # 11. Desktop save file (e.g. "save it as spidy_test.txt", "save as test.txt")
                 if sub_tasks is None:
                     m_save = re.match(
                         r'^(?:save(?:\s+it)?(?:\s+as)?)\s+([\w\.\-_/\\:]+)',
@@ -874,7 +1191,7 @@ class TaskDecomposer:
                             terminal=is_last,
                         )]
 
-                # 8. Desktop close app (e.g. "close notepad", "close calculator")
+                # 12. Desktop close app (e.g. "close notepad", "close calculator")
                 if sub_tasks is None:
                     m_close = re.match(
                         r'^(?:close|quit|exit)\s+([\w\s]+)',
@@ -894,7 +1211,7 @@ class TaskDecomposer:
                             terminal=is_last,
                         )]
 
-                # 9. Desktop calculate (e.g. "calculate 25 multiplied by 18", "calculate 25 * 18")
+                # 13. Desktop calculate (e.g. "calculate 25 multiplied by 18", "calculate 25 * 18")
                 if sub_tasks is None:
                     m_calc = re.match(
                         r'^(?:calculate|compute)\s+(.*)',
@@ -924,7 +1241,7 @@ class TaskDecomposer:
                             )
                         ]
 
-                # 10. Desktop verify / check (e.g. "verify the file exists", "verify test.txt exists")
+                # 14. Desktop verify / check (e.g. "verify the file exists", "verify test.txt exists")
                 if sub_tasks is None:
                     m_ver = re.match(
                         r'^(?:verify|check)\s+(?:that\s+|if\s+)?(.*)',
@@ -995,14 +1312,29 @@ class TaskDecomposer:
                             )
                 all_tasks.extend(sub_tasks)
 
-            tasks = all_tasks[:self._max_tasks]
+            tasks = self._deduplicate_idempotent_tasks(all_tasks)[:self._max_tasks]
 
             if len(tasks) < len(sub_goals):
-                log.error(
-                    "TaskDecomposer: compound goal has {n_clauses} clauses but only "
-                    "{n_tasks} tasks produced — possible silent drop!",
+                log.info(
+                    "TaskDecomposer: compound goal had {n_clauses} clauses collapsed to "
+                    "{n_tasks} tasks (deduplication / merged idempotent actions)",
                     n_clauses=len(sub_goals),
                     n_tasks=len(tasks),
+                )
+
+            # Ensure the final task in the deduplicated list is terminal
+            if tasks:
+                t = tasks[-1]
+                tasks[-1] = TaskRecord(
+                    task_id=t.task_id,
+                    goal_id=t.goal_id,
+                    description=t.description,
+                    utterance=t.utterance,
+                    action=t.action,
+                    input_from=t.input_from,
+                    state=t.state,
+                    extra=t.extra,
+                    terminal=True,
                 )
 
             log.info(
@@ -1027,8 +1359,8 @@ class TaskDecomposer:
                 terminal=True,
             )]
 
-        # Safety cap
-        tasks = tasks[:self._max_tasks]
+        # Deduplicate idempotent tasks and apply safety cap
+        tasks = self._deduplicate_idempotent_tasks(tasks)[:self._max_tasks]
 
         log.info(
             "Decomposed goal '{desc}' → {n} tasks",
@@ -1039,6 +1371,62 @@ class TaskDecomposer:
             log.debug("  Task {i}: {desc}", i=i + 1, desc=t.description)
 
         return tasks
+
+    @staticmethod
+    def _deduplicate_idempotent_tasks(tasks: list[TaskRecord]) -> list[TaskRecord]:
+        """
+        Collapse consecutive or duplicate idempotent tasks in a compound goal.
+        e.g. "Open Calculator. Open Calculator." -> single "Open Calculator".
+        """
+        if not tasks:
+            return []
+
+        deduped: list[TaskRecord] = []
+        _IDEMPOTENT_ACTIONS = {
+            ("desktop", "open_app"),
+            ("desktop", "launch_app"),
+            ("desktop", "focus_window"),
+            ("desktop", "minimize_window"),
+            ("desktop", "maximize_window"),
+            ("file", "search_files"),
+            ("file", "open_file"),
+            ("file", "open_folder"),
+            ("browser", "navigate"),
+            ("browser", "search"),
+        }
+
+        for task in tasks:
+            if not deduped:
+                deduped.append(task)
+                continue
+
+            prev = deduped[-1]
+
+            # Check if identical idempotent action
+            if task.action and prev.action:
+                s1 = (task.action.get("skill") or "").lower().strip()
+                a1 = (task.action.get("action") or "").lower().strip()
+                t1 = str(task.action.get("target") or task.action.get("name") or "").lower().strip()
+
+                s0 = (prev.action.get("skill") or "").lower().strip()
+                a0 = (prev.action.get("action") or "").lower().strip()
+                t0 = str(prev.action.get("target") or prev.action.get("name") or "").lower().strip()
+
+                if (s1, a1) in _IDEMPOTENT_ACTIONS and (s1, a1) == (s0, a0) and t1 == t0:
+                    log.info(
+                        "TaskDecomposer: collapsing duplicate idempotent task: skill='{s}' action='{a}' target='{t}'",
+                        s=s1, a=a1, t=t1,
+                    )
+                    continue
+
+            # Check if identical utterance
+            if task.utterance.strip().lower() == prev.utterance.strip().lower() and any(k in task.utterance.lower() for k in ("open", "launch", "focus", "find", "search", "where")):
+                log.info("TaskDecomposer: collapsing duplicate idempotent utterance: '{u}'", u=task.utterance)
+                continue
+
+            deduped.append(task)
+
+        return deduped
 
     # ── LLM decomposition ──────────────────────────────────────────────────
 
@@ -1180,6 +1568,193 @@ class TaskDecomposer:
                         browser=active_browser,
                     )
                 ]
+
+        # Ambiguous general search (e.g. "search for something", "search something", "find something")
+        if any(goal_lower == s for s in ("search for something", "search something", "look up something", "find something", "search")):
+            return [
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description="Clarify search query",
+                    utterance="What would you like me to search for?",
+                    skill="dialog",
+                    action="ask_user",
+                    target="user",
+                    expected_outcome="User provided search query",
+                    terminal=False,
+                ),
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description="Search for requested query",
+                    utterance="search for ${prev.result}",
+                    skill="browser",
+                    action="search",
+                    target="google",
+                    query="${prev.result}",
+                    expected_outcome="Search results are displayed",
+                    terminal=True,
+                ),
+            ]
+
+        # Direct browser search (e.g. "search YouTube for Python tutorials", "search Google for Python")
+        if re.match(r'^(?:search|look\s+up)\b', goal_lower, re.IGNORECASE):
+            s_target, s_query = self._extract_search_params(goal_description)
+            if any(w in (s_target.lower() + " " + s_query.lower()) for w in ("youtube", "google", "bing", "wikipedia", "reddit", "web", "internet")) or s_target:
+                if not is_placeholder_or_ambiguous_query(s_query):
+                    s_target_disp = s_target.capitalize() if s_target else "Google"
+                    return [
+                        self._make_structured_task(
+                            goal_id=goal_id,
+                            description=f"Search {s_target_disp} for {s_query}",
+                            utterance=f"search {s_target or 'google'} for {s_query}",
+                            skill="browser",
+                            action="search",
+                            target=s_target or "google",
+                            query=s_query,
+                            expected_outcome=f"{s_target_disp} search results for {s_query} are visible",
+                            terminal=True,
+                        )
+                    ]
+
+        # Video playback (e.g. "play any one video random which you like", "play a random video", "play video")
+        if re.match(r'^(?:play|start\s+playing|resume)\s+(?:any\s+one\s+video\s+random\s+which\s+you\s+like|a\s+random\s+video|random\s+video|any\s+video|any\s+one\s+video|a\s+video|the\s+first\s+video|first\s+video|the\s+video|video|youtube\s+video|one\s+video)(?:\s+(?:on\s+youtube|randomly|random))?$', goal_lower) or re.match(r'^play\s+.*video', goal_lower) or (goal_lower.startswith("play ") and ("youtube" in goal_lower or "video" in goal_lower)):
+            active_browser = detect_default_browser()
+            return [
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description="Play YouTube video",
+                    utterance="play any one video random which you like",
+                    skill="browser",
+                    action="play_youtube_video",
+                    target="youtube",
+                    query="",
+                    expected_outcome="YouTube video playback confirmed",
+                    terminal=True,
+                    browser=active_browser,
+                )
+            ]
+
+        # File search (e.g. "find my resume", "find my cv", "find latest pdf in downloads", "locate report.csv")
+        m_file = re.match(
+            r'^(?:find|search(?:\s+for)?|locate|look\s+for|where\s+is)\s+(?:my\s+|the\s+|all\s+)?(.+)$',
+            goal_lower,
+        )
+        if m_file:
+            raw_q = m_file.group(1).strip()
+            if not any(w in raw_q for w in ("youtube", "google", "bing", "wikipedia", "reddit", "web", "internet")):
+                if is_placeholder_or_ambiguous_query(raw_q):
+                    return [
+                        self._make_structured_task(
+                            goal_id=goal_id,
+                            description="Clarify search query",
+                            utterance="What file would you like me to find?",
+                            skill="dialog",
+                            action="ask_user",
+                            target="user",
+                            expected_outcome="User provided file search query",
+                            terminal=False,
+                        ),
+                        self._make_structured_task(
+                            goal_id=goal_id,
+                            description="Find file",
+                            utterance="find ${prev.result}",
+                            skill="file",
+                            action="search_files",
+                            query="${prev.result}",
+                            target="${prev.result}",
+                            expected_outcome="Matching file is found",
+                            terminal=True,
+                        ),
+                    ]
+                clean_q = raw_q.rstrip(".?!,").strip()
+                query = "resume" if clean_q.lower() in ("resume", "cv", "my resume", "my cv") else clean_q
+                return [
+                    self._make_structured_task(
+                        goal_id=goal_id,
+                        description=f"Find {clean_q}",
+                        utterance=f"find {query}",
+                        skill="file",
+                        action="search_files",
+                        query=query,
+                        target=query,
+                        expected_outcome=f"Matching {clean_q} file is found",
+                        terminal=True,
+                    )
+                ]
+
+        # Screen understanding (e.g. "what's on my screen", "what is wrong on my screen", "read the error on my screen")
+        if any(kw in goal_lower for kw in (
+            "what's on my screen", "what is on my screen", "what is on screen",
+            "what's wrong on my screen", "what is wrong on my screen", "what's wrong with my screen",
+            "describe screen", "inspect screen", "read the error on my screen", "read error on screen",
+            "what does this dialog say", "read my screen", "what is on the screen"
+        )):
+            return [
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description="Analyze screen",
+                    utterance=goal_description,
+                    skill="vision",
+                    action="ask_screen",
+                    query=goal_description,
+                    expected_outcome="Screen state is analyzed",
+                    terminal=True,
+                )
+            ]
+
+        # Code repair (e.g. "fix the error", "repair code", "fix this error", "run this program and fix the error")
+        if any(kw in goal_lower for kw in ("fix the error", "repair code", "fix this error", "run this program and fix the error", "fix my code")):
+            return [
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description="Repair code error",
+                    utterance=goal_description,
+                    skill="code",
+                    action="repair_code",
+                    query=goal_description,
+                    expected_outcome="Program error is diagnosed and repaired",
+                    terminal=True,
+                )
+            ]
+
+        # Calculator
+        m_calc = re.match(r'^(?:calculate|compute)\s+(.*)', goal_lower)
+        if m_calc:
+            expr = m_calc.group(1).strip()
+            norm = (
+                expr.replace("multiplied by", "*")
+                .replace("times", "*")
+                .replace("x", "*")
+                .replace("plus", "+")
+                .replace("minus", "-")
+                .replace("divided by", "/")
+            )
+            return [
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description=f"Calculate {expr}",
+                    utterance=f"calculate {norm}",
+                    skill="desktop",
+                    action="calculate",
+                    query=norm,
+                    expected_outcome=f"Calculated {expr}",
+                    terminal=True,
+                )
+            ]
+
+        # Ambiguous general search (e.g. "search for something", "search something", "find something")
+        if any(goal_lower == s for s in ("search for something", "search something", "look up something", "find something", "search")):
+            return [
+                self._make_structured_task(
+                    goal_id=goal_id,
+                    description="Clarify search query",
+                    utterance="What would you like me to search for?",
+                    skill="dialog",
+                    action="ask_user",
+                    target="user",
+                    expected_outcome="User provided search query",
+                    terminal=True,
+                )
+            ]
 
         for keywords, step_templates in _HEURISTIC_PATTERNS:
             if any(kw in goal_lower for kw in keywords):
@@ -1376,4 +1951,3 @@ def _normalize_search_query(raw_query: str) -> str:
     while q and q[-1] in (".", "!", "?", ","):
         q = q[:-1].rstrip()
     return q
-

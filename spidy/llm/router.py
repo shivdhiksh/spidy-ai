@@ -46,6 +46,7 @@ Usage
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import TYPE_CHECKING, AsyncIterator
 
@@ -77,6 +78,9 @@ class LLMRouter(BaseLLMClient):
         If True, automatically try the next provider on failure.
     failure_threshold:
         Number of consecutive failures before skipping a provider.
+    provider_timeout:
+        Optional per-attempt timeout in seconds for each provider.
+        Defaults to provider's timeout or 25.0s.
     session_id:
         Session ID attached to emitted events.
     """
@@ -89,6 +93,7 @@ class LLMRouter(BaseLLMClient):
         bus: "EventBus | None" = None,
         auto_fallback: bool = True,
         failure_threshold: int = 3,
+        provider_timeout: float | None = None,
         session_id: str = "",
     ) -> None:
         if not providers:
@@ -97,6 +102,7 @@ class LLMRouter(BaseLLMClient):
         self._bus = bus
         self._auto_fallback = auto_fallback
         self._failure_threshold = failure_threshold
+        self._provider_timeout = provider_timeout
         self._session_id = session_id
         # Track consecutive failures per provider index
         self._failure_counts: dict[int, int] = {i: 0 for i in range(len(providers))}
@@ -160,8 +166,38 @@ class LLMRouter(BaseLLMClient):
                 m=provider_model,
             )
 
+            timeout_sec = self._provider_timeout
+            if timeout_sec is None:
+                timeout_sec = float(getattr(provider, "timeout", 0) or getattr(provider, "_timeout", 0) or 25.0)
+
             _req_start = time.monotonic()
-            response = await provider.complete(messages, temperature=temperature, max_tokens=max_tokens)
+            try:
+                response = await asyncio.wait_for(
+                    provider.complete(messages, temperature=temperature, max_tokens=max_tokens),
+                    timeout=timeout_sec,
+                )
+            except asyncio.TimeoutError:
+                _duration_ms = (time.monotonic() - _req_start) * 1000
+                log.warning(
+                    "LLM provider '{p}' timed out after {d:.0f}ms (limit={t}s)",
+                    p=provider_name,
+                    d=_duration_ms,
+                    t=timeout_sec,
+                )
+                response = LLMResponse.failure(
+                    f"Provider '{provider_name}' timed out after {timeout_sec}s",
+                    model=provider_model,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _duration_ms = (time.monotonic() - _req_start) * 1000
+                log.warning(
+                    "LLM provider '{p}' failed with exception after {d:.0f}ms: {exc}",
+                    p=provider_name,
+                    d=_duration_ms,
+                    exc=exc,
+                )
+                response = LLMResponse.failure(str(exc), model=provider_model)
+
             _duration_ms = (time.monotonic() - _req_start) * 1000
 
             # ── Response identification log ────────────────────────────

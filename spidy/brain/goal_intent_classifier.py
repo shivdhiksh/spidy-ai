@@ -84,6 +84,7 @@ GOAL_ACTIONS: frozenset[str] = frozenset({
     # fast LLM-direct path in brain.process(), not via AutonomousAgent planning.
     # Explicit named-engine actions below DO trigger browser automation.
     "search_youtube",
+    "play_youtube_video",
     "search_google",
     "search_bing",
     "search_duckduckgo",
@@ -136,6 +137,9 @@ CHAT_ACTIONS: frozenset[str] = frozenset({
     "set_reminder",
     "get_clipboard",
     "get_time",
+    "get_date",
+    "get_day",
+    "get_datetime",
     # P1-2: search_web moved here from GOAL_ACTIONS — it is a generic/unresolved
     # search intent.  The Brain pipeline's DecisionEngine routes it to LLM_DIRECT
     # or to BrowserSkill in a single step via brain.process(), which is far faster

@@ -46,12 +46,15 @@ from spidy.ui.events import (
     UIShowEvent, UIStateChangeEvent, UIThemeChangeEvent,
     UIWaveformDataEvent,
     UIConfirmationGrantedEvent, UIConfirmationDeniedEvent,
+    UIRestoreEvent, UIMinimizeEvent, UIForegroundEvent,
+    UIWakeReceivedEvent, UIWakeAckEvent,
 )
 from spidy.ui.hotkey import GlobalHotkeyManager
 from spidy.ui.overlay import OverlayWindow, UISignalBridge
 from spidy.ui.state import UIStateMachine, UIState
 from spidy.ui.themes import build_default_theme_manager
 from spidy.ui.tray import SystemTrayManager
+from typing import Callable
 
 log = get_logger(__name__)
 
@@ -69,6 +72,10 @@ class SpidyApp:
     loop:
         The asyncio event loop running in the background thread.
         Required for thread-safe EventBus publishing from Qt callbacks.
+    start_hidden:
+        If True, start Spidy in background without immediately opening HUD.
+    on_quit:
+        Optional callback invoked when user chooses Quit from the UI/tray.
     """
 
     def __init__(
@@ -76,10 +83,14 @@ class SpidyApp:
         bus: "EventBus",
         config: "SpidyConfig",
         loop: asyncio.AbstractEventLoop | None = None,
+        start_hidden: bool = False,
+        on_quit: Callable[[], None] | None = None,
     ) -> None:
         self._bus = bus
         self._config = config
         self._loop = loop
+        self._start_hidden = start_hidden
+        self._on_quit = on_quit
 
         self._qt_app: QApplication | None = None
         self._overlay: OverlayWindow | None = None
@@ -103,17 +114,28 @@ class SpidyApp:
             self._qt_app.setOrganizationName("SpidyAI")
             self._qt_app.setQuitOnLastWindowClosed(False)
 
+        if sys.platform == "win32":
+            # Own taskbar identity (icon + grouping) instead of "Python".
+            try:
+                import ctypes
+                ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("SpidyAI.Spidy")
+            except Exception as exc:  # noqa: BLE001
+                log.debug("AppUserModelID not set: {exc}", exc=exc)
+
         self._setup_overlay()
         self._setup_tray()
         self._setup_hotkey()
         self._setup_event_subscriptions()
 
-        # Show initial overlay
+        # Show initial overlay if not background mode
         if self._config.ui.enabled:
             assert self._overlay is not None
-            self._overlay.show_animated()
-            self._publish_sync(UIReadyEvent())
-            log.info("Spidy overlay UI started.")
+            if not self._start_hidden:
+                self._overlay.show_animated()
+                self._publish_sync(UIReadyEvent())
+                log.info("Spidy overlay UI started.")
+            else:
+                log.info("[SPIDY LIFECYCLE] Spidy overlay UI started in background (HUD hidden).")
 
     def run(self) -> int:
         """Enter the Qt event loop. Blocks until the application exits."""
@@ -124,8 +146,16 @@ class SpidyApp:
         return code
 
     def quit(self) -> None:
-        """Gracefully exit the Qt application."""
-        if self._qt_app:
+        """Gracefully exit the Qt application and signal core shutdown."""
+        if self._on_quit:
+            try:
+                self._on_quit()
+            except Exception as exc:
+                log.debug("on_quit callback error: {exc}", exc=exc)
+        # Never call Qt directly here: quit() runs on the asyncio thread during shutdown.
+        if self._bridge is not None:
+            self._bridge.request_quit_app()
+        elif self._qt_app:
             self._qt_app.quit()
 
     # ── Setup ─────────────────────────────────────────────────────────────
@@ -134,17 +164,34 @@ class SpidyApp:
         cfg = self._config.ui
         theme = self._theme_mgr.current
 
-        self._overlay = OverlayWindow(
-            theme=theme,
-            width=cfg.width,
-            height=cfg.height,
-            edge=cfg.position,
-            always_on_top=cfg.always_on_top,
-            animate=cfg.animate,
-        )
+        self._overlay = None
+        if getattr(cfg, "layout", "dashboard") == "dashboard":
+            try:
+                from spidy.ui.dashboard import DashboardWindow
+                self._overlay = DashboardWindow(
+                    theme=theme,
+                    always_on_top=cfg.always_on_top,
+                    animate=cfg.animate,
+                    weather=(cfg.weather_enabled, cfg.weather_latitude, cfg.weather_longitude),
+                    city=cfg.weather_city,
+                )
+            except Exception as exc:  # noqa: BLE001 — never lose the UI over the new screen
+                log.warning("Dashboard UI failed to start ({exc}); using the classic HUD.", exc=exc)
+        if self._overlay is None:
+            self._overlay = OverlayWindow(
+                theme=theme,
+                width=cfg.width,
+                height=cfg.height,
+                edge=cfg.position,
+                always_on_top=cfg.always_on_top,
+                animate=cfg.animate,
+            )
+        if hasattr(self._overlay, "command_submitted"):
+            self._overlay.command_submitted.connect(self._on_command_submitted)
 
         # Signal bridge
         self._bridge = UISignalBridge()
+        self._bridge.quit_app_requested.connect(QApplication.instance().quit)
         self._bridge.state_change_requested.connect(self._overlay.set_state)
         self._bridge.message_received.connect(self._overlay.add_message)
         self._bridge.notification_requested.connect(
@@ -158,10 +205,13 @@ class SpidyApp:
         self._bridge.confirmation_show.connect(self._overlay.show_confirmation)
         self._bridge.confirmation_hide.connect(self._overlay.hide_confirmation)
 
-        # Thread-safe show / hide / toggle wiring (queued connection across threads)
+        # Thread-safe show / hide / toggle / restore / minimize wiring (queued connection across threads)
         self._bridge.show_hud_requested.connect(self._overlay.show_hud)
         self._bridge.hide_hud_requested.connect(self._overlay.hide_hud)
         self._bridge.toggle_hud_requested.connect(self._overlay.toggle_hud)
+        self._bridge.restore_hud_requested.connect(self._overlay.restore_hud)
+        self._bridge.minimize_hud_requested.connect(self._overlay.minimize_hud)
+        self._bridge.foreground_hud_requested.connect(self._overlay._ensure_foreground)
 
         # Confirmation card signals -> EventBus (publish back to agent layer)
         self._overlay._confirmation_card.confirmed.connect(self._on_confirmation_granted)
@@ -170,6 +220,11 @@ class SpidyApp:
         # Overlay outbound signals → EventBus
         self._overlay.mic_button_clicked.connect(self._on_mic_clicked)
         self._overlay.overlay_closed.connect(self._on_overlay_closed)
+        if hasattr(self._overlay, "quit_requested"):
+            # Settings > Quit Spidy: same as the tray's Quit. (The X only closes the window.)
+            self._overlay.quit_requested.connect(self._on_quit_button)
+        self._overlay.hud_minimized.connect(lambda: self._tray.set_overlay_visible(False) if self._tray else None)
+        self._overlay.hud_restored.connect(lambda: self._tray.set_overlay_visible(True) if self._tray else None)
 
         # Theme change propagation
         self._theme_mgr.add_listener(self._overlay.apply_theme)
@@ -205,6 +260,11 @@ class SpidyApp:
 
         b.subscribe("ui.show", self._handle_show)
         b.subscribe("ui.hide", self._handle_hide)
+        b.subscribe("ui.restore", self._handle_restore)
+        b.subscribe("ui.minimize", self._handle_minimize)
+        b.subscribe("ui.foreground", self._handle_foreground)
+        b.subscribe("ui.wake_received", self._handle_wake_received)
+        b.subscribe("ui.wake_ack", self._handle_wake_ack)
         b.subscribe("ui.state_change", self._handle_state_change)
         b.subscribe("ui.message", self._handle_message)
         b.subscribe("ui.notify", self._handle_notify)
@@ -239,16 +299,56 @@ class SpidyApp:
     async def _handle_show(self, event: UIShowEvent) -> None:
         log.info("[HUD LIFECYCLE] show_hud requested via EventBus ui.show")
         if self._bridge:
-            self._bridge.request_show_hud()
+            self._bridge.request_restore_hud()
         if self._tray:
             self._tray.set_overlay_visible(True)
 
     async def _handle_hide(self, event: UIHideEvent) -> None:
         log.info("[HUD LIFECYCLE] hide_hud requested via EventBus ui.hide")
         if self._bridge:
-            self._bridge.request_hide_hud()
+            self._bridge.request_minimize_hud()
         if self._tray:
             self._tray.set_overlay_visible(False)
+
+    async def _handle_restore(self, event: UIRestoreEvent) -> None:
+        log.info(
+            "[HUD LIFECYCLE] restore_hud requested via EventBus ui.restore source='{src}'",
+            src=getattr(event, "source", ""),
+        )
+        if self._bridge:
+            self._bridge.request_restore_hud()
+        if self._tray:
+            self._tray.set_overlay_visible(True)
+
+    async def _handle_minimize(self, event: UIMinimizeEvent) -> None:
+        log.info(
+            "[HUD LIFECYCLE] minimize_hud requested via EventBus ui.minimize source='{src}'",
+            src=getattr(event, "source", ""),
+        )
+        if self._bridge:
+            self._bridge.request_minimize_hud()
+        if self._tray:
+            self._tray.set_overlay_visible(False)
+
+    async def _handle_foreground(self, event: UIForegroundEvent) -> None:
+        if self._bridge:
+            self._bridge.request_foreground_hud()
+
+    async def _handle_wake_received(self, event: UIWakeReceivedEvent) -> None:
+        log.info(
+            "[HUD LIFECYCLE] UIWakeReceivedEvent phrase='{p}' session='{s}'",
+            p=event.phrase,
+            s=event.session_id,
+        )
+        if self._bridge:
+            self._bridge.request_restore_hud()
+            self._bridge.request_state_change("listening")
+        if self._tray:
+            self._tray.set_overlay_visible(True)
+
+    async def _handle_wake_ack(self, event: UIWakeAckEvent) -> None:
+        if self._bridge:
+            self._bridge.request_state_change("speaking")
 
     async def _handle_state_change(self, event: UIStateChangeEvent) -> None:
         if self._bridge:
@@ -296,16 +396,12 @@ class SpidyApp:
             self._bridge.request_state_change("idle")
 
     async def _handle_wake_detected(self, event) -> None:
-        """Wake word detected → thread-safely request show and transition to LISTENING."""
+        """Wake word detected → thread-safely restore HUD, bring to foreground, and transition to LISTENING."""
         wake_phrase = getattr(event, "wake_phrase", None) or getattr(event, "model_name", "Hey Spidy")
-        vis_before = self._overlay.isVisible() and self._overlay.windowOpacity() > 0.05 if self._overlay else False
-        log.info(
-            "[HUD LIFECYCLE] wake_received phrase=\"{phrase}\" visible_before={vis}",
-            phrase=wake_phrase,
-            vis=vis_before,
-        )
+        # This runs on the asyncio thread: never read or touch widgets here.
+        log.info("[HUD LIFECYCLE] wake_received phrase=\"{phrase}\"", phrase=wake_phrase)
         if self._bridge:
-            self._bridge.request_show_hud()
+            self._bridge.request_restore_hud()
             self._bridge.request_state_change("listening")
         if self._tray:
             self._tray.set_overlay_visible(True)
@@ -315,20 +411,28 @@ class SpidyApp:
     def show_hud(self) -> None:
         """Show HUD overlay window thread-safely."""
         if self._bridge:
-            self._bridge.request_show_hud()
+            self._bridge.request_restore_hud()
         elif self._overlay:
-            self._overlay.show_hud()
+            self._overlay.restore_hud()
         if self._tray:
             self._tray.set_overlay_visible(True)
 
+    def restore_hud(self) -> None:
+        """Restore HUD overlay window to normal size and foreground thread-safely."""
+        self.show_hud()
+
     def hide_hud(self) -> None:
-        """Hide HUD overlay window thread-safely."""
+        """Hide HUD overlay window thread-safely without terminating Spidy."""
         if self._bridge:
-            self._bridge.request_hide_hud()
+            self._bridge.request_minimize_hud()
         elif self._overlay:
-            self._overlay.hide_hud()
+            self._overlay.minimize_hud()
         if self._tray:
             self._tray.set_overlay_visible(False)
+
+    def minimize_hud(self) -> None:
+        """Minimize/hide HUD overlay window thread-safely without terminating Spidy."""
+        self.hide_hud()
 
     def toggle_hud(self) -> None:
         """Toggle HUD overlay window visibility thread-safely."""
@@ -342,6 +446,14 @@ class SpidyApp:
     def _on_mic_clicked(self) -> None:
         from spidy.ui.events import UIMicButtonClickedEvent
         self._publish_sync(UIMicButtonClickedEvent())
+
+    def _on_command_submitted(self, text: str) -> None:
+        from spidy.ui.events import UICommandSubmittedEvent
+        self._publish_sync(UICommandSubmittedEvent(text=text))
+
+    def _on_quit_button(self) -> None:
+        log.info("[SPIDY LIFECYCLE] Quit Spidy chosen in the window -- ending Spidy.")
+        self.quit()
 
     def _on_overlay_closed(self) -> None:
         from spidy.ui.events import UIClosedEvent

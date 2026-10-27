@@ -74,9 +74,9 @@ def _make_mock_agent(running: bool = True):
 
 class TestBrowserSkillCapabilities:
     def test_fifteen_capabilities_declared(self):
-        # v1.0: Added search_bing, search_duckduckgo, search_wikipedia, search_maps (15 → 19)
+        # v1.0: Added search_bing, search_duckduckgo, search_wikipedia, search_maps, play_youtube_video (15 → 20)
         skill = _make_skill()
-        assert len(skill.capabilities()) == 19
+        assert len(skill.capabilities()) == 20
 
     def test_all_expected_actions_present(self):
         skill = _make_skill()
@@ -87,7 +87,7 @@ class TestBrowserSkillCapabilities:
             "navigate_back", "navigate_forward", "refresh_page",
             "search_google", "search_youtube", "search_bing",
             "search_duckduckgo", "search_wikipedia", "search_maps",
-            "open_browser_and_search",
+            "open_browser_and_search", "play_youtube_video",
             "close_browser", "close_tab", "download_file",
         }
         assert expected == actions
@@ -105,7 +105,7 @@ class TestBrowserSkillCapabilities:
             "navigate_back", "navigate_forward", "refresh_page",
             "search_google", "search_youtube", "search_bing",
             "search_duckduckgo", "search_wikipedia", "search_maps",
-            "open_browser_and_search",
+            "open_browser_and_search", "play_youtube_video",
         }
         t1_actual = {c.action for c in skill.capabilities() if c.permission_tier == "T1"}
         assert t1_expected == t1_actual

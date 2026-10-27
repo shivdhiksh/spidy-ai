@@ -11,8 +11,11 @@ app:
   name: "Spidy"
   version: "0.1.0"
   user_name: "Shiva"             # Your name — used in greetings
+  timezone: "auto"               # Explicit timezone (e.g. "Asia/Kolkata") or "auto" for system local
   debug: false                   # Set true for verbose output during dev
   log_level: "INFO"              # DEBUG | INFO | WARNING | ERROR | CRITICAL
+  autostart: false               # Launch Spidy automatically at Windows login
+  start_hidden: false            # Start Spidy in background with HUD hidden
 
 # --------------------------------------------------------------------------- #
 # Paths                                                                       #
@@ -49,13 +52,13 @@ voice:
         phrase: "Hey Spidy"
         model: "hey_spidy"
         model_path: "assets/models/wake_word/hey_spidy.onnx"
-        threshold: 0.35
+        threshold: 0.2   # was 0.35: real-voice scores often peaked at 0.30-0.349 (near misses)
 
       - name: wake_up_spidy
         phrase: "Wake up Spidy"
         model: "wake_up_spidy"
         model_path: "assets/models/wake_word/wake_up_spidy.onnx"
-        threshold: 0.35
+        threshold: 0.2   # see above; false triggers are filtered by verify_with_stt
 
       - name: hey_jarvis
         phrase: "Hey Jarvis"
@@ -69,11 +72,17 @@ voice:
     active_models:
       - hey_spidy
       - wake_up_spidy
-      - hey_jarvis
+
+    # Stage-2 verification: after the wake model fires, Whisper transcribes the last
+    # ~2 s and the detection only counts if it hears "Spidy". The wake models also
+    # fire on "Hey Siri" / "Hey buddy"; this filters those out (adds ~0.3-0.7 s).
+    # Set false to trust the wake model alone.
+    verify_with_stt: true
+    verify_window_seconds: 2.0
 
     # Legacy single-model compatibility fields
     model: "hey_jarvis"
-    threshold: 0.35
+    threshold: 0.2
     chunk_size: 1280
     custom_model_path: null
 
@@ -93,11 +102,14 @@ voice:
     language: "en"
     vad_filter: true              # Voice Activity Detection to skip silence
     vad_threshold: 0.5
+    idle_unload_seconds: 90       # free the speech model after 90 s of quiet; it reloads when the wake word starts to sound (0 = keep loaded)
 
   # Text-to-Speech
   tts:
-    engine: "piper"               # piper | kokoro | system
-    voice: "en_US-ryan-high"      # Piper male voice model
+    engine: "hybrid"               # hybrid (ElevenLabs primary + Piper fallback) | elevenlabs | piper
+    voice: "en_US-lessac-high"    # Piper voice model (female, American English)
+    elevenlabs_voice_id: "ZYk9CB0JtzXJrxcnt9Oz"  # Existing custom Gwen voice ID
+    elevenlabs_model_id: "eleven_turbo_v2_5"      # Turbo model for low-latency synthesis
     speed: 1.0                    # Playback speed multiplier
     volume: 1.0                   # Output volume (0.0–1.0)
 
@@ -117,7 +129,7 @@ voice:
   # ----------------------------------
   session:
     continuous_mode: true             # Stay listening between turns (no repeat wake word needed).
-    conversation_timeout_seconds: 60  # Close session after N seconds of inactivity.
+    conversation_timeout_seconds: 25  # Close session after N seconds of inactivity (was 60: room chatter got picked up as commands)
     max_turns_per_session: 50
     measure_latency: true             # Log voice pipeline timing (first-word, STT, Brain, TTS).
 
@@ -146,6 +158,7 @@ voice:
   # (schedule_lazy_load).  This removes ~180 MB from the startup RAM peak.
   # If TTS fires before the model is ready, barge-in safely skips that cycle.
   barge_in:
+    load_on_wake: true            # load the model when a wake word starts to sound, free it when idle (saves ~180 MB)
     enabled: true                 # Master switch. Set false to revert to IDLE (mic muted during TTS).
     model: "tiny.en"              # faster-whisper model for barge-in STT.
                                   # tiny.en: 671 ms warm / ~180 MB.  base.en: 899 ms / 354 MB.
@@ -156,6 +169,9 @@ voice:
     min_rms_threshold: 0.015      # Energy gate: chunks below this RMS are discarded (speaker bleed).
                                   # Raise if Piper echo falsely triggers detection (~0.03–0.05).
                                   # Lower if your mic is very quiet and stop commands are missed (~0.005).
+    interrupt_on_speech: false    # OFF: talking over Spidy does not stop her (experimental; unreliable on laptop speakers).
+                                  # The "Spidy stop" phrase still works.
+    trigger_ratio: 1.5            # Only used when interrupt_on_speech is true: how much louder than Spidy's echo you must be.
 
   # TTS Text Pre-Processing Filter
   # ---------------------------------
@@ -476,3 +492,4 @@ learning:
   # Privacy / data retention
   #   Feedback signals older than data_retention_days are pruned automatically.
   data_retention_days: 365
+

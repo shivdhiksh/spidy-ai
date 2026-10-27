@@ -14,6 +14,7 @@ Implements deterministic, state-aware desktop automation for Windows:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ctypes
 import os
 import subprocess
@@ -38,6 +39,37 @@ except ImportError:
     win32gui = None
     win32process = None
     _WIN32_AVAILABLE = False
+
+
+class DesktopStateLock:
+    """
+    Global desktop execution lock.
+    Serializes active keyboard, mouse, and clipboard manipulations across
+    concurrent goals to prevent race conditions in desktop automation.
+    """
+    _lock: asyncio.Lock | None = None
+
+    @classmethod
+    def get_lock(cls) -> asyncio.Lock:
+        if cls._lock is None:
+            cls._lock = asyncio.Lock()
+        return cls._lock
+
+    @classmethod
+    @contextlib.asynccontextmanager
+    async def acquire(cls):
+        lock = cls.get_lock()
+        await lock.acquire()
+        try:
+            yield
+        finally:
+            if lock.locked():
+                lock.release()
+
+    @classmethod
+    def is_locked(cls) -> bool:
+        """Check if desktop state lock is currently held."""
+        return cls.get_lock().locked()
 
 
 class DesktopComputerController:
@@ -266,6 +298,39 @@ class DesktopComputerController:
             log.error("[COMPUTER] focus_window failed: {exc}", exc=exc)
             return False
 
+    def switch_window(self, query: str | int) -> bool:
+        """Alias for focus_window."""
+        return self.focus_window(query)
+
+    def switch_application(self, name: str) -> bool:
+        """Switch to or focus a running application."""
+        return self.focus_window(name)
+
+    def is_window_focused(self, query: str | int) -> bool:
+        """Check if target window is the active foreground window."""
+        if not self._is_windows:
+            return True
+        active = self.get_active_window()
+        if isinstance(query, int):
+            return active.get("hwnd") == query
+        q = str(query).lower()
+        return q in active.get("title", "").lower() or q in active.get("process_name", "").lower()
+
+    def wait_for_window_ready(
+        self,
+        query: str | int,
+        timeout: float = 3.0,
+        poll_interval: float = 0.1,
+    ) -> bool:
+        """Poll until target window exists and is visible (bounded timeout)."""
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            win = query if isinstance(query, int) else self.find_window(str(query))
+            if win:
+                return True
+            time.sleep(poll_interval)
+        return False
+
     def open_application(self, name_or_path: str, args: str = "") -> tuple[bool, str]:
         """Launch or focus a Windows application by name or executable path."""
         log.info("[COMPUTER] action=start type=open_app target='{t}'", t=name_or_path)
@@ -282,6 +347,9 @@ class DesktopComputerController:
             "terminal": "wt.exe",
             "edge": "msedge.exe",
             "chrome": "chrome.exe",
+            "vs code": "code.cmd",
+            "vscode": "code.cmd",
+            "code": "code.cmd",
         }
         cmd = app_map.get(name_or_path.lower().strip(), name_or_path)
 
@@ -412,6 +480,43 @@ class DesktopComputerController:
             log.error("[COMPUTER] move_mouse failed: {exc}", exc=exc)
             return False
 
+    def mouse_down(self, button: str = "left") -> bool:
+        """Press and hold mouse button."""
+        if not self._is_windows:
+            return True
+        btn = button.lower()
+        flag = 0x0002 if btn == "left" else (0x0008 if btn == "right" else 0x0020)
+        ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+        return True
+
+    def mouse_up(self, button: str = "left") -> bool:
+        """Release mouse button."""
+        if not self._is_windows:
+            return True
+        btn = button.lower()
+        flag = 0x0004 if btn == "left" else (0x0010 if btn == "right" else 0x0040)
+        ctypes.windll.user32.mouse_event(flag, 0, 0, 0, 0)
+        return True
+
+    def drag_and_drop(self, x1: int, y1: int, x2: int, y2: int, duration: float = 0.2) -> bool:
+        """Drag mouse from (x1, y1) to (x2, y2)."""
+        log.info("[COMPUTER] action=start type=drag_and_drop from=({x1},{y1}) to=({x2},{y2})", x1=x1, y1=y1, x2=x2, y2=y2)
+        if not self._is_windows:
+            return True
+        try:
+            self.move_mouse(x1, y1)
+            time.sleep(0.05)
+            self.mouse_down("left")
+            time.sleep(0.05)
+            self.move_mouse(x2, y2, duration=duration)
+            time.sleep(0.05)
+            self.mouse_up("left")
+            log.info("[COMPUTER] action=complete type=drag_and_drop success=True")
+            return True
+        except Exception as exc:
+            log.error("[COMPUTER] drag_and_drop failed: {exc}", exc=exc)
+            return False
+
     def click(
         self,
         x: int | None = None,
@@ -517,8 +622,39 @@ class DesktopComputerController:
             log.error("[COMPUTER] type_text failed: {exc}", exc=exc)
             return False
 
+    def safe_type_text(
+        self,
+        text: str,
+        target_window: str = "",
+        interval: float = 0.01,
+        press_enter: bool = False,
+    ) -> bool:
+        """
+        Verify target window is focused before typing to prevent blind typing.
+        """
+        if target_window:
+            if not self.is_window_focused(target_window):
+                focused = self.focus_window(target_window)
+                if not focused:
+                    log.warning("[COMPUTER] safe_type_text: failed to focus '{w}' before typing", w=target_window)
+                    return False
+                time.sleep(0.1)
+        return self.type_text(text, interval=interval, press_enter=press_enter)
+
+    def select_all(self) -> bool:
+        """Execute Ctrl+A to select all text."""
+        return self.hotkey("ctrl", "a")
+
+    def undo(self) -> bool:
+        """Execute Ctrl+Z to undo."""
+        return self.hotkey("ctrl", "z")
+
+    def redo(self) -> bool:
+        """Execute Ctrl+Y to redo."""
+        return self.hotkey("ctrl", "y")
+
     def press_key(self, key: str) -> bool:
-        """Press and release a single key (e.g. 'enter', 'tab', 'esc', 'backspace', 'f5')."""
+        """Press and release a single key (e.g. 'enter', 'tab', 'esc', 'backspace', 'f5', 'f1'-'f12')."""
         log.info("[COMPUTER] action=start type=press_key key='{k}'", k=key)
         if not self._is_windows:
             return True
@@ -526,6 +662,8 @@ class DesktopComputerController:
             "enter": 0x0D, "return": 0x0D, "esc": 0x1B, "escape": 0x1B,
             "tab": 0x09, "space": 0x20, "backspace": 0x08, "delete": 0x2E,
             "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "home": 0x24, "end": 0x23, "pageup": 0x21, "pagedown": 0x22,
+            "insert": 0x2D,
             "f1": 0x70, "f2": 0x71, "f3": 0x72, "f4": 0x73, "f5": 0x74,
             "f6": 0x75, "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79,
             "f11": 0x7A, "f12": 0x7B,
@@ -565,8 +703,11 @@ class DesktopComputerController:
             "win": 0x5B, "windows": 0x5B, "cmd": 0x5B,
             "enter": 0x0D, "return": 0x0D, "esc": 0x1B, "escape": 0x1B,
             "tab": 0x09, "space": 0x20, "backspace": 0x08, "delete": 0x2E,
-            "s": 0x53, "c": 0x43, "v": 0x56, "x": 0x58, "a": 0x41, "z": 0x5A,
-            "f4": 0x73, "n": 0x4E, "o": 0x4F, "w": 0x57, "r": 0x52,
+            "up": 0x26, "down": 0x28, "left": 0x25, "right": 0x27,
+            "s": 0x53, "c": 0x43, "v": 0x56, "x": 0x58, "a": 0x41, "z": 0x5A, "y": 0x59,
+            "f4": 0x73, "n": 0x4E, "o": 0x4F, "w": 0x57, "r": 0x52, "p": 0x50,
+            "f1": 0x70, "f2": 0x71, "f3": 0x72, "f5": 0x74, "f6": 0x75,
+            "f7": 0x76, "f8": 0x77, "f9": 0x78, "f10": 0x79, "f11": 0x7A, "f12": 0x7B,
         }
         vks: list[int] = []
         for k in key_list:
@@ -701,6 +842,14 @@ class DesktopComputerController:
         except Exception as exc:
             log.debug("[COMPUTER] set_clipboard_text error: {exc}", exc=exc)
             return False
+
+    def preserve_clipboard(self) -> str:
+        """Read and return current clipboard text for later restoration."""
+        return self.get_clipboard_text()
+
+    def restore_clipboard(self, text: str) -> bool:
+        """Restore previously preserved clipboard text."""
+        return self.set_clipboard_text(text)
 
     def copy(self) -> str:
         """Execute Ctrl+C and return clipboard content."""

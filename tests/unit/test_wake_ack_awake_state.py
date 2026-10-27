@@ -133,14 +133,14 @@ async def test_01_wake_triggers_session_activate():
 
 
 # ---------------------------------------------------------------------------
-# Test 2 — Duplicate wake ignored during active session
+# Test 2 — Second wake while active refreshes session
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_02_duplicate_wake_ignored():
     cvc, mocks = _make_cvc(session_active=True)
     await cvc._on_wake_word(_wake_event("hey_jarvis"))
-    # session already active — activate() must NOT be called again
-    mocks["session"].activate.assert_not_awaited()
+    # session already active — activate() is called to refresh timeout
+    mocks["session"].activate.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -218,7 +218,7 @@ async def test_05_ack_not_forwarded_to_stt():
 
 
 # ---------------------------------------------------------------------------
-# Test 6 — Second wake during active session does not re-trigger ack
+# Test 6 — Second wake during active session acknowledges user
 # ---------------------------------------------------------------------------
 @pytest.mark.asyncio
 async def test_06_second_wake_no_ack():
@@ -230,14 +230,14 @@ async def test_06_second_wake_no_ack():
 
     # First wake — fires normally
     await cvc._on_wake_word(_wake_event())
-    first_tts_count = mocks["tts"].speak.call_count
+    assert mocks["tts"].speak.call_count == 1
 
     # Now session is active — simulate second wake
     mocks["session"].is_active = True
     await cvc._on_wake_word(_wake_event())
 
-    # TTS call count must not increase
-    assert mocks["tts"].speak.call_count == first_tts_count
+    # User explicitly woke Spidy again, so ack is spoken
+    assert mocks["tts"].speak.call_count == 2
 
 
 # ---------------------------------------------------------------------------

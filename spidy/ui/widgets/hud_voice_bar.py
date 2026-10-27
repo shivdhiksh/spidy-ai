@@ -1,4 +1,4 @@
-﻿"""
+"""
 hud_voice_bar.py -- HUDVoiceBar: Futuristic voice visualizer
 =============================================================
 Bottom center element -- reacts to amplitude.
@@ -42,9 +42,9 @@ class HUDVoiceBar(QWidget):
         self._bars      = [0.0] * _NUM_BARS
         self._phase     = 0.0
 
-        self._c_primary   = QColor("#00E5FF")
-        self._c_secondary = QColor("#00ACC1")
-        self._c_dim       = QColor("#004D5E")
+        self._c_primary   = QColor("#E62429")  # Spider-red
+        self._c_secondary = QColor("#1B2A4A")  # Navy web-blue
+        self._c_dim       = QColor("#3A1014")  # Dim red
 
         self._timer = QTimer(self)
         self._timer.setInterval(_FPS_IDLE)

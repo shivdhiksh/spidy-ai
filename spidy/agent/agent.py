@@ -73,7 +73,7 @@ from spidy.agent.replanner import Replanner
 from spidy.agent.structured_router import StructuredRouter  # M18
 from spidy.agent.task_decomposer import TaskDecomposer
 from spidy.agent.task_logger import AgentTaskLogger
-from spidy.agent.types import ExecutionContext, GoalState
+from spidy.agent.types import ExecutionContext, GoalContext, GoalState, TaskState
 from spidy.agent.verifier import GoalVerifier
 from spidy.logging.logger import get_logger
 
@@ -131,6 +131,9 @@ class AutonomousAgent:
         replan_enabled: bool = True,
         verify_enabled: bool = True,
         vision_enabled: bool = False,
+        goal_manager: "GoalManager | None" = None,
+        decomposer: "TaskDecomposer | None" = None,
+        router: "StructuredRouter | None" = None,
     ) -> None:
         self._brain = brain
         self._bus = bus
@@ -139,8 +142,8 @@ class AutonomousAgent:
         self._verify_enabled = verify_enabled
 
         # ── M13 components (preserved) ─────────────────────────────────────
-        self._goal_manager = GoalManager(bus=bus)
-        self._decomposer = TaskDecomposer()
+        self._goal_manager = goal_manager or GoalManager(bus=bus)
+        self._decomposer = decomposer or TaskDecomposer()
         self._reflection = ReflectionEngine(max_retries=max_task_retries)
         self._tracker = ProgressTracker(bus=bus)
 
@@ -170,7 +173,7 @@ class AutonomousAgent:
         self._verifier = GoalVerifier() if verify_enabled else None
 
         # M18: Structured action router
-        router = StructuredRouter(brain=brain)
+        router = router or StructuredRouter(brain=brain)
 
         # Wire all components into ExecutionLoop
         self._loop = ExecutionLoop(
@@ -190,6 +193,7 @@ class AutonomousAgent:
 
         # Active execution context (for cancellation)
         self._active_ctx: ExecutionContext | None = None
+        self._waiting_ctx: ExecutionContext | None = None
 
     # ── Primary API ────────────────────────────────────────────────────────
 
@@ -231,6 +235,9 @@ class AutonomousAgent:
         await self._publish_brain_goal_started(goal_description, sid)
 
         try:
+            import time
+            t0 = time.monotonic()
+
             # 1. Create goal record
             goal = await self._goal_manager.create_goal(
                 description=goal_description,
@@ -243,49 +250,82 @@ class AutonomousAgent:
             await self._tracker.publish_planning()
 
             # 3. Decompose goal into tasks
+            t_plan_start = time.monotonic()
             tasks = await self._decomposer.decompose(
                 goal_description=goal_description,
                 goal_id=goal.goal_id,
                 llm_client=self._llm_client,
                 session_id=sid,
             )
+            planning_ms = (time.monotonic() - t_plan_start) * 1000.0
             self._task_log.plan_generated(goal, tasks)
 
-            # 4. Transition to EXECUTING
+            # 4. Initialize GoalContext with complete persistent state
+            goal_context = GoalContext(
+                goal_id=goal.goal_id,
+                original_goal=goal_description,
+                normalized_goal=goal_description.strip(),
+                original_transcript=goal_description,
+                normalized_transcript=goal_description.strip(),
+                tasks=tasks,
+                metrics={"planning_ms": planning_ms},
+            )
+
+            # 5. Transition to EXECUTING
             goal = await self._goal_manager.begin_execution(
                 goal_id=goal.goal_id,
                 tasks=tasks,
             )
 
-            # 5. Build execution context
+            # 6. Build execution context
             ctx = ExecutionContext(
                 goal=goal,
                 session_id=sid,
                 max_task_retries=self._max_task_retries,
+                goal_context=goal_context,
             )
             self._active_ctx = ctx
 
-            # 6. Run execution loop (now returns observations too)
+            # 7. Run execution loop (now returns observations too)
+            t_exec_start = time.monotonic()
             final_goal, observations = await self._loop.run(
                 goal=goal,
                 tasks=tasks,
                 ctx=ctx,
             )
+            goal_context.metrics["execution_ms"] = (time.monotonic() - t_exec_start) * 1000.0
+
+            if final_goal.state == GoalState.WAITING_FOR_USER:
+                self._waiting_ctx = ctx
+                self._active_ctx = None
+                return self._compose_response(final_goal)
+
+            self._waiting_ctx = None
             self._active_ctx = None
 
-            # 7. Final verification (M16)
+            # 8. Final verification (M16)
             if self._verifier is not None and final_goal.state == GoalState.COMPLETED:
+                t_ver_start = time.monotonic()
                 verification = await self._verifier.verify(
                     goal=final_goal,
                     observations=observations,
                     llm_client=self._llm_client,
+                    goal_context=goal_context,
                 )
+                goal_context.metrics["verification_ms"] = (time.monotonic() - t_ver_start) * 1000.0
+                goal_context.verification_state = "verified" if verification.verified else "partial"
                 self._task_log.verification(verification)
                 await self._publish_goal_verified(final_goal, verification)
+
+                # If verification returned a detailed summary, record it on goal
+                if verification.summary:
+                    final_goal = final_goal.with_state(final_goal.state, summary=verification.summary)
 
                 # On goal completion, reset replanner counter
                 if self._replanner is not None:
                     self._replanner.reset(final_goal.goal_id)
+
+            goal_context.metrics["total_ms"] = (time.monotonic() - t0) * 1000.0
 
             # Log goal lifecycle event
             if final_goal.state == GoalState.COMPLETED:
@@ -295,7 +335,7 @@ class AutonomousAgent:
             elif final_goal.state == GoalState.CANCELLED:
                 self._task_log.goal_cancelled(final_goal)
 
-            # 8. Build response
+            # 9. Build response
             return self._compose_response(final_goal)
 
         except RuntimeError as exc:
@@ -310,6 +350,80 @@ class AutonomousAgent:
                 f"Details: {exc}"
             )
 
+    def has_waiting_goal(self) -> bool:
+        """True if a goal is currently paused waiting for user clarification."""
+        return (
+            self._waiting_ctx is not None
+            or (self.active_goal is not None and self.active_goal.state == GoalState.WAITING_FOR_USER)
+        )
+
+    async def resume_with_user_input(self, user_input: str) -> str:
+        """
+        Resume a goal that is paused in WAITING_FOR_USER using the provided user answer.
+        """
+        if not self.has_waiting_goal():
+            return "No goal is currently waiting for clarification."
+
+        ctx = self._waiting_ctx
+        goal = self.active_goal
+        if ctx is None or goal is None:
+            return "No active goal context found to resume."
+
+        waiting_task_id = ctx.waiting_task_id
+        log.info(
+            "[AGENT] Resuming goal '{desc}' with user answer: '{ans}'",
+            desc=goal.description[:60],
+            ans=user_input[:60],
+        )
+
+        # Bind the user's input to the waiting task in context
+        ctx.add_structured_result(
+            waiting_task_id,
+            {"result": user_input, "text": user_input, "query": user_input},
+        )
+        if waiting_task_id not in ctx.step_results:
+            ctx.step_results[waiting_task_id] = user_input
+
+        # Mark the waiting task as completed with user's answer
+        completed_task = None
+        new_tasks = []
+        resume_index = 0
+        for i, t in enumerate(goal.tasks):
+            if t.task_id == waiting_task_id or t.state == TaskState.WAITING_FOR_USER:
+                completed_task = t.mark_completed(user_input)
+                new_tasks.append(completed_task)
+                resume_index = i + 1
+            else:
+                new_tasks.append(t)
+
+        if completed_task is not None:
+            goal = await self._goal_manager.update_task(goal.goal_id, completed_task)
+        goal = await self._goal_manager.resume_goal(goal.goal_id)
+
+        self._waiting_ctx = None
+        self._active_ctx = ctx
+
+        # If all tasks are now done:
+        if resume_index >= len(new_tasks):
+            summary = self._loop._build_completion_summary(goal)
+            completed_goal = await self._goal_manager.complete_goal(goal.goal_id, summary=summary)
+            self._active_ctx = None
+            return self._compose_response(completed_goal)
+
+        # Continue execution with remaining tasks
+        final_goal, observations = await self._loop.run(
+            goal=goal,
+            tasks=new_tasks,
+            ctx=ctx,
+        )
+        if final_goal.state == GoalState.WAITING_FOR_USER:
+            self._waiting_ctx = ctx
+            self._active_ctx = None
+            return self._compose_response(final_goal)
+
+        self._active_ctx = None
+        return self._compose_response(final_goal)
+
     async def cancel_current_goal(self) -> bool:
         """
         Cancel the currently running goal.
@@ -319,12 +433,13 @@ class AutonomousAgent:
         bool
             True if a goal was cancelled, False if no goal was active.
         """
-        if self._active_ctx is None:
+        if self._active_ctx is None and self._waiting_ctx is None:
             log.debug("[AGENT] AutonomousAgent: cancel requested but no active goal.")
             return False
 
-        ctx = self._active_ctx
-        ctx.cancel()  # Signal the execution loop to stop
+        ctx = self._active_ctx or self._waiting_ctx
+        if ctx:
+            ctx.cancel()  # Signal the execution loop to stop
 
         goal = self._goal_manager.active_goal
         if goal:
@@ -338,6 +453,7 @@ class AutonomousAgent:
                 self._replanner.reset(goal.goal_id)
 
         self._active_ctx = None
+        self._waiting_ctx = None
         return True
 
     # ── Properties ─────────────────────────────────────────────────────────
@@ -371,9 +487,19 @@ class AutonomousAgent:
         Uses the goal's summary if available, or constructs a response
         from the terminal state and task results.
         """
+        if goal.state == GoalState.WAITING_FOR_USER:
+            for t in goal.tasks:
+                if t.state == TaskState.WAITING_FOR_USER:
+                    return t.result_message or "Could you please clarify how you'd like to proceed?"
+            return "Could you please clarify how you'd like to proceed?"
+
         if goal.state == GoalState.COMPLETED:
             if goal.summary:
                 return goal.summary
+            if goal.tasks and len(goal.tasks) > 0:
+                last_msg = goal.tasks[-1].result_message
+                if last_msg:
+                    return last_msg
             return (
                 f"I've finished working on '{goal.description}'. "
                 f"All {goal.completed_task_count} steps completed successfully."

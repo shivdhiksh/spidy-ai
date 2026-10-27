@@ -450,8 +450,8 @@ class TestWakeDuringTTS:
         session.activate.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_wake_ignored_while_session_active(self):
-        """When session is active (but TTS not speaking), wake event still ignored."""
+    async def test_wake_refreshes_while_session_active(self):
+        """When session is active (and TTS not speaking), wake event refreshes session."""
         cvc, bus, session, brain, streaming_tts, tts_engine, _ = _make_cvc(
             session_active=True,
             tts_speaking=False,
@@ -460,7 +460,7 @@ class TestWakeDuringTTS:
         event = MagicMock(model_name="hey_jarvis")
         await cvc._on_wake_word(event)
 
-        session.activate.assert_not_awaited()
+        session.activate.assert_awaited_once()
 
 
 # =============================================================================

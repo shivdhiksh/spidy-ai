@@ -41,6 +41,23 @@ def _make_skill(bus=None, tmp_root: Path | None = None, max_results: int = 50) -
     )
 
 
+class TestCreateFileVerification:
+    @pytest.mark.asyncio
+    async def test_create_file_returns_verified_absolute_path(self, tmp_path):
+        """Creation succeeds only after the exact bytes are observable on disk."""
+        skill = _make_skill(tmp_root=tmp_path)
+        result = await skill.execute(
+            "create_file", _ctx("create_file", {"path": "test.py", "content": "print('ok')\n"})
+        )
+
+        created = tmp_path / "test.py"
+        assert result.success
+        assert result.data["verified"] is True
+        assert result.data["exists"] is True
+        assert Path(result.data["path"]) == created.resolve()
+        assert created.read_text(encoding="utf-8") == "print('ok')\n"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # 1. Capability declarations
 # ──────────────────────────────────────────────────────────────────────────────
@@ -54,7 +71,8 @@ class TestFileSkillCapabilities:
             # Existing actions
             "search_files", "search_folders", "open_file",
             "open_folder", "reveal_in_explorer", "list_recent_files",
-            # M13.2 — folder mutation actions
+            # File and folder mutation actions
+            "create_file", "read_file",
             "create_folder", "rename_folder", "delete_folder",
         }
         assert expected == set(actions)

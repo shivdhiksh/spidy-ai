@@ -76,9 +76,11 @@ class FileSkill(BaseSkill):
         bus: "EventBus | None" = None,
         search_root: str | None = None,
         max_results: int = _DEFAULT_MAX_RESULTS,
+        default_root: str | None = None,
     ) -> None:
         self._bus = bus
-        self._search_root = Path(search_root or _DEFAULT_SEARCH_ROOT).expanduser()
+        root = search_root or default_root or _DEFAULT_SEARCH_ROOT
+        self._search_root = Path(root).expanduser()
         self._max_results = max_results
 
     # ── Capabilities ──────────────────────────────────────────────────────
@@ -179,6 +181,26 @@ class FileSkill(BaseSkill):
                 ],
             ),
             SkillCapability(
+                action="create_file",
+                description="Create or write content to a file.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("filename", "string", required=False, description="File name."),
+                    ParamSchema("path", "path", required=False, description="Target file path."),
+                    ParamSchema("content", "string", required=False, default="", description="File contents."),
+                ],
+                examples=["create hello.py", "create file Edge.py", "save notes.txt"],
+            ),
+            SkillCapability(
+                action="read_file",
+                description="Read contents of a file.",
+                permission_tier="T0",
+                params=[
+                    ParamSchema("path", "path", required=True, description="File path to read."),
+                ],
+                examples=["read calc.py", "view report.txt"],
+            ),
+            SkillCapability(
                 action="create_folder",
                 description="Create a new folder at the specified path (defaults to Desktop).",
                 permission_tier="T1",
@@ -241,6 +263,10 @@ class FileSkill(BaseSkill):
             return await self._open_file(context)
         if action == "open_folder":
             return await self._open_folder(context)
+        if action in ("create_file", "write_file", "save_file"):
+            return await self._create_file(context)
+        if action == "read_file":
+            return await self._read_file(context)
         if action == "reveal_in_explorer":
             return await self._reveal_in_explorer(context)
         if action == "list_recent_files":
@@ -253,6 +279,83 @@ class FileSkill(BaseSkill):
             return await self._delete_folder(context)
         return SkillResult.fail(f"FileSkill: unknown action '{action}'.")
 
+    @staticmethod
+    def _clean_path_input(raw: str) -> str:
+        """Clean path strings extracted from natural speech / transcripts."""
+        s = str(raw).strip()
+        s = s.strip("'\"`")
+        s = s.rstrip(".?!,;:")
+        return s
+
+    async def _create_file(self, context: SkillContext) -> SkillResult:
+        raw_path = self._clean_path_input(context.get("path") or context.get("filename") or context.get("name") or "")
+        content = context.get("content", "")
+
+        if not raw_path:
+            return SkillResult.fail("FileSkill: 'path' or 'filename' is required to create a file.")
+
+        p = Path(raw_path)
+        if not p.is_absolute():
+            p = self._search_root / p
+
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            with open(p, "w", encoding="utf-8", newline="") as f:
+                f.write(content)
+            # Never report a successful desktop write based only on the
+            # absence of an exception.  Resolve the exact path and verify the
+            # object and byte count that Windows made visible on disk.
+            p = p.resolve()
+            st_size = p.stat().st_size if p.exists() else -1
+            expected_size = len(content.encode("utf-8"))
+            if not p.is_file() or st_size != expected_size:
+                return SkillResult.fail(
+                    f"FileSkill: write verification failed for '{p}'.",
+                )
+            log.info(
+                "FileSkill: created file '{path}' ({size} bytes)",
+                path=str(p),
+                size=st_size,
+            )
+            return SkillResult.ok(
+                f"Created and verified file '{p}'.",
+                data={
+                    "path": str(p),
+                    "file_path": str(p),
+                    "filename": p.name,
+                    "size": p.stat().st_size,
+                    "content": content,
+                    "exists": True,
+                    "verified": True,
+                },
+                action_taken="create_file",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(f"FileSkill: failed to create file '{p}': {exc}", error=exc)
+
+    async def _read_file(self, context: SkillContext) -> SkillResult:
+        raw_path = self._clean_path_input(context.get("path") or context.get("filename") or "")
+        if not raw_path:
+            return SkillResult.fail("FileSkill: 'path' is required to read a file.")
+
+        p = Path(raw_path)
+        if not p.is_absolute():
+            p = self._search_root / p
+
+        if not p.exists():
+            return SkillResult.fail(f"FileSkill: file not found '{p}'.")
+
+        try:
+            with open(p, "r", encoding="utf-8", errors="replace") as f:
+                data = f.read()
+            return SkillResult.ok(
+                f"Read file '{p.name}'.",
+                data={"path": str(p), "filename": p.name, "content": data},
+                action_taken="read_file",
+            )
+        except Exception as exc:  # noqa: BLE001
+            return SkillResult.fail(f"FileSkill: failed to read file '{p}': {exc}", error=exc)
+
     # ── Actions ───────────────────────────────────────────────────────────
 
     async def _search_files(self, context: SkillContext) -> SkillResult:
@@ -261,43 +364,67 @@ class FileSkill(BaseSkill):
             return SkillResult.fail("FileSkill: 'query' parameter is required for search_files.")
 
         raw_path = context.get("path")
-        search_root = Path(raw_path).expanduser() if raw_path else self._search_root
-        if not search_root.exists():
-            return SkillResult.fail(
-                f"FileSkill: search path does not exist: '{search_root}'"
-            )
+        if raw_path:
+            p = Path(raw_path).expanduser()
+            if not p.exists():
+                return SkillResult.fail(f"FileSkill: search path does not exist: '{raw_path}'")
 
         extensions_raw: str = context.get("extensions", "")
-        extensions: list[str] | None = None
-        if extensions_raw:
-            extensions = [
-                f".{e.strip().lstrip('.')}" for e in extensions_raw.split(",") if e.strip()
-            ]
-
         max_r = int(context.get("max_results") or self._max_results)
         max_r = min(max_r, self._max_results)
 
-        # Run blocking search in thread pool
-        results = await asyncio.to_thread(
-            self._do_file_search, search_root, query, extensions, max_r, files_only=True
+        # Run smart search
+        file_items = await asyncio.to_thread(
+            self._smart_file_search, query, raw_path, extensions_raw, max_r, str(self._search_root)
         )
 
-        await self._emit_search_result(query, results, str(search_root), context.session_id)
+        results = [item["path"] for item in file_items]
+        search_root = raw_path or str(self._search_root)
+        await self._emit_search_result(query, results, search_root, context.session_id)
 
-        if not results:
+        if not file_items:
             return SkillResult.ok(
-                f"No files matching '{query}' found in {search_root}.",
-                data={"results": [], "query": query, "search_root": str(search_root),
-                      "total_found": 0},
+                f"No files matching '{query}' found.",
+                data={"results": [], "query": query, "total_found": 0},
                 action_taken="search_files",
             )
 
-        paths_str = "\n".join(results[:10])
-        suffix = f"\n… and {len(results) - 10} more." if len(results) > 10 else ""
+        # Single confident match
+        if len(file_items) == 1:
+            best = file_items[0]
+            return SkillResult.ok(
+                f"Found '{best['name']}' at {best['path']} ({best['size_str']}).",
+                data={
+                    "results": results,
+                    "file_path": best["path"],
+                    "path": best["path"],
+                    "name": best["name"],
+                    "filename": best["name"],
+                    "size": best["size"],
+                    "mtime": best["mtime"],
+                    "total_found": 1,
+                },
+                action_taken="search_files",
+            )
+
+        # Multiple matches — provide ranked/disambiguated list
+        lines = [f"{i+1}. {item['name']} ({item['size_str']}) — {item['path']}" for i, item in enumerate(file_items[:5])]
+        msg = f"I found {len(file_items)} matching file(s):\n" + "\n".join(lines)
+        if len(file_items) > 5:
+            msg += f"\n... and {len(file_items) - 5} more."
+
+        best = file_items[0]
         return SkillResult.ok(
-            f"Found {len(results)} file(s) matching '{query}':\n{paths_str}{suffix}",
-            data={"results": results, "query": query, "search_root": str(search_root),
-                  "total_found": len(results)},
+            msg,
+            data={
+                "results": results,
+                "file_path": best["path"],
+                "path": best["path"],
+                "name": best["name"],
+                "filename": best["name"],
+                "candidates": file_items[:10],
+                "total_found": len(file_items),
+            },
             action_taken="search_files",
         )
 
@@ -338,7 +465,7 @@ class FileSkill(BaseSkill):
         )
 
     async def _open_file(self, context: SkillContext) -> SkillResult:
-        raw_path = context.get("path", "")
+        raw_path = self._clean_path_input(context.get("path", ""))
         if not raw_path:
             return SkillResult.fail("FileSkill: 'path' parameter is required for open_file.")
 
@@ -459,7 +586,7 @@ class FileSkill(BaseSkill):
         The default parent is the user's Desktop so that natural commands like
         "create a new folder" place the folder somewhere visible.
         """
-        folder_name: str = (context.get("folder_name") or "").strip()
+        folder_name: str = (context.get("folder_name") or context.get("name") or "").strip()
         if not folder_name:
             folder_name = "New Folder"  # default name when not specified
 
@@ -734,6 +861,182 @@ class FileSkill(BaseSkill):
             # Ultimate fallback: permanent delete
             import shutil
             shutil.rmtree(path, ignore_errors=True)
+
+    @classmethod
+    def _smart_file_search(
+        cls,
+        query: str,
+        raw_path: str | None,
+        extensions_raw: str,
+        max_results: int,
+        default_root: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Intelligent multi-location file search with metadata extraction,
+        size ranking, time filtering, and prioritized folders.
+        """
+        import os
+        import re
+
+        q_lower = query.lower().strip()
+
+        # Parse target roots
+        search_roots: list[Path] = []
+        if raw_path:
+            p = Path(raw_path).expanduser()
+            if p.exists():
+                search_roots.append(p)
+        else:
+            # Check if query targets a specific directory
+            if "download" in q_lower:
+                dl = Path.home() / "Downloads"
+                if dl.exists():
+                    search_roots.append(dl)
+            elif "desktop" in q_lower:
+                dt = Path.home() / "Desktop"
+                if dt.exists():
+                    search_roots.append(dt)
+                od_dt = Path.home() / "OneDrive" / "Desktop"
+                if od_dt.exists() and od_dt not in search_roots:
+                    search_roots.append(od_dt)
+            elif "document" in q_lower:
+                dc = Path.home() / "Documents"
+                if dc.exists():
+                    search_roots.append(dc)
+                od_dc = Path.home() / "OneDrive" / "Documents"
+                if od_dc.exists() and od_dc not in search_roots:
+                    search_roots.append(od_dc)
+            else:
+                # Prioritized default search locations (fast & local first)
+                candidates = [
+                    Path(os.getcwd()),
+                    Path.home() / "Desktop",
+                    Path.home() / "OneDrive" / "Desktop",
+                    Path.home() / "Downloads",
+                    Path.home() / "Documents",
+                    Path.home() / "OneDrive" / "Documents",
+                    Path.home() / "OneDrive",
+                ]
+                for c in candidates:
+                    if c.exists() and c not in search_roots:
+                        search_roots.append(c)
+
+        # Include custom configured search root if provided
+        if default_root:
+            dr = Path(default_root).expanduser()
+            if dr.exists():
+                if dr not in search_roots:
+                    search_roots.insert(0, dr)
+                for sub_dir in ("Downloads", "Desktop", "Documents"):
+                    sdr = dr / sub_dir
+                    if sdr.exists() and sdr not in search_roots:
+                        search_roots.insert(0, sdr)
+
+        # Parse extension filter
+        extensions: list[str] = []
+        if extensions_raw:
+            extensions = [f".{e.strip().lstrip('.')}".lower() for e in extensions_raw.split(",") if e.strip()]
+        else:
+            # Infer extension from query
+            if any(k in q_lower for k in ("resume", "cv", "curriculum vitae", "biodata")):
+                extensions.extend([".pdf", ".docx", ".doc", ".txt", ".md"])
+            elif "pdf" in q_lower:
+                extensions.append(".pdf")
+            elif "python" in q_lower or ".py" in q_lower:
+                extensions.append(".py")
+            elif "csv" in q_lower:
+                extensions.append(".csv")
+            elif "text" in q_lower or "txt" in q_lower:
+                extensions.append(".txt")
+            elif "screenshot" in q_lower or "png" in q_lower or "image" in q_lower:
+                extensions.extend([".png", ".jpg", ".jpeg", ".bmp"])
+
+        # Extract core search keyword (stripping search noise)
+        clean_q = q_lower
+        for noise in (
+            "find my", "find the", "find all", "find files", "find file", "find",
+            "search for", "search all", "search", "look for", "get my",
+            "in downloads", "in desktop", "in documents", "in my downloads",
+            "largest file", "latest file", "newest file", "largest", "latest", "newest",
+            "pdfs", "pdf files", "python files", "python file",
+        ):
+            clean_q = clean_q.replace(noise, " ")
+        clean_q = clean_q.strip()
+        if not clean_q and extensions:
+            clean_q = "*"
+
+        # Perform search across candidate roots
+        items: list[dict[str, Any]] = []
+        seen_paths: set[str] = set()
+
+        for root in search_roots:
+            try:
+                # Search shallow depth first for fast response
+                for p in root.rglob("*"):
+                    if len(items) >= max_results * 2:
+                        break
+                    try:
+                        if not p.is_file():
+                            continue
+                        str_path = str(p)
+                        if str_path in seen_paths:
+                            continue
+
+                        # Check extension
+                        if extensions and p.suffix.lower() not in extensions:
+                            continue
+
+                        # Check name match
+                        if clean_q and clean_q != "*":
+                            if clean_q in ("resume", "cv", "my resume", "my cv", "curriculum vitae", "biodata"):
+                                if not any(k in p.name.lower() for k in ("resume", "cv", "curriculum", "vitae", "biodata")):
+                                    continue
+                            else:
+                                pattern = f"*{clean_q}*" if not any(c in clean_q for c in ("*", "?")) else clean_q
+                                if not fnmatch.fnmatch(p.name.lower(), pattern.lower()):
+                                    continue
+
+                        stat = p.stat()
+                        size = stat.st_size
+                        mtime = stat.st_mtime
+
+                        seen_paths.add(str_path)
+                        items.append({
+                            "path": str_path,
+                            "name": p.name,
+                            "size": size,
+                            "size_str": cls._format_size(size),
+                            "mtime": mtime,
+                        })
+                    except (PermissionError, OSError):
+                        continue
+            except (PermissionError, OSError):
+                continue
+
+        # Sort based on criteria
+        if "largest" in q_lower or "biggest" in q_lower:
+            items.sort(key=lambda x: x["size"], reverse=True)
+        elif "latest" in q_lower or "newest" in q_lower or "yesterday" in q_lower or "today" in q_lower or "screenshot" in q_lower:
+            items.sort(key=lambda x: x["mtime"], reverse=True)
+        else:
+            # Default sort: exact match first, then most recently modified
+            def _rank(item: dict[str, Any]) -> tuple[int, float]:
+                exact = 0 if clean_q and clean_q.lower() == item["name"].lower() else 1
+                return exact, -item["mtime"]
+            items.sort(key=_rank)
+
+        return items[:max_results]
+
+    @staticmethod
+    def _format_size(bytes_val: int) -> str:
+        """Format byte size to human readable string."""
+        if bytes_val < 1024:
+            return f"{bytes_val} B"
+        elif bytes_val < 1024 * 1024:
+            return f"{bytes_val / 1024:.1f} KB"
+        elif bytes_val < 1024 * 1024 * 1024:
+            return f"{bytes_val / (1024 * 1024):.1f} MB"
+        return f"{bytes_val / (1024 * 1024 * 1024):.1f} GB"
 
     @staticmethod
     def _do_file_search(

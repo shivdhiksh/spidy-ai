@@ -36,7 +36,7 @@ class TestRegisterDesktopSkills:
         assert "file_skill" in registered
         assert "app_skill" in registered
         assert "system_control_skill" in registered
-        assert len(registry) == 3
+        assert len(registry) >= 3
 
     def test_skills_findable_by_name(self):
         registry = SkillRegistry()
@@ -78,7 +78,7 @@ class TestRegisterDesktopSkills:
         bus = EventBus()
         registry = SkillRegistry()
         registered = register_desktop_skills(registry, bus=bus)
-        assert len(registered) == 3
+        assert len(registered) >= 3
 
     def test_disable_file_skill_via_config(self):
         registry = SkillRegistry()
@@ -86,6 +86,7 @@ class TestRegisterDesktopSkills:
         config.file_skill_enabled = False
         config.app_skill_enabled = True
         config.system_control_skill_enabled = True
+        config.computer_control_skill_enabled = True
         config.desktop_file_search_max_results = 50
         config.desktop_file_search_root = "~"
 
@@ -100,6 +101,7 @@ class TestRegisterDesktopSkills:
         config.file_skill_enabled = False
         config.app_skill_enabled = False
         config.system_control_skill_enabled = False
+        config.computer_control_skill_enabled = False
 
         registered = register_desktop_skills(registry, config=config)
         assert registered == []
@@ -286,13 +288,18 @@ class TestDesktopSkillsEventFlow:
                            params={"name": "notepad"},
                            session_id="bus_test")
 
-        with patch("subprocess.Popen", return_value=mock_proc):
+        # A launch only counts once a window appears: none before the launch (the
+        # "already running" check), then one.
+        windows = iter([(0, "")] + [(4321, "Notepad")] * 20)
+        with patch("subprocess.Popen", return_value=mock_proc), \
+                patch.object(type(skill), "_find_window_by_name", side_effect=lambda _n: next(windows)), \
+                patch.object(type(skill), "_set_foreground", return_value=True):
             await skill.execute("launch_app", ctx)
 
-        assert len(received) == 1
         from spidy.skills.desktop.events import AppLaunchedEvent
-        assert isinstance(received[0], AppLaunchedEvent)
-        assert received[0].pid == 12345
+        launched = [e for e in received if isinstance(e, AppLaunchedEvent)]
+        assert len(launched) == 1
+        assert launched[0].pid == 12345
 
     @pytest.mark.asyncio
     async def test_system_control_volume_emits_event(self):

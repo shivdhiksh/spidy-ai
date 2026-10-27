@@ -250,6 +250,10 @@ class PiperTTSEngine(TTSEngine):
         self._stop_event.set()
         log.debug("TTS stop requested.")
 
+    def clear_stop(self) -> None:
+        """Forget an earlier stop() so the next utterance plays (call before starting to speak)."""
+        self._stop_event.clear()
+
     # ── Internal helpers ──────────────────────────────────────────────────
 
     def _synthesize_sync(self, text: str) -> AudioBuffer:
@@ -304,6 +308,7 @@ class PiperTTSEngine(TTSEngine):
             total_samples = len(samples)
             offset = 0
 
+            t_start = time.monotonic()
             while offset < total_samples:
                 if self._stop_event.is_set():
                     log.debug("TTS playback interrupted mid-buffer.")
@@ -316,6 +321,13 @@ class PiperTTSEngine(TTSEngine):
                     else:
                         break
                 offset = end
+
+            # Bounded hardware DAC drain period: ensure audio has physically played
+            target_dur = buffer.duration_seconds
+            elapsed = time.monotonic() - t_start
+            remaining = target_dur - elapsed
+            if remaining > 0 and not self._stop_event.is_set():
+                time.sleep(min(remaining, 0.4))
 
         except Exception as exc:  # noqa: BLE001
             log.error("Audio playback error: {exc}", exc=exc)

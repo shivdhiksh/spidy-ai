@@ -155,6 +155,7 @@ class TestMultiWakeWordModelInfrastructure:
             model.load()
 
             dummy_chunk = np.zeros(1280, dtype=np.float32)
+            model.process_chunk(dummy_chunk)
             score = model.process_chunk(dummy_chunk)
 
             assert score == 0.45
@@ -179,6 +180,7 @@ class TestMultiWakeWordModelInfrastructure:
             model.load()
 
             dummy_chunk = np.zeros(1280, dtype=np.float32)
+            model.process_chunk(dummy_chunk)
             score = model.process_chunk(dummy_chunk)
 
             assert score == 0.65

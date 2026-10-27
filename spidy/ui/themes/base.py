@@ -69,19 +69,23 @@ class ThemeColors:
     # System tray
     tray_icon_bg: str
 
-    # ── HUD / Futuristic Interface (M17.2) ─────────────────────────────────
-    hud_primary: str     # Luminous cyan — main HUD accent
-    hud_secondary: str   # Electric teal — secondary HUD elements
-    hud_dim: str         # Dim cyan — inactive HUD elements
-    hud_grid: str        # Near-black blue — HUD background/grid
-    hud_text: str        # Bright HUD readout text (slightly off-white cyan)
+    # ── HUD / Spider-Verse Interface Tokens ─────────────────────────────────
+    hud_primary: str     # Spider-red / primary HUD accent (#E62429)
+    hud_secondary: str   # Web-blue / navy secondary elements (#1B2A4A)
+    hud_dim: str         # Dim red/navy for inactive elements
+    hud_grid: str        # Near-black void (#0A0A0E)
+    hud_text: str        # High-contrast HUD readout text (#F5F5F7)
+    accent_tertiary: str = "#3FA9F5"     # Spider-sense cyan/info
+    line_web: str = "#0FFFFFFF"          # 1px web hairline (6% alpha white)
+    bg_void: str = "#0A0A0E"             # Void black base
 
 
 @dataclass(frozen=True)
 class ThemeFonts:
     """Font family and size tokens."""
-    family_primary: str = "Segoe UI"
-    family_mono: str = "Consolas"
+    family_primary: str = "Inter, Segoe UI, sans-serif"
+    family_display: str = "Rajdhani, Orbitron, Segoe UI Semibold, sans-serif"
+    family_mono: str = "JetBrains Mono, Consolas, monospace"
     size_xs: int = 10
     size_sm: int = 12
     size_base: int = 13

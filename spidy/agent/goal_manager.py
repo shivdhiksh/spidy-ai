@@ -152,6 +152,57 @@ class GoalManager:
         )
         return updated
 
+    async def wait_for_user(
+        self,
+        goal_id: str,
+        prompt: str = "",
+    ) -> GoalRecord:
+        """
+        Transition the goal to WAITING_FOR_USER state (paused for interactive clarification).
+        """
+        goal = self._require_active(goal_id)
+        updated = goal.with_state(GoalState.WAITING_FOR_USER)
+        self._active_goal = updated
+
+        from spidy.agent.events import GoalWaitingForUserEvent
+        await self._bus.publish(GoalWaitingForUserEvent(
+            goal_id=updated.goal_id,
+            description=updated.description,
+            prompt=prompt,
+            session_id=updated.session_id,
+        ))
+
+        log.info(
+            "Goal waiting for user: '{desc}' | prompt='{p}'",
+            desc=updated.description[:80],
+            p=prompt[:80],
+        )
+        return updated
+
+    async def resume_goal(
+        self,
+        goal_id: str,
+    ) -> GoalRecord:
+        """
+        Transition a goal in WAITING_FOR_USER back to EXECUTING state.
+        """
+        goal = self._require_active(goal_id)
+        updated = goal.with_state(GoalState.EXECUTING)
+        self._active_goal = updated
+
+        from spidy.agent.events import GoalResumedEvent
+        await self._bus.publish(GoalResumedEvent(
+            goal_id=updated.goal_id,
+            description=updated.description,
+            session_id=updated.session_id,
+        ))
+
+        log.info(
+            "Goal resumed: '{desc}'",
+            desc=updated.description[:80],
+        )
+        return updated
+
     async def update_task(
         self,
         goal_id: str,

@@ -94,7 +94,12 @@ _INTENT_ENTITY_TYPES: dict[str, str] = {
     "open_browser_and_search": "app",
     "open_file": "file",
     "search_files": "file",
+    "create_file": "file",
+    "write_file": "file",
     "read_file": "file",
+    "open_folder": "path",
+    "create_folder": "path",
+    "delete_folder": "path",
     "open_url": "url",
     "search_web": "query",
     "search_google": "query",
@@ -141,12 +146,16 @@ class ResolutionResult:
 # ─── Entity Extraction ────────────────────────────────────────────────────────
 
 
+_PATH_RE = re.compile(r"([A-Za-z]:\\[^'\"\n\r\t<>|]+|\b[\w\-\.]+\.(?:py|pdf|docx|doc|txt|json|md|csv|png|jpg)\b)", re.IGNORECASE)
+_APP_RE = re.compile(r"\b(VS Code|Notepad|Calculator|Chrome|Edge|Firefox|Terminal|Spotify|Discord)\b", re.IGNORECASE)
+
+
 def _extract_entities_from_turns(
     turns: list["ConversationTurn"],
     max_turns: int = 10,
 ) -> dict[str, list[str]]:
     """
-    Scan recent turns for concrete entities grouped by type.
+    Scan recent turns (both USER and ASSISTANT) for concrete entities grouped by type.
 
     Returns a dict:
         {
@@ -168,19 +177,41 @@ def _extract_entities_from_turns(
         "path": [],
     }
 
+    def _add(etype: str, val: str) -> None:
+        v = val.strip().strip("'\"`")
+        if v and v not in entities.get(etype, []):
+            entities.setdefault(etype, []).append(v)
+
     # Walk turns newest-first, limited to max_turns
     recent = list(turns)[-max_turns:]
     for turn in reversed(recent):
-        if turn.role != TurnRole.USER or turn.intent is None:
-            continue
-        intent = turn.intent
-        entity_type = _INTENT_ENTITY_TYPES.get(intent.action)
-        if entity_type is None:
-            continue
-        for entity in intent.entities:
-            value = entity.value.strip()
-            if value and value not in entities.get(entity_type, []):
-                entities.setdefault(entity_type, []).append(value)
+        # 1. Check intent entities
+        if turn.intent is not None:
+            entity_type = _INTENT_ENTITY_TYPES.get(turn.intent.action)
+            for entity in turn.intent.entities:
+                target_type = entity_type or entity.name
+                if target_type in entities:
+                    _add(target_type, entity.value)
+
+        # 2. Check structured data attached to turn
+        turn_data = getattr(turn, "data", None)
+        if isinstance(turn_data, dict):
+            for key in ("file_path", "path", "filename"):
+                if turn_data.get(key):
+                    _add("file", str(turn_data[key]))
+                    _add("path", str(turn_data[key]))
+            if turn_data.get("name") or turn_data.get("app_name"):
+                _add("app", str(turn_data.get("name") or turn_data.get("app_name")))
+            if turn_data.get("url"):
+                _add("url", str(turn_data["url"]))
+
+        # 3. Check assistant or user turn text for explicit file paths or app mentions
+        text = getattr(turn, "text", "") or getattr(turn, "response_text", "")
+        if text:
+            for m in _PATH_RE.finditer(text):
+                _add("file", m.group(1))
+            for m in _APP_RE.finditer(text):
+                _add("app", m.group(1))
 
     return entities
 

@@ -24,6 +24,7 @@ This keeps the dependency chain:
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from typing import Any
 
 from spidy.browser.types import DownloadResult, HistoryEntry, PageInfo, TabInfo
 
@@ -191,4 +192,48 @@ class BrowserBackend(ABC):
         -------
         list[HistoryEntry]
             Most recent entries first, up to ``limit``.
+        """
+
+    # ── YouTube Media Actions ─────────────────────────────────────────────
+
+    @abstractmethod
+    async def get_youtube_video_results(self) -> list[dict[str, str]]:
+        """
+        Inspect current page and discover available YouTube video results.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            List of video candidates with 'title', 'url', and 'index'.
+        """
+
+    @abstractmethod
+    async def play_youtube_video(
+        self,
+        query: str | None = None,
+        video_index: int | None = None,
+        select_mode: str = "random",
+        max_retries: int = 3,
+    ) -> dict[str, Any]:
+        """
+        Select a YouTube video, open it, handle autoplay blockers if needed,
+        verify actual playback progression over multiple signals, and retry with
+        different video results if the initial selection cannot play.
+
+        Parameters
+        ----------
+        query:
+            Optional search query to navigate to if not already on search results.
+        video_index:
+            Explicit result index to select (e.g. 0 for first result).
+        select_mode:
+            Selection strategy: "random" or "first" / "index".
+        max_retries:
+            Maximum number of different videos to attempt if playback fails.
+
+        Returns
+        -------
+        dict[str, Any]
+            Structured result containing execution status, multi-signal evidence,
+            video metadata, and playback state.
         """

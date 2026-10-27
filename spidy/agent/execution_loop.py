@@ -127,9 +127,9 @@ class ExecutionLoop:
         self,
         brain: "Brain",
         goal_manager: "GoalManager",
-        reflection: ReflectionEngine,
-        tracker: "ProgressTracker",
-        bus: "EventBus",
+        reflection: "ReflectionEngine | None" = None,
+        tracker: "ProgressTracker | None" = None,
+        bus: "EventBus | None" = None,
         observer: "TaskObserver | None" = None,
         evaluator: "TaskEvaluator | None" = None,
         replanner: "Replanner | None" = None,
@@ -138,11 +138,15 @@ class ExecutionLoop:
         router: "StructuredRouter | None" = None,  # M18
         inter_task_delay: float = _INTER_TASK_DELAY,
     ) -> None:
+        from spidy.core.event_bus import EventBus
+        from spidy.agent.reflection_engine import ReflectionEngine
+        from spidy.agent.progress_tracker import ProgressTracker
+
         self._brain = brain
         self._goal_manager = goal_manager
-        self._reflection = reflection
-        self._tracker = tracker
-        self._bus = bus
+        self._bus = bus or EventBus()
+        self._reflection = reflection or ReflectionEngine()
+        self._tracker = tracker or ProgressTracker(bus=self._bus)
         self._observer = observer
         self._evaluator = evaluator
         self._replanner = replanner
@@ -199,6 +203,11 @@ class ExecutionLoop:
         while idx < len(task_list):
             task = task_list[idx]
 
+            # ── Skip already completed tasks (resumption flow) ────────────
+            if task.state == TaskState.COMPLETED:
+                idx += 1
+                continue
+
             # ── Cancellation check ─────────────────────────────────────────
             if ctx.cancelled:
                 log.info("[AGENT] ExecutionLoop: cancelled before task {i}", i=idx)
@@ -234,6 +243,14 @@ class ExecutionLoop:
 
             # ── Update task in goal record ─────────────────────────────────
             goal = await self._goal_manager.update_task(goal.goal_id, updated_task)
+
+            # ── Check for WAITING_FOR_USER state ───────────────────────────
+            if updated_task.state == TaskState.WAITING_FOR_USER:
+                ctx.waiting_task_id = updated_task.task_id
+                ctx.waiting_prompt = updated_task.result_message
+                goal = await self._goal_manager.wait_for_user(goal.goal_id, prompt=updated_task.result_message)
+                log.info("[AGENT] ExecutionLoop: goal paused in WAITING_FOR_USER state.")
+                return goal, observations
 
             # ── Abort on unrecoverable failure ─────────────────────────────
             if updated_task.state == TaskState.FAILED:
@@ -304,6 +321,25 @@ class ExecutionLoop:
         max_attempts = ctx.max_task_retries + 1
         observation: "Observation | None" = None
 
+        # ── Dependency check BEFORE execution ──────────────────────────────
+        if task.dependencies:
+            goal_rec = ctx.goal
+            for dep_id in task.dependencies:
+                dep_task = next((t for t in goal_rec.tasks if t.task_id == dep_id), None)
+                dep_result = ctx.get_result(dep_id, None)
+                result_succeeded = (
+                    isinstance(dep_result, dict) and dep_result.get("success") is True
+                )
+                task_succeeded = dep_task is not None and dep_task.state == TaskState.COMPLETED
+                if not result_succeeded and not task_succeeded:
+                    log.warning(
+                        "[AGENT] Task '{desc}' cannot execute: prerequisite '{dep}' is {state}",
+                        desc=task.description,
+                        dep=dep_id,
+                        state=(dep_task.state.value if dep_task else "unknown"),
+                    )
+                    return task.mark_failed(f"Prerequisite dependency '{dep_id}' was not completed."), None, None
+
         # ── Authority check BEFORE execution (M16) ─────────────────────────
         authority_label = "T0/SAFE"
         if self._authority is not None:
@@ -321,6 +357,20 @@ class ExecutionLoop:
                     self._task_log.task_skipped(task, task_index, total_tasks,
                                                 f"Confirmation required: {authority_label}")
                 return skipped, None, None
+
+        # ── Explicit clarification task (dialog / ask_user) ────────────────
+        act_dict = task.action or {}
+        if act_dict.get("skill") == "dialog" or act_dict.get("action") == "ask_user":
+            prompt_msg = act_dict.get("prompt") or act_dict.get("query") or task.utterance or "I need clarification to proceed."
+            log.info("[AGENT] decision=clarification_required prompt='{p}'", p=prompt_msg[:80])
+            log.info("[AGENT] tool=dialog.ask_user llm_required=false")
+            ctx.waiting_task_id = task.task_id
+            ctx.waiting_prompt = prompt_msg
+            await self._publish_clarification(task, ctx, prompt=prompt_msg)
+            waiting_task = task.mark_waiting_for_user(prompt_msg)
+            if self._task_log:
+                self._task_log.task_skipped(waiting_task, task_index, total_tasks, f"Waiting for user clarification: {prompt_msg}")
+            return waiting_task, None, None
 
         for attempt in range(1, max_attempts + 1):
             if ctx.cancelled:
@@ -358,16 +408,29 @@ class ExecutionLoop:
                 # Inject input_from result and template variables if declared
                 resolved_action = self._inject_step_result(task.action, ctx, running_task.task_id)
                 # Log structured action details
-                self._log_structured_action(running_task, resolved_action)
+                tool_name = f"{resolved_action.get('skill', 'unknown')}.{resolved_action.get('action', 'unknown')}"
+                log.info("[AGENT] decision=deterministic_tool tool={tool} llm_required=false", tool=tool_name)
                 response_text, result_success = await self._execute_structured(
                     resolved_action, running_task, ctx.session_id
                 )
+
+                if "Clarification required:" in response_text:
+                    prompt_msg = response_text.replace("Clarification required:", "").strip()
+                    log.info("[AGENT] decision=clarification_required prompt='{p}'", p=prompt_msg[:80])
+                    ctx.waiting_task_id = running_task.task_id
+                    ctx.waiting_prompt = prompt_msg
+                    await self._publish_clarification(running_task, ctx, prompt=prompt_msg)
+                    waiting_task = running_task.mark_waiting_for_user(prompt_msg)
+                    return waiting_task, None, None
                 # Store rich result for potential later input_from references
                 structured_data: dict[str, Any] = {
                     "result": response_text,
                     "text": response_text,
                     "success": result_success,
                 }
+                if self._router and getattr(self._router, "last_result_data", None):
+                    structured_data.update(self._router.last_result_data)
+
                 if "http" in response_text:
                     import re
                     m_url = re.search(r'https?://[^\s]+', response_text)
@@ -378,8 +441,16 @@ class ExecutionLoop:
                     m_title = re.search(r'title:?\s*["\']?([^"\',\n]+)', response_text, re.IGNORECASE)
                     if m_title:
                         structured_data["title"] = m_title.group(1).strip()
+                if "path" not in structured_data and ("Found '" in response_text or " at " in response_text):
+                    import re
+                    m_path = re.search(r"at\s+['\"]?([A-Za-z]:\\[^'\"\n\r\(\)]+|/[^'\"\n\r\(\)]+)['\"]?", response_text)
+                    if m_path:
+                        clean_extracted_path = m_path.group(1).strip().rstrip(".,;)'\"")
+                        structured_data["path"] = clean_extracted_path
+                        structured_data["file_path"] = clean_extracted_path
 
                 ctx.add_structured_result(running_task.task_id, structured_data, step_index=task_index)
+                ctx.add_evidence(structured_data)
             else:
                 # -- Original Brain.process() path (preserved) -----------------
                 utterance = running_task.utterance
@@ -397,6 +468,7 @@ class ExecutionLoop:
                     task=running_task,
                     response_text=response_text,
                     skip_for_terminal=task.terminal and attempt == 1,
+                    result_data=structured_data if task.action and self._router is not None else None,
                 )
                 if self._task_log:
                     self._task_log.observation(running_task, observation)
@@ -479,7 +551,8 @@ class ExecutionLoop:
 
             # ── Act on decision ────────────────────────────────────────────
             if decision == ReflectionDecision.CONTINUE:
-                completed = running_task_with_attempt.mark_completed(response_text)
+                ev = structured_data if (task.action and self._router is not None and "structured_data" in locals() and structured_data) else None
+                completed = running_task_with_attempt.mark_completed(response_text, evidence=ev)
                 if self._task_log:
                     self._task_log.task_success(completed, task_index, total_tasks)
                 await self._publish_task_completed(completed, task_index, total_tasks)
@@ -533,12 +606,15 @@ class ExecutionLoop:
                 # Alternative also failed — fall through to ABORT
 
             elif decision == ReflectionDecision.ASK_USER:
-                await self._publish_clarification(running_task, ctx)
-                skipped = running_task_with_attempt.mark_skipped("Awaiting user clarification.")
+                prompt_msg = response_text if (response_text and "?" in response_text) else "Could you please clarify how you'd like to proceed?"
+                ctx.waiting_task_id = running_task.task_id
+                ctx.waiting_prompt = prompt_msg
+                await self._publish_clarification(running_task, ctx, prompt=prompt_msg)
+                waiting_task = running_task_with_attempt.mark_waiting_for_user(prompt_msg)
                 if self._task_log:
-                    self._task_log.task_skipped(skipped, task_index, total_tasks,
-                                                "Awaiting user clarification")
-                return skipped, observation, None
+                    self._task_log.task_skipped(waiting_task, task_index, total_tasks,
+                                                f"Waiting for user clarification: {prompt_msg}")
+                return waiting_task, observation, None
 
             # ── ABORT or all retries exhausted ─────────────────────────────
             failed = running_task_with_attempt.mark_failed(
@@ -611,7 +687,10 @@ class ExecutionLoop:
         act = (resolved.get("action") or "").lower()
 
         # 2. Interpolate template expressions across string fields
-        for field_key in ("text", "query", "target", "url", "input", "expression"):
+        for field_key in (
+            "text", "query", "target", "url", "input", "expression",
+            "path", "file_path", "filename", "args",
+        ):
             val = resolved.get(field_key)
             if isinstance(val, str):
                 resolved_val = ctx.resolve_variable(val, current_task_id)
@@ -631,6 +710,9 @@ class ExecutionLoop:
             elif skill == "desktop" and act in ("type_text", "type", "keyboard_type", "write"):
                 if not resolved.get("text") or resolved.get("text") in ("${prev}.text", "the result", "the search result"):
                     resolved["text"] = prior_result
+            elif skill == "desktop" and act == "open_file_in_app":
+                if not resolved.get("path"):
+                    resolved["path"] = prior_result
             else:
                 if not resolved.get("input"):
                     resolved["input"] = prior_result
@@ -652,10 +734,15 @@ class ExecutionLoop:
         if self._router is None:
             return await self._call_brain(task.utterance, session_id)
         try:
+            skill = (action.get("skill") or "").lower()
+            if skill in ("desktop", "computer"):
+                from spidy.desktop.controller import DesktopStateLock
+                async with DesktopStateLock.acquire():
+                    return await self._router.execute(action, task, session_id)
             return await self._router.execute(action, task, session_id)
         except Exception as exc:  # noqa: BLE001
             log.error(
-                "[AGENT] ExecutionLoop: StructuredRouter.execute raised: %s", exc
+                "[AGENT] ExecutionLoop: StructuredRouter.execute raised: {exc}", exc=exc
             )
             return await self._call_brain(task.utterance, session_id)
 
@@ -670,9 +757,9 @@ class ExecutionLoop:
         eo = action.get("expected_outcome", "")
         summary = " ".join(parts)
         log.info(
-            "[AGENT] Structured task: %s | expected_outcome='%s'",
-            summary,
-            eo[:80] if eo else "(none)",
+            "[AGENT] Structured task: {summary} | expected_outcome='{eo}'",
+            summary=summary,
+            eo=(eo[:80] if eo else "(none)"),
         )
 
     # ── Event publishers ───────────────────────────────────────────────────
@@ -757,13 +844,14 @@ class ExecutionLoop:
         self,
         task: TaskRecord,
         ctx: ExecutionContext,
+        prompt: str = "",
     ) -> None:
         from spidy.agent.events import AgentClarificationEvent
         try:
             await self._bus.publish(AgentClarificationEvent(
                 goal_id=task.goal_id,
                 task_id=task.task_id,
-                question=task.result_message or "Could you clarify what you need?",
+                question=prompt or task.result_message or "Could you clarify what you need?",
                 session_id=ctx.session_id,
             ))
         except Exception:  # noqa: BLE001
@@ -870,6 +958,8 @@ class ExecutionLoop:
         descriptions = [t.description.lower() for t in completed[:3]]
 
         if task_count == 1:
+            if completed[0].result_message and len(completed[0].result_message) > 4:
+                return completed[0].result_message
             return f"Done! I've completed: {descriptions[0]}."
 
         if task_count == 2:

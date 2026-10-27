@@ -166,6 +166,11 @@ class ToolRouter:
         self._learning = learning  # Reserved for M9+
         self._max_retries = max_retries
         self._proactive = ProactiveChecker()
+        from spidy.brain.tool_executor import ToolExecutor
+        self._tool_executor = ToolExecutor(
+            skill_registry=skill_registry,
+            bus=bus,
+        )
 
     async def execute(
         self,
@@ -241,7 +246,7 @@ class ToolRouter:
         if step.step_type == "skill":
             result = await self._run_skill_with_retry(step, session_id, user_name)
         elif step.step_type == "llm":
-            result = await self._run_llm(step, llm_messages)
+            result = await self._run_llm(step, llm_messages, session_id=session_id, user_name=user_name)
         elif step.step_type == "clarify":
             result = ToolResult.ok(
                 message=step.prompt_context or "Could you clarify what you mean?",
@@ -429,8 +434,10 @@ class ToolRouter:
         self,
         step: PlanStep,
         llm_messages: list["LLMMessage"],
+        session_id: str = "",
+        user_name: str = "User",
     ) -> ToolResult:
-        """Call the LLM with the current conversation context."""
+        """Call the LLM with the current conversation context, executing any requested tools."""
         if self._llm is None:
             return ToolResult.ok(
                 message=_build_no_llm_message(),
@@ -439,21 +446,35 @@ class ToolRouter:
             )
 
         try:
-            response = await self._llm.complete(llm_messages)
-            if not response.success:
-                log.warning(
-                    "LLM call failed: {err}",
-                    err=response.error_message,
-                )
-                return ToolResult.ok(
-                    message=_FALLBACK_RESPONSE,
-                    action="llm",
-                    step_type="llm",
-                )
+            final_text, executed_tools = await self._tool_executor.run_tool_loop(
+                llm=self._llm,
+                messages=llm_messages,
+                session_id=session_id,
+                user_name=user_name,
+            )
+
+            # Guarantee that raw tool JSON is never returned
+            clean_text = final_text.strip()
+
+            decision_name = "tool_call" if executed_tools else "chat"
+            first_tool = executed_tools[0]["tool"] if executed_tools else None
+
+            log.info(
+                "[ROUTER TRACE] decision={dec} tool={tool} llm_required=True tools_executed={num}",
+                dec=decision_name,
+                tool=first_tool,
+                num=len(executed_tools),
+            )
+
             return ToolResult.ok(
-                message=response.text.strip(),
-                action="llm",
-                data={"model": response.model, "usage": response.usage},
+                message=clean_text,
+                action=first_tool or "llm",
+                data={
+                    "decision": decision_name,
+                    "tool": first_tool,
+                    "llm_required": True,
+                    "executed_tools": executed_tools,
+                },
                 step_type="llm",
             )
         except Exception as exc:  # noqa: BLE001

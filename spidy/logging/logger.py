@@ -97,15 +97,17 @@ def configure(
     logger.remove()
 
     # ── Stderr sink (coloured, human-readable) ────────────────────────────
-    logger.add(
-        sys.stderr,
-        level=level,
-        format=fmt,
-        colorize=colorize,
-        backtrace=backtrace,
-        diagnose=diagnose,
-        enqueue=True,       # thread-safe non-blocking writes
-    )
+    # Skipped under pythonw.exe (autostart), where sys.stderr is None.
+    if sys.stderr is not None:
+        logger.add(
+            sys.stderr,
+            level=level,
+            format=fmt,
+            colorize=colorize,
+            backtrace=backtrace,
+            diagnose=diagnose,
+            enqueue=True,       # thread-safe non-blocking writes
+        )
 
     # ── File sink (rotating, structured) ─────────────────────────────────
     logger.add(
@@ -145,20 +147,22 @@ def _bootstrap() -> None:
         logger.remove()
     except Exception:  # noqa: BLE001
         pass
-    logger.add(
-        sys.stderr,
-        level="INFO",
-        format=(
-            "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
-            "{level:<8} | "
-            "{extra[module]:<30} | "
-            "{message}"
-        ),
-        colorize=True,
-        backtrace=True,
-        diagnose=False,
-        enqueue=False,  # No background thread during early import
-    )
+    # pythonw.exe (used for login autostart) has no console: sys.stderr is None.
+    if sys.stderr is not None:
+        logger.add(
+            sys.stderr,
+            level="INFO",
+            format=(
+                "{time:YYYY-MM-DD HH:mm:ss.SSS} | "
+                "{level:<8} | "
+                "{extra[module]:<30} | "
+                "{message}"
+            ),
+            colorize=True,
+            backtrace=True,
+            diagnose=False,
+            enqueue=False,  # No background thread during early import
+        )
     _bootstrapped = True
 
 

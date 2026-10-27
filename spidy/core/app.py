@@ -64,11 +64,12 @@ from typing import TYPE_CHECKING
 from spidy.config.manager import ConfigManager, SpidyConfig
 from spidy.core.device import DeviceManager
 from spidy.core.event_bus import EventBus, SpidyStartedEvent, SpidyShuttingDownEvent
-from spidy.core.lifecycle import LifecycleState
+from spidy.core.lifecycle import AppLifecycleState, LifecycleState
 from spidy.logging import configure as configure_logging
 from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
+    from spidy.core.single_instance import SingleInstanceGuard
     from spidy.brain.brain import Brain
     from spidy.memory.manager import MemoryManager
     from spidy.vision.manager import VisionManager
@@ -82,6 +83,11 @@ if TYPE_CHECKING:
     from spidy.voice.continuous import ContinuousVoiceController
 
 log = get_logger(__name__)
+
+
+# Actions the autonomous agent cannot plan ("No tasks were executed") but the chat pipeline's
+# skills answer directly.
+_CHAT_PIPELINE_ACTIONS = frozenset({"get_system_info"})
 
 
 class SpidyCore:
@@ -103,13 +109,20 @@ class SpidyCore:
         self,
         config_path: Path | None = None,
         text_mode: bool = False,
+        start_hidden: bool = False,
+        single_instance: bool = True,
+        bus: EventBus | None = None,
     ) -> None:
         self._state = LifecycleState.CREATED
+        self._operational_state = AppLifecycleState.STARTING
         self._config_path = config_path
         self._text_mode = text_mode
+        self._start_hidden = start_hidden
+        self._single_instance = single_instance
+        self._single_instance_guard: "SingleInstanceGuard | None" = None
         self._config_mgr: ConfigManager | None = None
         self._settings: SpidyConfig | None = None
-        self._bus: EventBus | None = None
+        self._bus: EventBus | None = bus
         self._device_mgr: DeviceManager | None = None
         self._voice_engine: VoiceEngine | None = None
         self._voice_controller: "ContinuousVoiceController | None" = None
@@ -130,6 +143,16 @@ class SpidyCore:
     @property
     def state(self) -> LifecycleState:
         return self._state
+
+    @property
+    def operational_state(self) -> AppLifecycleState:
+        """Detailed operational lifecycle state."""
+        return self._operational_state
+
+    @property
+    def ui_app(self) -> "SpidyApp | None":
+        """The active SpidyApp Qt UI instance, if UI is running."""
+        return self._ui_app
 
     @property
     def settings(self) -> SpidyConfig:
@@ -176,12 +199,35 @@ class SpidyCore:
 
         Drives the state machine from CREATED → RUNNING.
         Blocks until shutdown is requested.
+        Safe and idempotent: returns safely if already active or running.
         """
+        if self._state in (LifecycleState.INITIALISING, LifecycleState.READY, LifecycleState.RUNNING):
+            log.warning("[SPIDY LIFECYCLE] start() called on already active SpidyCore instance; ignoring duplicate start.")
+            return
+
+        if self._single_instance:
+            from spidy.core.single_instance import SingleInstanceGuard
+            self._single_instance_guard = SingleInstanceGuard()
+            if not self._single_instance_guard.acquire():
+                if self._single_instance_guard.notify_existing_instance("RESTORE_HUD"):
+                    log.info("[SPIDY LIFECYCLE] Another Spidy instance is already running; brought existing HUD to front.")
+                    self._state = LifecycleState.STOPPED
+                    self._operational_state = AppLifecycleState.STOPPED
+                    return
+                # The lock exists but nobody answers: a previous Spidy hung while exiting and
+                # Windows is still holding its lock. Quitting here would make Spidy silently
+                # fail to start (also at login), so start anyway.
+                log.warning(
+                    "[SPIDY LIFECYCLE] Single-instance lock is held but the owner does not respond "
+                    "(stale lock from a hung exit); starting anyway."
+                )
+
         try:
             await self._initialise()
             await self._run()
         except Exception as exc:
             self._transition(LifecycleState.ERROR)
+            self._operational_state = AppLifecycleState.STOPPED
             log.critical("Fatal error during startup: {exc}", exc=exc)
             raise
         finally:
@@ -195,9 +241,63 @@ class SpidyCore:
         shutdown event so all modules can clean up.
         """
         log.info("Shutdown requested.")
+        from spidy.core.watchdog import arm_shutdown_watchdog
+        arm_shutdown_watchdog(15.0)   # if graceful shutdown stalls, still exit (and dump stacks)
+        await self._halt_activity()
         if self._bus:
             await self._bus.publish(SpidyShuttingDownEvent())
         self._shutdown_event.set()
+
+    async def _halt_activity(self) -> None:
+        """Stop speaking and abandon the running goal, so closing Spidy ends everything at once."""
+        if self._voice_controller is not None:
+            self._voice_controller.halt()
+        if self._brain is not None:
+            try:
+                await asyncio.wait_for(self._brain.cancel_goal(), timeout=3.0)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Cancelling the running goal on shutdown failed: {exc}", exc=exc)
+
+    async def _on_ui_closed(self, event: Any) -> None:
+        """The window's X: stop talking and drop running tasks, but stay alive listening for the wake word."""
+        log.info("[SPIDY LIFECYCLE] window closed -- stopping speech and tasks; wake listener stays on.")
+        await self._halt_activity()
+        vc = self._voice_controller
+        if vc is not None:
+            try:
+                await vc._session.deactivate(reason="window_closed")
+                vc._engine.return_to_sleeping()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Ending the voice session on close failed: {exc}", exc=exc)
+
+    async def _on_ui_command(self, event: Any) -> None:
+        """A command typed or clicked in the UI: route it exactly like a spoken one."""
+        text = (getattr(event, "text", "") or "").strip()
+        if not text or self._brain is None:
+            return
+        from spidy.brain.goal_intent_classifier import GoalIntentClassifier
+        from spidy.brain.intent_classifier import IntentClassifier
+        try:
+            intent = await IntentClassifier().classify(text)
+            if intent.action == "cancel_goal":
+                await self._brain.cancel_goal()
+            elif intent.action in _CHAT_PIPELINE_ACTIONS:
+                await self._brain.process(text)
+            elif GoalIntentClassifier().is_executable(intent):
+                await self._brain.run_goal(text)
+            else:
+                await self._brain.process(text)
+        except Exception as exc:  # noqa: BLE001
+            log.error("UI command failed: {exc}", exc=exc)
+
+    async def _on_quit_requested(self, event: Any) -> None:
+        """Handle the user's spoken/typed request to close Spidy."""
+        log.info("[SPIDY LIFECYCLE] quit requested by user.")
+        await self.request_shutdown()
+
+    async def stop(self) -> None:
+        """Gracefully stop Spidy and all running services."""
+        await self._stop()
 
     # ── Private implementation ────────────────────────────────────────────
 
@@ -246,6 +346,10 @@ class SpidyCore:
         self._bus = EventBus()
         loop = asyncio.get_running_loop()
         self._bus.set_loop(loop)
+        # "Close yourself" / "quit Spidy" (see brain.self_commands) really exits the process.
+        self._bus.subscribe("system.quit_requested", self._on_quit_requested)
+        self._bus.subscribe("ui.closed", self._on_ui_closed)
+        self._bus.subscribe("ui.command_submitted", self._on_ui_command)
 
         # ── 4. Device Manager (CUDA detection) ───────────────────────────
         self._device_mgr = DeviceManager()
@@ -631,12 +735,36 @@ class SpidyCore:
                 )
                 self._brain = None
 
+        # ── Start single-instance IPC listener (if primary instance) ──────
+        if self._single_instance_guard and self._single_instance_guard.is_primary:
+            def _on_ipc_command(cmd: str) -> None:
+                if cmd in ("RESTORE_HUD", "SHOW_HUD"):
+                    from spidy.ui.events import UIShowEvent
+                    if self._bus:
+                        self._bus.publish_threadsafe(UIShowEvent(source="single_instance_launch"))
+                elif cmd == "QUIT":   # py -m spidy.main --quit
+                    from spidy.core.event_bus import SpidyQuitRequestedEvent
+                    if self._bus:
+                        self._bus.publish_threadsafe(SpidyQuitRequestedEvent())
+            self._single_instance_guard.start_listener(_on_ipc_command)
+
         # ── Start Qt Overlay UI (Milestone 5) ─────────────────────────────
+        is_bg = self._start_hidden or getattr(getattr(self._settings, "app", None), "start_hidden", False)
         if self._settings and self._settings.ui.enabled:
-            self._start_ui_thread(loop)
+            self._start_ui_thread(loop, start_hidden=is_bg)
+            self._operational_state = AppLifecycleState.HUD_HIDDEN if is_bg else AppLifecycleState.HUD_VISIBLE
+        else:
+            self._operational_state = AppLifecycleState.RUNNING
 
         # Announce to all modules that we are live
         await self._bus.publish(SpidyStartedEvent())
+        log.info(
+            "[SPIDY LIFECYCLE] startup complete | background_mode={bg} | voice_active={va}",
+            bg=is_bg,
+            va=self._voice_engine is not None,
+        )
+        if self._voice_engine is not None:
+            log.info("[WAKE] listener active")
 
         if self._text_mode:
             log.info(
@@ -737,7 +865,7 @@ class SpidyCore:
         except EOFError:
             raise
 
-    def _start_ui_thread(self, loop: asyncio.AbstractEventLoop) -> None:
+    def _start_ui_thread(self, loop: asyncio.AbstractEventLoop, start_hidden: bool = False) -> None:
         """
         Start the Qt overlay UI in a dedicated daemon thread.
 
@@ -748,6 +876,9 @@ class SpidyCore:
         assert self._settings is not None
         assert self._bus is not None
 
+        def _on_ui_quit() -> None:
+            asyncio.run_coroutine_threadsafe(self.request_shutdown(), loop)
+
         def _run_qt() -> None:
             try:
                 from spidy.ui.app import SpidyApp
@@ -755,6 +886,8 @@ class SpidyCore:
                     bus=self._bus,
                     config=self._settings,
                     loop=loop,
+                    start_hidden=start_hidden,
+                    on_quit=_on_ui_quit,
                 )
                 self._ui_app.start()
                 exit_code = self._ui_app.run()
@@ -841,10 +974,18 @@ class SpidyCore:
         if self._voice_engine is not None:
             await self._voice_engine.stop()
 
+        if self._single_instance_guard is not None:
+            try:
+                self._single_instance_guard.release()
+            except Exception as exc:
+                log.debug("Single instance guard release error: {exc}", exc=exc)
+            self._single_instance_guard = None
+
         if self._bus:
             log.debug("Event bus stats: {stats}", stats=self._bus.stats)
 
         self._transition(LifecycleState.STOPPED)
+        self._operational_state = AppLifecycleState.STOPPED
         log.info(
             "Spidy stopped cleanly. Goodbye, {name}.",
             name=self._settings.app.user_name if self._settings else "",

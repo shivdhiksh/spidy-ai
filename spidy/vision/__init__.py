@@ -30,6 +30,10 @@ from spidy.vision.events import (
 from spidy.vision.manager import VisionManager
 from spidy.vision.ocr import OCREngine
 from spidy.vision.screen_analyzer import ScreenAnalyzer
+from spidy.vision.screen_understanding import (
+    ScreenUnderstandingEngine,
+    ScreenUnderstandingResult,
+)
 from spidy.vision.screenshot import ScreenshotEngine
 from spidy.vision.types import (
     MonitorInfo,
@@ -42,13 +46,14 @@ from spidy.vision.types import (
 )
 
 __all__ = [
-    # Manager
+    # Manager & Engines
     "VisionManager",
-    # Engines
+    "ScreenUnderstandingEngine",
     "ScreenshotEngine",
     "OCREngine",
     "ScreenAnalyzer",
     # Types
+    "ScreenUnderstandingResult",
     "ScreenshotResult",
     "OCRResult",
     "OCRBlock",

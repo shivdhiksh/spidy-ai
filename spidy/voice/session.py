@@ -67,9 +67,10 @@ log = get_logger(__name__)
 
 class VoiceSessionState(Enum):
     IDLE = auto()
-    AWAKE = auto()
+    AWAKE = auto()          # LISTENING_FOR_USER
     PROCESSING = auto()
     SPEAKING = auto()
+    AUDIO_FLUSH = auto()    # Post-TTS audio flush / settle
     PAUSED = auto()
 
 
@@ -117,6 +118,18 @@ class VoiceSessionManager:
         # Timeout timer handle
         self._timeout_task: asyncio.Task | None = None
 
+    # ── State Transition Helper ───────────────────────────────────────────
+
+    def _set_state_locked(self, new_state: VoiceSessionState) -> None:
+        """Helper to log state transitions under lock."""
+        if self._state != new_state:
+            log.info(
+                "[VOICE STATE]\n{old} → {new}",
+                old=self._state.name,
+                new=new_state.name,
+            )
+            self._state = new_state
+
     # ── Primary API ───────────────────────────────────────────────────────
 
     async def activate(self, wake_word: str = "") -> str:
@@ -139,7 +152,7 @@ class VoiceSessionManager:
             self._turn_count = 0
             self._last_wake_word = wake_word
             self._current_goal = ""
-            self._state = VoiceSessionState.AWAKE
+            self._set_state_locked(VoiceSessionState.AWAKE)
 
         log.info(
             "VoiceSession started: id={sid} | wake='{ww}'",
@@ -169,7 +182,7 @@ class VoiceSessionManager:
                 return
             self._turn_count += 1
             self._current_goal = text
-            self._state = VoiceSessionState.PROCESSING
+            self._set_state_locked(VoiceSessionState.PROCESSING)
 
         self._reset_timeout()
 
@@ -180,23 +193,29 @@ class VoiceSessionManager:
     async def mark_speaking(self) -> None:
         """Transition to SPEAKING state while TTS plays."""
         async with self._state_lock:
-            if self._state == VoiceSessionState.PROCESSING:
-                self._state = VoiceSessionState.SPEAKING
+            if self._state in (VoiceSessionState.PROCESSING, VoiceSessionState.AWAKE):
+                self._set_state_locked(VoiceSessionState.SPEAKING)
+
+    async def mark_audio_flush(self) -> None:
+        """Transition to AUDIO_FLUSH state after TTS playback ends."""
+        async with self._state_lock:
+            if self._state == VoiceSessionState.SPEAKING:
+                self._set_state_locked(VoiceSessionState.AUDIO_FLUSH)
 
     async def mark_response_complete(self) -> None:
         """
-        Called when TTS finishes speaking.
+        Called when TTS finishes speaking and audio flush settles.
 
         If continuous_mode is on, returns to AWAKE (listen for next
         utterance without needing wake word).
         Otherwise, deactivates.
         """
         async with self._state_lock:
-            if self._state == VoiceSessionState.SPEAKING:
+            if self._state in (VoiceSessionState.SPEAKING, VoiceSessionState.AUDIO_FLUSH):
                 if self._continuous_mode:
-                    self._state = VoiceSessionState.AWAKE
+                    self._set_state_locked(VoiceSessionState.AWAKE)
                 else:
-                    self._state = VoiceSessionState.IDLE
+                    self._set_state_locked(VoiceSessionState.IDLE)
                     return   # Will deactivate below
 
         if not self._continuous_mode:
@@ -205,8 +224,8 @@ class VoiceSessionManager:
     async def pause(self) -> None:
         """Pause the session (user said 'wait' or 'pause')."""
         async with self._state_lock:
-            if self._state in (VoiceSessionState.AWAKE, VoiceSessionState.SPEAKING):
-                self._state = VoiceSessionState.PAUSED
+            if self._state in (VoiceSessionState.AWAKE, VoiceSessionState.SPEAKING, VoiceSessionState.AUDIO_FLUSH):
+                self._set_state_locked(VoiceSessionState.PAUSED)
                 self._cancel_timeout()
         log.info("VoiceSession paused: id={sid}", sid=self._session_id)
 
@@ -214,7 +233,7 @@ class VoiceSessionManager:
         """Resume from paused state."""
         async with self._state_lock:
             if self._state == VoiceSessionState.PAUSED:
-                self._state = VoiceSessionState.AWAKE
+                self._set_state_locked(VoiceSessionState.AWAKE)
         self._reset_timeout()
         log.info("VoiceSession resumed: id={sid}", sid=self._session_id)
 
@@ -233,7 +252,7 @@ class VoiceSessionManager:
                 return
             sid = self._session_id
             turns = self._turn_count
-            self._state = VoiceSessionState.IDLE
+            self._set_state_locked(VoiceSessionState.IDLE)
             self._current_goal = ""
 
         self._cancel_timeout()

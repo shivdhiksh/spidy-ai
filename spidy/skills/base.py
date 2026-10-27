@@ -139,6 +139,7 @@ class SkillResult:
         message: str,
         error: Exception | None = None,
         non_retryable: bool = False,
+        data: Any = None,
     ) -> "SkillResult":
         """Convenience constructor for failed results.
 
@@ -147,8 +148,10 @@ class SkillResult:
         non_retryable:
             Pass ``True`` for deterministic validation failures (e.g. a
             required parameter is absent) where retrying can never succeed.
+        data:
+            Optional structured diagnostic payload.
         """
-        return cls(success=False, message=message, error=error, non_retryable=non_retryable)
+        return cls(success=False, message=message, error=error, non_retryable=non_retryable, data=data)
 
 
 # ─── BaseSkill ABC ────────────────────────────────────────────────────────────

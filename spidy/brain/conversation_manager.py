@@ -45,7 +45,11 @@ _SYSTEM_PROMPT = (
     "You help the user with tasks on their Windows computer: opening apps, searching the web, "
     "managing files, setting timers, controlling system settings, and answering questions. "
     "Keep responses concise and natural — no bullet points unless asked. "
-    "When you complete an action, confirm it briefly ('I've opened VS Code'). "
+    "In this chat reply you have NO ability to open, close, run or change anything: tools run "
+    "separately, and only the system reports their results. So never say you opened, closed, "
+    "started, searched, saved or did anything on the computer, and never write 'Done'. "
+    "If the user asks for such an action here, say you couldn't run it and ask them to repeat "
+    "it more clearly (for example 'open Notepad'). "
     "When you can't do something, say so honestly and suggest an alternative. "
     "Remember what the user has asked for earlier in the conversation and use that context. "
     "If the user says 'it' or 'that', figure out what they mean from the conversation. "
@@ -202,7 +206,10 @@ class ConversationManager:
         """
         messages: list[dict[str, str]] = []
         if include_system and self._system_prompt:
-            messages.append({"role": "system", "content": self._system_prompt})
+            from spidy.utils.datetime_utils import get_local_datetime
+            now = get_local_datetime()
+            time_ctx = f"\n[Current Time: {now.strftime('%A, %B %d, %Y %I:%M %p')} ({now.tzname() or str(now.tzinfo)})]"
+            messages.append({"role": "system", "content": self._system_prompt + time_ctx})
         messages.extend(t.to_llm_message() for t in self._turns)
         return messages
 

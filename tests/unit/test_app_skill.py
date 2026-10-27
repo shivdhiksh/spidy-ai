@@ -159,19 +159,37 @@ class TestDetectRunningApps:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
+def _window_appears_after_launch():
+    """
+    _find_window_by_name stub: no window before the launch (the "already running"
+    check), then a window once the app has been started. Launch success now requires
+    a real window; "started" is not "opened".
+    """
+    calls = {"n": 0}
+
+    def fake(_name):
+        calls["n"] += 1
+        return (0, "") if calls["n"] == 1 else (4321, "Notepad")
+
+    return patch.object(AppSkill, "_find_window_by_name", side_effect=fake)
+
+
 class TestLaunchApp:
     @pytest.mark.asyncio
     async def test_launch_by_alias(self):
         mock_proc = MagicMock()
         mock_proc.pid = 9999
         mock_proc.poll.return_value = None  # Still running after 350ms settle
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+                _window_appears_after_launch(), \
+                patch.object(AppSkill, "_set_foreground", return_value=True):
             skill = _make_skill()
             ctx = _ctx("launch_app", {"name": "notepad"})
             result = await skill.execute("launch_app", ctx)
 
         assert result.success
         assert result.data["pid"] == 9999
+        assert result.data["verified"] is True
         # Should have resolved alias
         called_cmd = mock_popen.call_args[0][0]
         assert "notepad.exe" in called_cmd
@@ -181,7 +199,9 @@ class TestLaunchApp:
         mock_proc = MagicMock()
         mock_proc.pid = 1234
         mock_proc.poll.return_value = None  # Still running
-        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen:
+        with patch("subprocess.Popen", return_value=mock_proc) as mock_popen, \
+                _window_appears_after_launch(), \
+                patch.object(AppSkill, "_set_foreground", return_value=True):
             skill = _make_skill()
             ctx = _ctx("launch_app", {"name": "notepad", "args": "C:/test.txt"})
             result = await skill.execute("launch_app", ctx)
@@ -191,8 +211,81 @@ class TestLaunchApp:
         assert "C:/test.txt" in called_cmd
 
     @pytest.mark.asyncio
+    async def test_started_but_no_window_is_reported_as_failure(self):
+        """The bug: 'Done: opened WhatsApp' while nothing opened. Never claim success."""
+        mock_proc = MagicMock()
+        mock_proc.pid = 77
+        mock_proc.poll.return_value = None
+        skill = _make_skill()
+        with patch("subprocess.Popen", return_value=mock_proc), \
+                patch.object(AppSkill, "_find_window_by_name", return_value=(0, "")), \
+                patch.object(skill, "_wait_for_any_window", AsyncMock(return_value=(False, 0))):
+            result = await skill.execute("launch_app", _ctx("launch_app", {"name": "notepad"}))
+
+        assert not result.success
+        assert "no window appeared" in result.message
+
+    @pytest.mark.asyncio
+    async def test_unknown_alias_is_started_through_the_start_menu(self):
+        """Store apps like WhatsApp have no usable .exe name; they launch via the Start menu."""
+        from spidy.skills.desktop.app_catalog import StartApp
+
+        whatsapp = StartApp("WhatsApp", "5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App")
+        mock_proc = MagicMock()
+        mock_proc.pid = 88
+        mock_proc.poll.return_value = None
+        launched = []
+
+        def fake_launch(app):
+            launched.append(app)
+            return mock_proc
+
+        skill = _make_skill()
+        with patch("spidy.skills.desktop.app_skill.find_start_app", return_value=whatsapp), \
+                patch("spidy.skills.desktop.app_skill.launch_start_app", side_effect=fake_launch), \
+                patch.object(AppSkill, "_find_window_by_name", return_value=(0, "")), \
+                patch.object(skill, "_wait_for_any_window", AsyncMock(return_value=(True, 555))), \
+                patch.object(AppSkill, "_set_foreground", return_value=True):
+            result = await skill.execute("launch_app", _ctx("launch_app", {"name": "Whatsapp"}))
+
+        assert result.success
+        assert launched == [whatsapp]
+        assert "WhatsApp" in result.message
+
+    @pytest.mark.asyncio
+    async def test_misheard_name_is_cleaned_up_before_lookup(self):
+        mock_proc = MagicMock()
+        mock_proc.pid = 99
+        mock_proc.poll.return_value = None
+        skill = _make_skill()
+        with patch("subprocess.Popen", return_value=mock_proc) as popen, \
+                patch.object(AppSkill, "_find_window_by_name", return_value=(0, "")), \
+                patch.object(skill, "_wait_for_any_window", AsyncMock(return_value=(True, 1))), \
+                patch.object(AppSkill, "_set_foreground", return_value=True), \
+                patch.object(AppSkill, "_resolve_exe_path", return_value=r"C:\x\Code.exe"):
+            result = await skill.execute("launch_app", _ctx("launch_app", {"name": "VS Core"}))
+
+        assert result.success
+        assert popen.call_args[0][0][0] == r"C:\x\Code.exe"   # "VS Core" → vs code → Code.exe
+
+    @pytest.mark.asyncio
+    async def test_launch_is_idempotent_for_existing_vs_code_window(self):
+        """A second "open VS Code" focuses the editor instead of spawning it."""
+        skill = _make_skill()
+        with patch.object(AppSkill, "_find_window_by_name", return_value=(1234, "Visual Studio Code")):
+            with patch.object(AppSkill, "_set_foreground", return_value=True):
+                with patch("subprocess.Popen") as popen:
+                    result = await skill.execute("launch_app", _ctx("launch_app", {"name": "VS Code"}))
+
+        assert result.success
+        assert result.data["already_running"] is True
+        assert result.data["hwnd"] == 1234
+        popen.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_launch_app_not_found(self):
-        with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")):
+        with patch("subprocess.Popen", side_effect=FileNotFoundError("not found")), \
+                patch("spidy.skills.desktop.app_skill.find_start_app", return_value=None):
             skill = _make_skill()
             ctx = _ctx("launch_app", {"name": "nonexistent_app_xyz"})
             result = await skill.execute("launch_app", ctx)
@@ -213,12 +306,14 @@ class TestLaunchApp:
         mock_proc = MagicMock()
         mock_proc.pid = 5555
         mock_proc.poll.return_value = None  # Still running
-        with patch("subprocess.Popen", return_value=mock_proc):
+        with patch("subprocess.Popen", return_value=mock_proc), \
+                _window_appears_after_launch(), \
+                patch.object(AppSkill, "_set_foreground", return_value=True):
             ctx = _ctx("launch_app", {"name": "notepad"})
             await skill.execute("launch_app", ctx)
-        bus.publish.assert_called_once()
         from spidy.skills.desktop.events import AppLaunchedEvent
-        assert isinstance(bus.publish.call_args[0][0], AppLaunchedEvent)
+        published = [c[0][0] for c in bus.publish.call_args_list]
+        assert any(isinstance(e, AppLaunchedEvent) for e in published)
 
     def test_app_aliases_populated(self):
         assert "notepad" in _APP_ALIASES
@@ -433,4 +528,3 @@ class TestScriptExecution:
         result = await skill.execute("run_python_script", ctx)
         assert result.success is False
         assert "not found" in result.message.lower()
-

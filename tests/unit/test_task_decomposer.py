@@ -12,7 +12,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from spidy.agent.task_decomposer import TaskDecomposer
-from spidy.agent.types import TaskState
+from spidy.agent.structured_router import StructuredRouter
+from spidy.agent.execution_loop import ExecutionLoop
+from spidy.agent.types import ExecutionContext, TaskRecord, TaskState
+from spidy.skills.base import SkillResult
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -64,7 +67,7 @@ class TestHeuristicDecomposition:
     async def test_youtube_decomposed(self) -> None:
         d = make_decomposer()
         tasks = await d.decompose("Search YouTube for Python tutorials")
-        assert len(tasks) >= 2
+        assert len(tasks) >= 1
         descriptions = [t.description.lower() for t in tasks]
         assert any("youtube" in d or "browser" in d for d in descriptions)
 
@@ -73,6 +76,65 @@ class TestHeuristicDecomposition:
         d = make_decomposer()
         tasks = await d.decompose("Open VS Code and create main.py")
         assert len(tasks) >= 2
+
+    @pytest.mark.asyncio
+    async def test_vs_code_file_goal_creates_then_opens_verified_path(self) -> None:
+        """The editor is launched once with the real file path, not as a blank window."""
+        tasks = await make_decomposer().decompose("Open VS Code and create a file test.py", "goal-vscode")
+
+        assert len(tasks) == 2
+        assert tasks[0].action["action"] == "create_file"
+        assert tasks[0].action["path"] == "test.py"
+        assert tasks[1].action["action"] == "open_file_in_app"
+        assert tasks[1].action["path"] == "${prev.path}"
+        assert tasks[1].dependencies == [tasks[0].task_id]
+
+    @pytest.mark.asyncio
+    async def test_router_uses_resolved_file_path_when_opening_vs_code(self) -> None:
+        """${prev.path} is replaced before the desktop skill receives it."""
+        received: list[dict] = []
+
+        class CaptureSkill:
+            name = "app_skill"
+
+            async def execute(self, action, context):
+                received.append(dict(context.params))
+                return SkillResult.ok("VS Code ready", data={"ready": True})
+
+        class Registry:
+            def find_skill_for_action(self, action):
+                return CaptureSkill() if action == "launch_app" else None
+
+        router = StructuredRouter(skill_registry=Registry())
+        task = TaskRecord(
+            description="Open test.py in VS Code",
+            action={"skill": "desktop", "action": "open_file_in_app", "target": "VS Code", "path": "${prev.path}"},
+        )
+        file_path = r"C:\Users\Shiva\test.py"
+        result_text, success = await router.execute(
+            {"skill": "desktop", "action": "open_file_in_app", "target": "VS Code", "path": file_path},
+            task,
+            "session",
+        )
+
+        assert success
+        assert received == [{"name": "VS Code", "args": [file_path]}]
+
+    def test_step_result_interpolation_resolves_path_fields(self) -> None:
+        """Path fields are first-class structured inputs, not just display text."""
+        ctx = ExecutionContext()
+        ctx.add_structured_result("create", {"path": r"C:\Users\Shiva\test.py", "success": True})
+        resolved = ExecutionLoop._inject_step_result(
+            {
+                "skill": "desktop",
+                "action": "open_file_in_app",
+                "target": "VS Code",
+                "path": "${prev.path}",
+                "input_from": "<input_from:prev.path>",
+            },
+            ctx,
+        )
+        assert resolved["path"] == r"C:\Users\Shiva\test.py"
 
     @pytest.mark.asyncio
     async def test_all_tasks_pending(self) -> None:

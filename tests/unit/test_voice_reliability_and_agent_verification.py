@@ -100,24 +100,28 @@ class TestBargeInReliability:
         self.detector._model_loaded = True
 
     def test_speaker_bleed_during_tts_is_suppressed(self):
-        # Speaker bleed has moderate RMS (e.g. 0.03) below suppressed threshold (0.065)
+        # Steady speaker bleed is Spidy's own echo level: it must never open a candidate.
         bleed_chunk = np.full(1280, 0.03, dtype=np.float32)
         self.detector.start(tts=self.tts)
 
-        self.detector.feed_chunk(bleed_chunk)
+        for _ in range(40):
+            self.detector.feed_chunk(bleed_chunk)
         with self.detector._buf_lock:
-            assert len(self.detector._buffer) == 0  # Discarded by raised gate
+            assert not self.detector._cand_active
 
         self.detector.stop()
 
     def test_real_stop_command_still_interrupts_tts(self):
-        # User shouting "Spidy stop" has high RMS (e.g. 0.12)
+        # User shouting "Spidy stop" is far above the echo level (e.g. 0.12 vs 0.03).
         user_speech = np.full(1280, 0.12, dtype=np.float32)
         self.detector.start(tts=self.tts)
 
-        self.detector.feed_chunk(user_speech)
+        for _ in range(10):
+            self.detector.feed_chunk(np.full(1280, 0.03, dtype=np.float32))
+        for _ in range(4):
+            self.detector.feed_chunk(user_speech)
         with self.detector._buf_lock:
-            assert len(self.detector._buffer) == 1
+            assert self.detector._cand_active
 
         # Simulate STT returning "Spidy stop"
         self.detector._model.transcribe.return_value = ([MagicMock(text="Spidy stop")], None)

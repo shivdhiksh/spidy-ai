@@ -45,6 +45,7 @@ import time
 from typing import TYPE_CHECKING
 
 from spidy.logging.logger import get_logger
+from spidy.voice.echo_canceller import PlaybackReference
 
 if TYPE_CHECKING:
     from spidy.perception.voice.tts.base import TTSEngine
@@ -85,6 +86,7 @@ class StreamingTTSWrapper:
 
         self._interrupt_flag = threading.Event()
         self._speaking = False
+        self.reference = PlaybackReference()      # what is playing, for echo cancellation in barge-in
         # BUG 4 FIX: Serialize concurrent speak() calls.
         # Without this lock, two rapid brain.response_ready events both pass
         # the `if _speaking` check before either sets it True, causing the
@@ -121,6 +123,11 @@ class StreamingTTSWrapper:
                 return
 
             self._interrupt_flag.clear()
+            # An earlier stop() leaves the engine's own stop flag set; without clearing it the
+            # engine skips every later buffer, so Spidy would stay silent after being interrupted.
+            clear_stop = getattr(self._engine, "clear_stop", None)
+            if callable(clear_stop):
+                clear_stop()
             self._speaking = True
 
             try:
@@ -231,6 +238,10 @@ class StreamingTTSWrapper:
     async def _safe_play(self, buffer: Any, sentence: str) -> None:
         """Safely play buffer via play_buffer if available, or fall back to speak."""
         if buffer is not None and hasattr(self._engine, "play_buffer"):
+            samples = getattr(buffer, "samples", None)
+            if samples is not None and getattr(samples, "size", 0):
+                # Tell the echo canceller what is about to come out of the speakers (and when).
+                self.reference.push(samples, getattr(buffer, "sample_rate", 22050))
             res = self._engine.play_buffer(buffer)
             if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
                 await res

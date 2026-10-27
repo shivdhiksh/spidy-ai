@@ -44,14 +44,17 @@ from spidy.logging.logger import get_logger
 log = get_logger(__name__)
 
 
+PROJECT_ROOT: Path = Path(__file__).resolve().parent.parent.parent
+
+
 def _load_dotenv() -> None:
     """
     Load environment variables from .env file using os.environ.setdefault().
     Preserves existing environment variables and never logs key values.
     """
     candidates = [
+        PROJECT_ROOT / ".env",
         Path(".env"),
-        Path(__file__).resolve().parent.parent.parent / ".env",
     ]
     for env_path in candidates:
         if env_path.is_file():
@@ -75,8 +78,11 @@ class AppConfig(BaseModel):
     name: str = "Spidy"
     version: str = "0.1.0"
     user_name: str = "User"
+    timezone: str = "auto"
     debug: bool = False
     log_level: str = "INFO"
+    autostart: bool = False
+    start_hidden: bool = False
 
     @field_validator("log_level")
     @classmethod
@@ -96,9 +102,13 @@ class PathsConfig(BaseModel):
     plugins_dir: str = "plugins"
 
     def resolve(self, key: str) -> Path:
-        """Expand environment variables and return an absolute Path."""
+        """Expand environment variables and return an absolute Path (relative to PROJECT_ROOT if relative)."""
         raw = getattr(self, key)
-        return Path(os.path.expandvars(raw)).resolve()
+        expanded = os.path.expandvars(raw)
+        p = Path(expanded)
+        if not p.is_absolute():
+            return (PROJECT_ROOT / p).resolve()
+        return p.resolve()
 
 
 class LoggingConfig(BaseModel):
@@ -137,6 +147,9 @@ class WakeWordConfig(BaseModel):
     custom_model_path: str | None = None  # Path to a custom .onnx model file.
     models: list[WakeModelConfig] = Field(default_factory=list)
     active_models: list[str] = Field(default_factory=list)
+    # Stage-2 check: Whisper must hear the name "Spidy" before a detection counts.
+    verify_with_stt: bool = True
+    verify_window_seconds: float = 2.0
 
     @field_validator("threshold")
     @classmethod
@@ -154,11 +167,16 @@ class STTConfig(BaseModel):
     language: str = "en"
     vad_filter: bool = True
     vad_threshold: float = 0.5
+    idle_unload_seconds: float = 90.0  # free the speech model after this much quiet (0 = keep loaded)
 
 
 class TTSConfig(BaseModel):
-    engine: str = "piper"
-    voice: str = "en_US-ryan-high"
+    engine: str = "hybrid"  # "hybrid" (ElevenLabs + Piper fallback), "elevenlabs", or "piper"
+    voice: str = "en_US-lessac-high"
+    elevenlabs_api_key: str = ""
+    elevenlabs_voice_id: str = "ZYk9CB0JtzXJrxcnt9Oz"  # Existing custom Gwen voice
+    elevenlabs_model_id: str = "eleven_turbo_v2_5"
+    fallback_engine: str = "piper"
     speed: float = 1.0
     volume: float = 1.0
 
@@ -187,6 +205,10 @@ class VoiceSessionConfig(BaseModel):
     continuous_mode: bool = True                # Stay awake between turns (no repeat wake word)
     conversation_timeout_seconds: float = 60.0  # Inactivity timeout
     max_turns_per_session: int = 50             # Max utterances per session
+    # Loudness gate against room chatter: a command's median speech loudness must be at
+    # least this many times the speech/silence threshold. 0 disables it (default); the
+    # "[VOICE] recorded ... ratio=" log line shows your real values for tuning.
+    min_speech_ratio: float = 0.0
     streaming_tts: bool = True                  # Use sentence-level streaming TTS
     stop_mid_sentence: bool = False             # Interrupt at sentence boundary (False) or immediately
     measure_latency: bool = True                # Log voice pipeline latency
@@ -229,12 +251,11 @@ class WakeAckConfig(BaseModel):
       wake_ack:
         enabled: true
         phrases:
-          - "Yes Shiva."
-          - "Hmm?"
+          - "Yes boss."
     """
     enabled: bool = True
     phrases: list[str] = Field(
-        default_factory=lambda: ["Yes Shiva.", "Hmm?"]
+        default_factory=lambda: ["Yes boss."]
     )
 
 
@@ -257,6 +278,9 @@ class BargeInConfig(BaseModel):
     compute_type: str = "int8"        # "int8" | "float16" | "auto"
     window_seconds: float = 0.8       # audio window to accumulate (0.4-2.0 s)
     min_rms_threshold: float = 0.015  # energy gate -- discard chunks below this RMS
+    load_on_wake: bool = True         # load the barge-in model when a wake word starts to sound, free it when idle
+    interrupt_on_speech: bool = False  # experimental: talking over Spidy stops her and starts listening
+    trigger_ratio: float = 1.5        # speech must be this much louder than Spidy's own echo to count
 
 
 class TTSFilterConfig(BaseModel):
@@ -387,6 +411,15 @@ class UIConfig(BaseModel):
     always_on_top: bool = True
     animate: bool = True
     hotkey: str = "ctrl+space"       # Global toggle hotkey
+
+    # Home screen: "dashboard" (red/blue command centre) or "classic" (the previous HUD)
+    layout: str = "dashboard"
+    # Weather chip on the dashboard. Fetched from Open-Meteo using only this city's
+    # coordinates (no account, no personal data). Set weather_enabled: false to turn it off.
+    weather_enabled: bool = True
+    weather_city: str = "Hyderabad, IN"
+    weather_latitude: float = 17.385
+    weather_longitude: float = 78.4867
 
     # Animation
     animation_speed_ms: int = 250    # Fade/slide duration in ms

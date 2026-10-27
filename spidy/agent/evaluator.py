@@ -35,11 +35,9 @@ Usage
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from spidy.agent.types import ReflectionDecision, TaskRecord
+from spidy.agent.types import Confidence, ReflectionDecision, TaskErrorCode, TaskOutcome, TaskRecord
 from spidy.logging.logger import get_logger
 
 if TYPE_CHECKING:
@@ -48,49 +46,38 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 
-# ── Confidence Levels ──────────────────────────────────────────────────────────
-
-
-class Confidence(str, Enum):
-    """How certain the evaluator is about the task outcome."""
-    HIGH    = "high"     # Multiple signals agree
-    MEDIUM  = "medium"   # Single reliable signal
-    LOW     = "low"      # Weak or conflicting signals
-    UNKNOWN = "unknown"  # No signal available
-
-
-# ── Task Outcome ───────────────────────────────────────────────────────────────
-
-
-@dataclass
-class TaskOutcome:
-    """
-    Structured result of evaluating a task's execution.
-
-    Attributes
-    ----------
-    success:
-        Whether the task is considered to have succeeded.
-    confidence:
-        How certain we are about the success/failure verdict.
-    reason:
-        Human-readable explanation for logging and event publishing.
-    should_replan:
-        True if the remaining plan should be revised (Replanner called).
-        Only True when success=False AND confidence >= MEDIUM AND NOT
-        a deterministic failure.
-    replan_hint:
-        Optional suggestion passed to the Replanner (e.g. "try searching
-        instead of navigating directly").
-    reflection_decision:
-        The original ReflectionDecision (preserved for ExecutionLoop compatibility).
-    """
-    success: bool = False
-    confidence: Confidence = Confidence.UNKNOWN
-    reason: str = ""
-    should_replan: bool = False
-    replan_hint: str = ""
-    reflection_decision: ReflectionDecision = ReflectionDecision.CONTINUE
+def classify_task_error(error_text: str) -> tuple[TaskErrorCode, str]:
+    """Classify failure text into a structured TaskErrorCode and recovery strategy."""
+    text = (error_text or "").lower()
+    if any(k in text for k in ("app not found", "cannot find app", "executable not found", "not installed")):
+        return TaskErrorCode.APP_NOT_FOUND, "check_installed_apps"
+    if any(k in text for k in ("window not found", "no running window", "window matching")):
+        return TaskErrorCode.WINDOW_NOT_FOUND, "enumerate_windows_and_fuzzy_match"
+    if any(k in text for k in ("focus lost", "could not bring to foreground", "focus policy")):
+        return TaskErrorCode.FOCUS_LOST, "refocus_target_window"
+    if any(k in text for k in ("control not found", "element not found", "uiautomation")):
+        return TaskErrorCode.CONTROL_NOT_FOUND, "fallback_to_coordinates_or_vision"
+    if any(k in text for k in ("file not found", "no such file", "could not find file", "no matching files")):
+        return TaskErrorCode.FILE_NOT_FOUND, "broaden_safe_search_roots"
+    if any(k in text for k in ("permission denied", "access denied", "administrator")):
+        return TaskErrorCode.PERMISSION_DENIED, "request_user_authority"
+    if any(k in text for k in ("browser failure", "navigation timed out", "page crashed", "playwright")):
+        return TaskErrorCode.BROWSER_FAILURE, "restart_browser_session"
+    if any(k in text for k in ("network failure", "connection refused", "dns", "unreachable")):
+        return TaskErrorCode.NETWORK_FAILURE, "check_network_and_retry"
+    if any(k in text for k in ("save failed", "cannot save", "disk full")):
+        return TaskErrorCode.SAVE_FAILED, "verify_write_path_and_retry"
+    if any(k in text for k in ("nameerror", "syntaxerror", "typeerror", "traceback", "indexerror", "keyerror")):
+        return TaskErrorCode.CODE_ERROR, "trigger_code_repair_engine"
+    if any(k in text for k in ("test failed", "assertionerror")):
+        return TaskErrorCode.TEST_FAILED, "diagnose_test_traceback"
+    if any(k in text for k in ("screen unreadable", "ocr failed", "vision error")):
+        return TaskErrorCode.SCREEN_UNREADABLE, "capture_high_dpi_region"
+    if any(k in text for k in ("clarification required", "ambiguous", "multiple matches", "which one")):
+        return TaskErrorCode.AMBIGUOUS_INTENT, "ask_user_clarification"
+    if "timeout" in text:
+        return TaskErrorCode.TIMEOUT, "increase_deadline"
+    return TaskErrorCode.UNKNOWN, "general_reflection"
 
 
 # ── Deterministic Failure Patterns ────────────────────────────────────────────
@@ -165,6 +152,38 @@ class TaskEvaluator:
         """
         # ── Case 1: Clear success from reflection ──────────────────────────
         if reflection_decision == ReflectionDecision.CONTINUE:
+            # Physical desktop operations are not complete merely because a
+            # skill/LLM claimed success.  A required verification must be a
+            # positive environmental observation, never response text or an
+            # unknown state.
+            physical_actions = {
+                "open_app", "open_file_in_app", "launch_app", "focus",
+                "create_file", "write_file", "save_file", "save",
+                "open_file", "open_folder", "navigate", "search",
+            }
+            action_name = (
+                (task.action or {}).get("action", "").lower()
+                if isinstance(task.action, dict) else ""
+            )
+            requires_authoritative_observation = (
+                task.verification_required and action_name in physical_actions
+            )
+            if requires_authoritative_observation and (
+                observation.success_signal is not True
+                or observation.method in ("response_text", "skipped")
+            ):
+                error_text = observation.summary or response_text
+                error_code, recovery = classify_task_error(error_text)
+                return TaskOutcome(
+                    success=False,
+                    confidence=Confidence.HIGH if observation.success_signal is False else Confidence.MEDIUM,
+                    reason=f"Required environmental verification did not pass: {error_text}",
+                    error_code=error_code,
+                    recovery_strategy=recovery,
+                    should_replan=observation.success_signal is False and self._replan_on_soft_failures,
+                    replan_hint="Obtain an authoritative filesystem or window observation before continuing.",
+                    reflection_decision=ReflectionDecision.ALTERNATIVE,
+                )
             # Verify with observation if available
             if observation.success_signal is True:
                 return TaskOutcome(

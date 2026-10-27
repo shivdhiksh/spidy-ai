@@ -577,6 +577,21 @@ class TestPipelineIntegrity:
 class TestContinuousConversation:
 
     @pytest.mark.asyncio
+    async def test_rejected_wake_while_processing_clears_engine_waking_state(self) -> None:
+        """A duplicate wake during Brain work must not strand the listener in WAKING."""
+        from spidy.voice.session import VoiceSessionState
+
+        cvc, brain, tts, session, engine = _make_cvc(session_active=True)
+        session.state = VoiceSessionState.PROCESSING
+        engine.discard_pending_wake = MagicMock()
+
+        await cvc._on_wake_word(MagicMock(wake_phrase="Hey Spidy"))
+
+        engine.discard_pending_wake.assert_called_once()
+        assert engine.discard_pending_wake.call_args.args[0].name == "PROCESSING"
+        session.activate.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_12_relisten_triggered_after_tts(self) -> None:
         """
         After TTS finishes and session is still active,

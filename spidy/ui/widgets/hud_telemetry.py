@@ -74,11 +74,11 @@ class TelemetryPanel(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
 
-        self._c_primary = QColor("#00E5FF")
-        self._c_secondary = QColor("#00ACC1")
-        self._c_dim = QColor("#004D5E")
-        self._c_text = QColor("#B2EBF2")
-        self._c_bg = QColor("#0A1929")
+        self._c_primary = QColor("#E62429")    # Spider-red
+        self._c_secondary = QColor("#1B2A4A")  # Web-blue navy
+        self._c_dim = QColor("#3A1014")        # Dim red
+        self._c_text = QColor("#F5F5F7")       # Crisp white
+        self._c_bg = QColor("#12141C")         # Dark glass base
 
         self._psutil = _try_psutil()
         self._nvml = _try_nvml()

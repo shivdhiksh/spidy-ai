@@ -28,10 +28,18 @@ Architecture
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import subprocess
 from typing import TYPE_CHECKING, Any
 
 from spidy.logging.logger import get_logger
+from spidy.skills.desktop.app_catalog import (
+    StartApp,
+    find_start_app,
+    launch_start_app,
+    normalize_app_name,
+)
 from spidy.skills.base import (
     BaseSkill,
     ParamSchema,
@@ -136,6 +144,11 @@ _KNOWN_PATHS: dict[str, list[str]] = {
         r"%APPDATA%\Spotify\Spotify.exe",
     ],
 }
+
+
+_BROWSER_PROCESSES = frozenset({
+    "chrome.exe", "msedge.exe", "firefox.exe", "brave.exe", "opera.exe", "vivaldi.exe",
+})
 
 
 class AppSkill(BaseSkill):
@@ -334,53 +347,162 @@ class AppSkill(BaseSkill):
                 non_retryable=True,
             )
 
-        args_str: str = context.get("args", "") or ""
-        args: list[str] = args_str.split() if args_str else []
+        args_raw = context.get("args", "") or ""
+        if isinstance(args_raw, (list, tuple)):
+            args = [str(arg) for arg in args_raw]
+        else:
+            # Windows paths routinely contain spaces; use Windows-aware
+            # splitting rather than turning one file argument into many.
+            import shlex
+            args = shlex.split(str(args_raw), posix=False) if args_raw else []
 
-        # Resolve alias
-        resolved = _APP_ALIASES.get(name.lower(), name)
+        # App launches are idempotent when the caller only asks to open an
+        # application.  VS Code titles use "Visual Studio Code" while its
+        # executable is Code.exe, so this must use the same alias-aware window
+        # lookup as readiness/focus rather than blindly starting a new process.
+        # Supplying args is intentionally different: ``code <file>`` is a
+        # request to open that specific file in the existing editor instance.
+        if not args:
+            existing_hwnd, existing_name = await asyncio.to_thread(
+                self._find_window_by_name, name
+            )
+            if existing_hwnd:
+                focused = await asyncio.to_thread(self._set_foreground, existing_hwnd)
+                if not focused:
+                    return SkillResult.fail(
+                        f"AppSkill: '{existing_name or name}' is already running, but Windows would not focus it."
+                    )
+                await self._emit_app_foregrounded(existing_name or name, existing_hwnd, context.session_id)
+                return SkillResult.ok(
+                    f"'{existing_name or name}' is already running and focused.",
+                    data={
+                        "app_name": name,
+                        "hwnd": existing_hwnd,
+                        "ready": True,
+                        "already_running": True,
+                        "verified": True,
+                    },
+                    action_taken="launch_app",
+                )
 
-        # Expand known install paths for apps not on PATH
-        exe_path = self._resolve_exe_path(resolved)
-        cmd = [exe_path] + args
+        # Spoken names are often mis-heard ("VS Core"); look up the cleaned-up name.
+        spoken = normalize_app_name(name) or name.lower()
 
+        # How to start it, best first: known executable → Start menu (covers Store
+        # apps such as WhatsApp) → whatever is on PATH.
         proc: subprocess.Popen | None = None
-        try:
-            proc = await asyncio.to_thread(
-                subprocess.Popen,
-                cmd,
-                shell=False,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-        except FileNotFoundError:
-            return SkillResult.fail(
-                f"AppSkill: could not launch '{name}' — not found in PATH or known install locations.",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return SkillResult.fail(
-                f"AppSkill: failed to launch '{name}': {exc}", error=exc
-            )
+        start_app: StartApp | None = None
+        display = spoken  # cleaned-up name ("VS Core" is reported as "vs code")
+        alias_exe = _APP_ALIASES.get(spoken) or _APP_ALIASES.get(name.lower())
+        if alias_exe:
+            exe_path = self._resolve_exe_path(alias_exe)
+            if os.path.isabs(exe_path) or shutil.which(exe_path):
+                try:
+                    proc = await asyncio.to_thread(
+                        subprocess.Popen, [exe_path] + args, shell=False,
+                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("AppSkill: '{exe}' failed to start ({exc}); trying Start menu.",
+                                exe=exe_path, exc=exc)
+        if proc is None and not args:
+            start_app = await asyncio.to_thread(find_start_app, spoken)
+            if start_app is not None:
+                display = start_app.name
+                try:
+                    proc = await asyncio.to_thread(launch_start_app, start_app)
+                except Exception as exc:  # noqa: BLE001
+                    return SkillResult.fail(
+                        f"AppSkill: failed to start '{display}': {exc}", error=exc,
+                    )
+        if proc is None:
+            try:
+                proc = await asyncio.to_thread(
+                    subprocess.Popen, [self._resolve_exe_path(alias_exe or name)] + args,
+                    shell=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                )
+            except FileNotFoundError:
+                return SkillResult.fail(
+                    f"I couldn't find an app called '{name}' on this computer.",
+                    non_retryable=True,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return SkillResult.fail(
+                    f"AppSkill: failed to launch '{name}': {exc}", error=exc
+                )
 
-        # Verify the process is still alive after a short settle period.
-        # Without this, shell-spawned wrappers report success even when the
-        # real executable was never found (e.g. chrome.exe not in PATH).
-        await asyncio.sleep(0.35)
+        # Quick exit check to catch immediate launch failures
+        await asyncio.sleep(0.05)
         exit_code = proc.poll()
-        if exit_code is not None:
+        if exit_code is not None and exit_code != 0 and start_app is None:
             return SkillResult.fail(
                 f"AppSkill: '{name}' exited immediately with code {exit_code}. "
                 "Check that the application is installed correctly."
             )
 
         pid = proc.pid
-        log.info("AppSkill: launched '{name}' as PID {pid}", name=resolved, pid=pid)
-        await self._emit_app_launched(name, pid, context.session_id)
+        log.info("AppSkill: launched '{name}' as PID {pid}", name=display, pid=pid)
+
+        # Only claim success once a window really appeared (Electron/Store apps can
+        # take several seconds). "Started" is not "opened".
+        ready, hwnd = await self._wait_for_any_window(
+            [name, spoken, display], timeout=15.0,
+        )
+        if not ready:
+            log.warning("AppSkill: '{name}' started but no window appeared.", name=display)
+            return SkillResult.fail(
+                f"I started {display}, but no window appeared, so I can't confirm it opened.",
+                non_retryable=True,
+            )
+
+        log.info("AppSkill: '{name}' window ready (hwnd={hwnd})", name=display, hwnd=hwnd)
+        await self._emit_app_foregrounded(display, hwnd, context.session_id)
+        await self._emit_app_launched(display, pid, context.session_id)
         return SkillResult.ok(
-            f"Launched '{name}' (PID {pid}).",
-            data={"app_name": name, "pid": pid},
+            f"Opened {display}.",
+            data={"app_name": display, "pid": pid, "hwnd": hwnd, "ready": True, "verified": True},
             action_taken="launch_app",
         )
+
+    async def _wait_for_any_window(
+        self,
+        names: list[str],
+        timeout: float = 12.0,
+        poll_interval: float = 0.25,
+    ) -> tuple[bool, int]:
+        """Poll until a visible window matching any of ``names`` exists, then focus it."""
+        import time as _time
+        candidates = [n for n in dict.fromkeys(names) if n]
+        deadline = _time.monotonic() + timeout
+        while _time.monotonic() < deadline:
+            for candidate in candidates:
+                hwnd, _ = await asyncio.to_thread(self._find_window_by_name, candidate)
+                if hwnd:
+                    await asyncio.to_thread(self._set_foreground, hwnd)
+                    return True, hwnd
+            await asyncio.sleep(poll_interval)
+        return False, 0
+
+    async def _wait_for_app_ready(
+        self,
+        name: str,
+        pid: int,
+        timeout: float = 2.5,
+        poll_interval: float = 0.05,
+    ) -> tuple[bool, int]:
+        """
+        Poll boundedly until the application window is found and focused.
+        """
+        import time as _time
+        deadline = _time.monotonic() + timeout
+        hwnd = 0
+        while _time.monotonic() < deadline:
+            hwnd, _ = await asyncio.to_thread(self._find_window_by_name, name)
+            if hwnd != 0:
+                await asyncio.to_thread(self._set_foreground, hwnd)
+                return True, hwnd
+            await asyncio.sleep(poll_interval)
+        return False, hwnd
 
     async def _bring_to_foreground(self, context: SkillContext) -> SkillResult:
         name: str = context.get("name", "")
@@ -809,7 +931,19 @@ class AppSkill(BaseSkill):
             log.warning("AppSkill: win32gui/psutil not available for window search.")
             return 0, ""
 
-        name_lower = name.lower()
+        name_lower = name.lower().strip()
+        resolved = _APP_ALIASES.get(name_lower, name_lower).lower()
+        # Match both a spoken alias and the real Windows process/title.  The
+        # old exact-string comparison could never find a running VS Code
+        # window for the spoken name "VS Code".
+        needles = {name_lower, resolved.removesuffix(".exe")}
+        if name_lower in ("vs code", "vscode", "visual studio code"):
+            needles.update({"visual studio code", "code"})
+        needles.discard("")
+        wants_browser = any(
+            b in needle for needle in needles
+            for b in ("chrome", "edge", "firefox", "brave", "opera", "browser")
+        )
         found_hwnd = 0
         found_name = ""
 
@@ -821,15 +955,24 @@ class AppSkill(BaseSkill):
                 if not win32gui.IsWindowVisible(hwnd):
                     return
                 title = win32gui.GetWindowText(hwnd).lower()
-                if name_lower in title:
+                _, pid = win32process.GetWindowThreadProcessId(hwnd)
+                try:
+                    proc_name = psutil.Process(pid).name().lower()
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    proc_name = ""
+                # A browser tab called "WhatsApp Web" is not the WhatsApp app: ignore
+                # browser windows unless a browser itself was asked for.
+                if proc_name in _BROWSER_PROCESSES and not wants_browser:
+                    return
+                if any(needle in title for needle in needles):
                     found_hwnd = hwnd
                     found_name = win32gui.GetWindowText(hwnd)
                     return
                 # Also check process name
-                _, pid = win32process.GetWindowThreadProcessId(hwnd)
                 try:
                     proc = psutil.Process(pid)
-                    if name_lower in proc.name().lower():
+                    process_name = proc.name().lower()
+                    if any(needle in process_name for needle in needles):
                         found_hwnd = hwnd
                         found_name = proc.name()
                 except (psutil.NoSuchProcess, psutil.AccessDenied):

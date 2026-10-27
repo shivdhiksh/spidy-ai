@@ -160,8 +160,8 @@ class InterruptionHandler:
         self,
         bus: "EventBus",
         brain: "Brain",
-        tts: "TTSEngine",
-        session: "VoiceSessionManager",
+        tts: "TTSEngine | None" = None,
+        session: "VoiceSessionManager | None" = None,
         extra_keywords: list[tuple[str, InterruptCommand]] | None = None,
     ) -> None:
         self._bus = bus
@@ -280,16 +280,18 @@ class InterruptionHandler:
         TTS is stopped via both the interrupt flag (clean sentence-boundary
         stop) AND a direct engine.stop() call for truly instant cutoff.
         """
-        # 1. Stop TTS immediately — interrupt flag + direct engine stop
-        #    so cutoff is instant regardless of sentence boundaries.
-        self._tts.stop()
-        log.info(
-            "InterruptionHandler: TTS stopped by '{cmd}'.",
-            cmd=command.name,
-        )
+        # 1. Stop TTS immediately if active
+        if self._tts is not None:
+            self._tts.stop()
+            log.info(
+                "InterruptionHandler: TTS stopped by '{cmd}'.",
+                cmd=command.name,
+            )
 
         # 2. Cancel any active autonomous goal (non-fatal if none running)
-        cancelled = await self._brain.cancel_goal()
+        cancelled = False
+        if self._brain is not None:
+            cancelled = await self._brain.cancel_goal()
 
         # 3. Session intentionally kept ACTIVE — user can continue speaking.
         #    ContinuousVoiceController restores overlay and re-listen state.
@@ -298,16 +300,19 @@ class InterruptionHandler:
         else:
             log.debug("InterruptionHandler: no active goal to cancel.")
 
-        # Return empty string — CVC will handle overlay + re-listen.
-        return ""
+        # Return acknowledgement string
+        return "Stopped and cancelled active goal."
 
     async def _handle_pause(self) -> str:
         """Pause the voice session."""
-        self._tts.stop()
-        await self._session.pause()
+        if self._tts is not None:
+            self._tts.stop()
+        if self._session is not None:
+            await self._session.pause()
         return "Sure, I'll wait. Just say 'resume' when you're ready."
 
     async def _handle_resume(self) -> str:
         """Resume a paused session."""
-        await self._session.resume()
+        if self._session is not None:
+            await self._session.resume()
         return "I'm listening again."

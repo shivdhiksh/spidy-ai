@@ -218,7 +218,34 @@ class Planner:
                 action=step.action or "(none)",
             )
 
-        return tuple(steps)
+        # Deduplicate consecutive identical idempotent steps
+        deduped: list[PlanStep] = []
+        _IDEMPOTENT_ACTIONS = {
+            "launch_app", "open_app", "focus_window", "minimize_window",
+            "maximize_window", "search_files", "open_file", "open_folder",
+            "get_time", "get_date", "get_system_info",
+        }
+        for st in steps:
+            if not deduped:
+                deduped.append(st)
+                continue
+            prev = deduped[-1]
+            if (
+                st.step_type == "skill"
+                and prev.step_type == "skill"
+                and st.action in _IDEMPOTENT_ACTIONS
+                and st.action == prev.action
+                and st.params == prev.params
+            ):
+                log.info(
+                    "Planner: collapsing duplicate idempotent step: action='{a}' params={p}",
+                    a=st.action,
+                    p=st.params,
+                )
+                continue
+            deduped.append(st)
+
+        return tuple(deduped)
 
     # ── Internal ──────────────────────────────────────────────────────────
 

@@ -84,9 +84,11 @@ class SystemTrayManager(QObject):
     theme_change_requested = Signal(str)
     settings_requested = Signal()
     quit_requested = Signal()
+    _overlay_visible_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
         super().__init__(parent)
+        self._overlay_visible_changed.connect(self._apply_overlay_visible)
         self._overlay_visible = True
         self._tray: QSystemTrayIcon | None = None
         self._icon_color = "#6C63FF"
@@ -125,9 +127,23 @@ class SystemTrayManager(QObject):
             self._tray = None
 
     def set_overlay_visible(self, visible: bool) -> None:
-        """Update the tray's knowledge of overlay visibility."""
+        """
+        Update the tray's knowledge of overlay visibility.
+
+        Safe to call from any thread. Rebuilding the tray menu creates and deletes
+        Qt objects, which must only happen on the Qt thread; calling it from the
+        asyncio thread while the Qt thread did the same corrupted the heap and
+        killed Spidy right after a wake word. The signal is queued onto the Qt
+        thread (this QObject lives there).
+        """
+        self._overlay_visible_changed.emit(bool(visible))
+
+    def _apply_overlay_visible(self, visible: bool) -> None:
+        """Qt-thread slot for set_overlay_visible."""
+        changed = visible != self._overlay_visible
         self._overlay_visible = visible
-        self._update_menu()
+        if changed:
+            self._update_menu()
 
     def show_message(
         self,

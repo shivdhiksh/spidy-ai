@@ -92,6 +92,7 @@ class BrowserSkill(BaseSkill):
         navigation_timeout_ms: int = 10_000,
         read_page_max_chars: int = 5000,
         history_limit: int = 20,
+        browser_agent: "BrowserAgent | None" = None,
     ) -> None:
         self._bus = bus
         self._browser_type = browser_type
@@ -103,7 +104,7 @@ class BrowserSkill(BaseSkill):
         self._navigation_timeout_ms = navigation_timeout_ms
         self._read_page_max_chars = read_page_max_chars
         self._history_limit = history_limit
-        self._agent: "BrowserAgent | None" = None
+        self._agent = browser_agent
 
     # ── Lifecycle ─────────────────────────────────────────────────────────
 
@@ -369,6 +370,28 @@ class BrowserSkill(BaseSkill):
                     "navigate to 10 Downing Street",
                 ],
             ),
+            SkillCapability(
+                action="play_youtube_video",
+                description="Play any YouTube video from search results with multi-signal playback verification.",
+                permission_tier="T1",
+                params=[
+                    ParamSchema("query", "string", required=False, default="",
+                                description="Optional YouTube search query if not already on search page."),
+                    ParamSchema("select_mode", "string", required=False, default="random",
+                                description="Selection mode: random or first."),
+                    ParamSchema("video_index", "int", required=False, default=None,
+                                description="Specific video index to select."),
+                    ParamSchema("max_retries", "int", required=False, default=3,
+                                description="Maximum video candidates to try if playback fails."),
+                ],
+                examples=[
+                    "play any one video random which you like",
+                    "play any video",
+                    "play random video",
+                    "play python video",
+                    "play a video from youtube search",
+                ],
+            ),
             # ── T2 — Potentially disruptive ────────────────────────────
             SkillCapability(
                 action="close_browser",
@@ -424,6 +447,7 @@ class BrowserSkill(BaseSkill):
             "refresh_page":            self._refresh_page,
             "search_google":           self._search_google,
             "search_youtube":          self._search_youtube,
+            "play_youtube_video":      self._play_youtube_video,
             "search_bing":             self._search_bing,
             "search_duckduckgo":       self._search_duckduckgo,
             "search_wikipedia":        self._search_wikipedia,
@@ -708,6 +732,62 @@ class BrowserSkill(BaseSkill):
             data={"query": query, "engine": "youtube", "page": info.to_dict(), "browser_type": agent.active_browser_type, "channel": getattr(agent, "active_channel", "")},
             action_taken="search_youtube",
         )
+
+    async def _play_youtube_video(self, context: SkillContext) -> SkillResult:
+        query = context.get("query", "")
+        select_mode = context.get("select_mode", "random")
+        video_index = context.get("video_index") if context.get("video_index") is not None else context.get("index")
+        max_retries = int(context.get("max_retries", 3))
+        b_type = context.get("browser_type") or context.get("browser") or context.get("app_name") or ""
+        agent = self._get_or_create_agent(browser_type=b_type if b_type else None)
+
+        res = await agent.play_youtube_video(
+            query=query if query else None,
+            video_index=int(video_index) if video_index is not None else None,
+            select_mode=select_mode,
+            max_retries=max_retries,
+            browser_type=b_type if b_type else None,
+        )
+
+        success = bool(
+            (res.get("success") is True or res.get("status") in ("playing", "SUCCEEDED"))
+            and res.get("playback_verified", False)
+        )
+        video_title = res.get("video_title") or res.get("title", "YouTube video")
+        video_url = res.get("video_url") or res.get("url", "")
+
+        # Structure evidence matching requirement
+        evidence_dict = {
+            "step": "play_youtube_video",
+            "status": "SUCCEEDED" if success else "FAILED",
+            "evidence_type": "browser_state",
+            "evidence": res.get("evidence", ""),
+            "confidence": "high" if success else "medium",
+        }
+        res["evidence_data"] = evidence_dict
+
+        if success:
+            from spidy.skills.browser.events import PageNavigatedEvent
+            await self._emit_event_obj(PageNavigatedEvent(
+                title=res.get("page_title", video_title),
+                url=video_url,
+                tab_id=0,
+                new_tab=False,
+                load_time_ms=100,
+                session_id=context.session_id,
+            ))
+            return SkillResult.ok(
+                f"Playing YouTube video: '{video_title}'. Playback verified ({video_url}).",
+                data=res,
+                action_taken="play_youtube_video",
+            )
+        else:
+            err = res.get("error") or "Failed to verify video playback."
+            return SkillResult.fail(
+                f"Could not play YouTube video: {err}",
+                data=res,
+                error=Exception(err),
+            )
 
     async def _search_bing(self, context: SkillContext) -> SkillResult:
         query = context.get("query", "")

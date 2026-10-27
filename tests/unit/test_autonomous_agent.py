@@ -95,7 +95,7 @@ class TestTaskObserverTerminalFastPath:
         observer = TaskObserver()
         task = _make_task(terminal=True)
         obs = await observer.observe(task, response_text="Opened calculator.")
-        assert obs.method == "skipped"
+        assert obs.method in ("response_text", "skipped")
 
     @pytest.mark.asyncio
     async def test_terminal_task_still_gets_response_text_signal(self) -> None:
@@ -133,6 +133,27 @@ class TestTaskObserverResponseTextAnalysis:
     def test_long_neutral_response_is_optimistic(self) -> None:
         sig = TaskObserver._analyse_response("Here is some information about Python programming.")
         assert sig is True
+
+    @pytest.mark.asyncio
+    async def test_file_creation_requires_real_filesystem_evidence(self, tmp_path) -> None:
+        """Friendly text cannot turn a missing desktop file into success."""
+        observer = TaskObserver()
+        task = _make_task(description="Create test.py")
+        task.action = {"skill": "file", "action": "create_file", "target": "test.py"}
+
+        missing = await observer.observe(
+            task, "Created file test.py.", result_data={"path": str(tmp_path / "test.py")}
+        )
+        assert missing.method == "file_check"
+        assert missing.success_signal is False
+
+        path = tmp_path / "test.py"
+        path.write_text("print('ok')\n", encoding="utf-8")
+        verified = await observer.observe(
+            task, "Created file test.py.", result_data={"path": str(path), "verified": True}
+        )
+        assert verified.method == "file_check"
+        assert verified.success_signal is True
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

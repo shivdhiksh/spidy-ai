@@ -55,7 +55,9 @@ from typing import TYPE_CHECKING, Any
 
 from spidy.brain.goal_intent_classifier import GoalIntentClassifier
 from spidy.brain.intent_classifier import IntentClassifier
+from spidy.core.pipeline_tracer import PipelineTrace, PipelineTracer
 from spidy.logging.logger import get_logger
+from spidy.perception.voice.engine import VoiceState
 from spidy.voice.events import (
     VoiceInterruptEvent,
     VoicePausedEvent,
@@ -64,6 +66,7 @@ from spidy.voice.events import (
 )
 from spidy.voice.barge_in import BargeInDetector
 from spidy.voice.interruption import InterruptionHandler
+from spidy.voice.normalizer import TranscriptNormalizer
 from spidy.voice.session import VoiceSessionManager, VoiceSessionState
 from spidy.voice.streaming_tts import StreamingTTSWrapper
 from spidy.voice.transcript_guard import TranscriptQualityGuard
@@ -141,6 +144,7 @@ class ContinuousVoiceController:
         # Voice pipeline normalization and quality guards
         ack_phrases = getattr(self._wake_acknowledger, "phrases", []) if self._wake_acknowledger else []
         self._wake_stripper = WakeWordStripper(ack_phrases=ack_phrases)
+        self._normalizer = TranscriptNormalizer(ack_phrases=ack_phrases)
         self._quality_guard = TranscriptQualityGuard()
 
         self._running = False
@@ -160,6 +164,16 @@ class ContinuousVoiceController:
             return
         self._running = True
 
+        # A chunk still in flight to the barge-in detector when the user interrupts goes to the recorder.
+        if self._barge_in is not None and hasattr(self._engine, "_buffer_audio"):
+            self._barge_in.set_handoff_sink(self._engine._buffer_audio)
+        if self._barge_in is not None and hasattr(self._streaming_tts, "reference"):
+            self._barge_in.attach_reference(self._streaming_tts.reference)
+        capture = getattr(self._engine, "_capture_engine", None)
+        ratio = getattr(capture, "barge_in_gain_ratio", None)
+        if self._barge_in is not None and isinstance(ratio, (int, float)):
+            self._barge_in.set_gain_ratio(ratio)
+
         # Subscribe to voice events
         self._bus.subscribe("voice.transcript", self._on_transcript)
         self._bus.subscribe("wake_word.detected", self._on_wake_word)
@@ -174,7 +188,8 @@ class ContinuousVoiceController:
         # Fix: subscribe CVC's handler first, then remove VoiceEngine's handler so
         # only StreamingTTS owns speech delivery for the rest of the session.
         self._bus.subscribe("brain.response_ready", self._on_brain_response)
-        self._bus.unsubscribe("brain.response_ready", self._engine._on_brain_response)
+        if hasattr(self._engine, "_on_brain_response"):
+            self._bus.unsubscribe("brain.response_ready", self._engine._on_brain_response)
         log.info(
             "ContinuousVoiceController: took exclusive ownership of brain.response_ready "
             "(VoiceEngine direct-speak path disabled)."
@@ -182,6 +197,7 @@ class ContinuousVoiceController:
 
         # Session timeout → deactivate
         self._bus.subscribe("voice.session_timeout", self._on_session_timeout)
+        self._bus.subscribe("voice.session_ended", self._on_session_ended)
 
         # Shutdown
         self._bus.subscribe("system.shutting_down", self._on_shutdown)
@@ -190,6 +206,15 @@ class ContinuousVoiceController:
             "ContinuousVoiceController started | continuous={c}",
             c=self._continuous_mode,
         )
+
+    def halt(self) -> None:
+        """Stop talking right now (thread-safe; used when Spidy is being closed)."""
+        try:
+            self._streaming_tts.stop()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("ContinuousVoiceController.halt: tts stop failed: {exc}", exc=exc)
+        if self._barge_in is not None:
+            self._barge_in.stop()
 
     async def stop(self) -> None:
         """Unsubscribe and deactivate session."""
@@ -202,10 +227,31 @@ class ContinuousVoiceController:
         self._bus.unsubscribe("voice.speaking_end", self._on_speaking_end)
         self._bus.unsubscribe("brain.response_ready", self._on_brain_response)
         self._bus.unsubscribe("voice.session_timeout", self._on_session_timeout)
+        self._bus.unsubscribe("voice.session_ended", self._on_session_ended)
         self._bus.unsubscribe("system.shutting_down", self._on_shutdown)
 
         await self._session.deactivate(reason="controller_stopped")
         log.info("ContinuousVoiceController stopped.")
+
+    async def _safe_session_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Helper to invoke VoiceSessionManager methods safely whether async or mock."""
+        fn = getattr(self._session, method, None)
+        if fn is not None:
+            res = fn(*args, **kwargs)
+            if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                return await res
+            return res
+        return None
+
+    async def _safe_engine_call(self, method: str, *args: Any, **kwargs: Any) -> Any:
+        """Helper to invoke VoiceEngine methods safely whether async or mock."""
+        fn = getattr(self._engine, method, None)
+        if fn is not None:
+            res = fn(*args, **kwargs)
+            if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
+                return await res
+            return res
+        return None
 
     # ── Event Handlers ────────────────────────────────────────────────────
 
@@ -215,55 +261,68 @@ class ContinuousVoiceController:
 
         8-step sequence
         ---------------
-        0. Guard: TTS currently speaking? → ignore (prevents duplication).
+        0. Guard: TTS currently speaking or in flush? → ignore (prevents duplicate sessions / loop).
         1. Guard: session already active? → ignore (prevents duplicate sessions).
         2. Publish ui.state_change → "listening" immediately (overlay goes AWAKE).
         3. Open the voice session.
         4. Set CaptureMode.IDLE — mic OFF before ack TTS so ack audio is never
            captured by STT or the wake-word model.
         5. Speak the ack phrase ("Yes Shiva." / "Hmm?") if acknowledger is set.
-        6. Reset OWW prediction buffer (discard stale scores from ack audio).
-        7. Set CaptureMode.RECORDING — mic ON; user's command is next.
+        6. Reset OWW prediction buffer & flush post-ack audio.
+        7. Set CaptureMode.RECORDING and signal engine relisten — mic ON; user's command is next.
         """
-        # Step 0: Belt-and-suspenders TTS guard — if Spidy is actively
-        # speaking a response, a wake event must be silently dropped.
-        # session.is_active handles this in most cases, but an explicit
-        # TTS check prevents edge cases where session state transitions
-        # faster than TTS finishes.
-        if self._streaming_tts.is_speaking:
+        # Step 0: Belt-and-suspenders TTS guard
+        engine_audio_busy = (
+            getattr(self._streaming_tts, "is_speaking", False) is True
+            or (hasattr(self._engine, "is_speaking") and getattr(self._engine, "is_speaking", False) is True)
+            or (hasattr(self._engine, "is_flushing") and getattr(self._engine, "is_flushing", False) is True)
+            or getattr(self._session, "state", None) in (VoiceSessionState.SPEAKING, VoiceSessionState.AUDIO_FLUSH)
+        )
+        if engine_audio_busy:
+            if hasattr(self._engine, "discard_pending_wake"):
+                restore = VoiceState.SPEAKING if (hasattr(self._engine, "is_speaking") and self._engine.is_speaking) else VoiceState.AUDIO_FLUSH
+                self._engine.discard_pending_wake(restore)
             log.info(
                 "ContinuousVoiceController: wake word received while TTS is "
-                "speaking — ignoring to prevent duplicate session."
+                "speaking/flushing — ignoring to prevent duplicate session."
             )
             return
 
-        # Step 1: Session already active guard
-        if self._session.is_active:
+        # A wake heard while the current utterance is still travelling through
+        # STT/Brain is not a new session.  Crucially, acknowledge the rejected
+        # event back to VoiceEngine so it cannot remain stuck in WAKING.
+        if getattr(self._session, "state", None) == VoiceSessionState.PROCESSING:
+            if hasattr(self._engine, "discard_pending_wake"):
+                self._engine.discard_pending_wake(VoiceState.PROCESSING)
             log.info(
-                "ContinuousVoiceController: wake word received while session "
-                "already active (sid={sid}) — ignoring duplicate wake event.",
-                sid=self._session.session_id,
+                "ContinuousVoiceController: wake word received while the "
+                "current turn is processing — keeping the existing session."
             )
             return
 
         wake_word = getattr(event, "wake_phrase", None) or getattr(event, "model_name", "hey_jarvis")
+        log.info("[WAKE] detected phrase='{phrase}'", phrase=wake_word)
 
-
-        # Step 2: overlay → AWAKE/LISTENING immediately (before ack audio)
-        from spidy.ui.events import UIStateChangeEvent
+        # Step 2: restore HUD overlay & transition to LISTENING immediately (before ack audio)
+        from spidy.ui.events import UIStateChangeEvent, UIShowEvent
+        await self._bus.publish(UIShowEvent(source="wake_word"))
         await self._bus.publish(UIStateChangeEvent(state="listening"))
 
-        # Step 3: open session
-        sid = await self._session.activate(wake_word=wake_word)
-        log.info("Voice session opened: {sid}", sid=sid)
+        # Step 3: open or refresh session
+        sid = await self._safe_session_call("activate", wake_word=wake_word)
+        log.info("[SESSION] started | session_id={sid} | wake_phrase='{phrase}'", sid=sid, phrase=wake_word)
 
         # Steps 4-7: ack with mic muted
-        if self._wake_acknowledger is not None:
+        if self._wake_acknowledger is not None and getattr(self._wake_acknowledger, "enabled", True) is not False:
             from spidy.perception.voice.audio_capture import CaptureMode
-            capture = self._engine._capture_engine
+            capture = getattr(self._engine, "_capture_engine", None)
 
             # Step 4: mic OFF — ack audio must not enter STT
-            capture.set_mode(CaptureMode.IDLE)
+            if capture is not None:
+                capture.set_mode(CaptureMode.IDLE)
+            if hasattr(self._engine, "set_speaking"):
+                self._engine.set_speaking(True)
+            await self._safe_session_call("mark_speaking")
             log.info(
                 "ContinuousVoiceController: mic set IDLE before ack — "
                 "ack audio isolated from STT pipeline."
@@ -273,30 +332,43 @@ class ContinuousVoiceController:
                 # Step 5: speak ack ("Yes Shiva." / "Hmm?")
                 await self._wake_acknowledger.speak_ack(self._streaming_tts)
             finally:
-                # Step 6: flush OWW buffer so ack frames don't re-trigger
-                self._engine._wake_model.reset_buffer()
+                # Step 6: flush buffers and settle
+                await self._safe_session_call("mark_audio_flush")
+                if hasattr(self._engine, "_wake_model") and hasattr(self._engine._wake_model, "reset_buffer"):
+                    self._engine._wake_model.reset_buffer()
+                if hasattr(self._engine, "enter_audio_flush"):
+                    await self._safe_engine_call("enter_audio_flush", settle_seconds=self._post_ack_flush_ms / 1000 if self._post_ack_flush_ms > 0 else 0.20)
+                else:
+                    if self._post_ack_flush_ms > 0:
+                        await asyncio.sleep(self._post_ack_flush_ms / 1000)
+                    if hasattr(self._engine, "_capture_buffer"):
+                        with getattr(self._engine, "_buffer_lock", threading.Lock()):
+                            self._engine._capture_buffer.clear()
 
-                # Step 7: mic ON — user's command is now captured.
-                # IMPORTANT: Before opening the mic, clear the capture buffer
-                # to discard any Piper echo that accumulated during the ack.
-                # Without this, the echo tail ("...Shiva") enters the next
-                # STT window and produces "Yes, Shiva. <user command>" transcripts.
-                if self._post_ack_flush_ms > 0:
-                    await asyncio.sleep(self._post_ack_flush_ms / 1000)
-                    import threading as _threading
-                    with self._engine._buffer_lock:
-                        self._engine._capture_buffer.clear()
-                    log.info(
-                        "ContinuousVoiceController: post-ack buffer flushed "
-                        "({ms}ms settle) -- ack echo cleared.",
-                        ms=self._post_ack_flush_ms,
-                    )
+                if hasattr(self._engine, "exit_audio_flush"):
+                    self._engine.exit_audio_flush()
+                await self._safe_session_call("mark_response_complete")
 
-                capture.set_mode(CaptureMode.RECORDING)
+                # Step 7: mic ON — ready for user command
+                if capture is not None:
+                    capture.set_mode(CaptureMode.RECORDING)
+                if hasattr(self._engine, "signal_relisten"):
+                    self._engine.signal_relisten()
                 log.info(
                     "ContinuousVoiceController: mic restored to RECORDING -- "
                     "ready for user command."
                 )
+        else:
+            from spidy.perception.voice.audio_capture import CaptureMode
+            capture = getattr(self._engine, "_capture_engine", None)
+            if hasattr(self._engine, "exit_audio_flush"):
+                self._engine.exit_audio_flush()
+            if hasattr(self._engine, "_set_state"):
+                self._engine._set_state(VoiceState.SLEEPING)
+            if capture is not None:
+                capture.set_mode(CaptureMode.RECORDING)
+            if hasattr(self._engine, "signal_relisten"):
+                self._engine.signal_relisten()
 
     async def _on_transcript(self, event: Any) -> None:
         """
@@ -314,57 +386,121 @@ class ContinuousVoiceController:
           7. Brain.process() or Brain.run_goal()
           8. Latency measurement logged
         """
-        # -- Step 0: Correlation ID -------------------------------------------------
+        # -- Step 0: Correlation ID & Pipeline Trace -------------------------------
         tx_id = uuid.uuid4().hex[:8]
         _transcript_received = time.monotonic()
 
-        text: str = getattr(event, "text", "").strip()
-        if not text:
+        raw_text: str = getattr(event, "text", "").strip()
+        if not raw_text:
             return
 
-        # -- Step 1: Strip wake-word prefix ----------------------------------------
-        # e.g. "Hey Jarvis, open Edge." -> "open Edge."
+        # ── Step 0b: Strict Audio Ownership & Echo Gating Check ───────────
+        tts_active = (
+            getattr(event, "tts_active", False) is True
+            or getattr(self._streaming_tts, "is_speaking", False) is True
+            or (hasattr(self._engine, "is_speaking") and getattr(self._engine, "is_speaking", False) is True)
+            or getattr(self._session, "state", None) in (VoiceSessionState.SPEAKING, VoiceSessionState.AUDIO_FLUSH)
+        )
+        flush_active = (
+            getattr(event, "flush_active", False) is True
+            or (hasattr(self._engine, "is_flushing") and getattr(self._engine, "is_flushing", False) is True)
+            or getattr(self._session, "state", None) == VoiceSessionState.AUDIO_FLUSH
+        )
+        raw_source = getattr(event, "source", "user")
+        source = raw_source if isinstance(raw_source, str) else "user"
 
-        # Guard: reject transcripts that consist ENTIRELY of wake phrases
-        # (e.g. "Hey Jarvis. Hey Jarvis.").  A single strip would leave
-        # "Hey Jarvis." which is still wake-only and must NOT reach Brain.
-        if self._wake_stripper.is_wake_only(text):
-            log.debug(
-                "[tx:{tx}] Wake-only transcript (repeated phrases) -- dropping: '{t}'",
-                tx=tx_id, t=text[:60],
-            )
-            return
-
-        stripped = self._wake_stripper.strip_wake_prefix(text)
-        if stripped != text:
+        if tts_active or flush_active or source in ("tts_echo", "spidy_tts", "unknown"):
+            log.info("[VOICE] transcript=rejected reason=tts_echo")
+            log.info("[VOICE AUDIO] rejected source=tts_echo")
+            session_state = getattr(self._session, "state", None)
+            ss_name = session_state.name if hasattr(session_state, "name") else ("AWAKE" if getattr(self._session, "is_active", False) else "IDLE")
+            cap_obj = getattr(getattr(self._engine, "_capture_engine", None), "mode", "unknown")
+            cap_str = cap_obj.name if hasattr(cap_obj, "name") else str(cap_obj)
             log.info(
-                "[tx:{tx}] Wake prefix stripped: '{orig}' -> '{clean}'",
-                tx=tx_id, orig=text[:60], clean=stripped[:60],
+                "[VOICE FLOW] audio_source={src} capture_mode={cap} session_state={ss} "
+                "tts_state={tts} stt_state={stt} wake_state={ws} transcript='{t}' "
+                "origin={orig} accepted/rejected=rejected",
+                src=str(source),
+                cap=str(cap_str),
+                ss=str(ss_name),
+                tts=tts_active,
+                stt="SPEAKING" if tts_active else ("AUDIO_FLUSH" if flush_active else "PROCESSING"),
+                ws="ACTIVE" if getattr(self._session, "is_active", False) else "IDLE",
+                t=raw_text[:40],
+                orig=str(source),
             )
-        text = stripped
+            return
 
-        # If stripping consumed the entire utterance or left only wake phrase remnants,
-        # treat as a no-command event — do not forward to Brain.
-        if not text or self._wake_stripper.is_wake_only(text):
-            log.debug("[tx:{tx}] Wake phrase only -- no command, skipping Brain.", tx=tx_id)
+        # -- Step 4: Session gate -- HARD DROP if no active session (with wake phrase recovery)
+        if getattr(self._session, "is_active", False) is not True:
+            clean_wake = raw_text.lower().strip().rstrip(".,!?")
+            if clean_wake in (
+                "wake up spidy", "wake up spidey",
+                "hey spidy", "hey spidey",
+                "ok spidy", "okay spidy", "spidy", "spidey",
+            ):
+                log.info(
+                    "[WAKE] detected phrase='{phrase}' via deterministic speech recovery while session inactive",
+                    phrase=clean_wake,
+                )
+                from spidy.perception.voice.engine import WakeWordDetectedEvent
+                await self._bus.publish(
+                    WakeWordDetectedEvent(
+                        confidence=0.95,
+                        model_name="speech_recovery",
+                        wake_phrase=clean_wake.title(),
+                    )
+                )
+                return
+
+            log.warning(
+                "[tx:{tx}] Transcript while SLEEPING (no active session) -- "
+                "dropping. Only a real wake event may open a session.",
+                tx=tx_id,
+            )
+            log.info("[VOICE AUDIO] rejected source=inactive_session")
+            return
+
+        trace = PipelineTracer.start_trace(raw_transcript=raw_text)
+        trace.trace_id = tx_id
+
+        # ── STT timing ────────────────────────────────────────────────────
+        if self._measure_latency and self._speech_end_time is not None:
+            stt_latency = (time.monotonic() - self._speech_end_time) * 1000
+            trace.stt_ms = stt_latency
+            log.info("[tx:{tx}] [Voice latency] stt_to_brain_start={ms:.0f}ms", tx=tx_id, ms=stt_latency)
+
+        # -- Step 1: Normalize Transcript / ASR Recovery ---------------------------
+        t_clean_start = time.monotonic()
+        norm_result = self._normalizer.normalize(raw_text)
+        text = norm_result.normalized_transcript
+        trace.normalized_transcript = text
+        trace.transcript_cleanup_ms = (time.monotonic() - t_clean_start) * 1000.0
+
+        # If normalization or stripping consumed the entire utterance or utterance is just wake word, skip Brain
+        if not text or text.lower().strip().rstrip(".,!?") in (
+            "wake up spidy", "wake up spidey",
+            "hey spidy", "hey spidey",
+            "ok spidy", "okay spidy", "spidy", "spidey",
+        ):
+            log.debug("[tx:{tx}] Wake phrase/noise only -- skipping Brain.", tx=tx_id)
             return
 
         # ── Step 2: Transcript quality guard ───────────────────────────────
         # Reject clearly garbled/noise-only transcripts before the LLM call.
-        # Uses faster-whisper segment signals when available (fail-open otherwise).
         segment_signals = getattr(event, "segment_signals", None)
-        if self._quality_guard.is_suspicious(text, segments=segment_signals):
-            reason = self._quality_guard.suspicious_reason(text, segments=segment_signals)
+        if (
+            self._quality_guard.is_suspicious(raw_text, segments=segment_signals)
+            or self._quality_guard.is_suspicious(text, segments=segment_signals)
+        ):
+            reason = self._quality_guard.suspicious_reason(raw_text, segments=segment_signals) or self._quality_guard.suspicious_reason(text, segments=segment_signals)
             log.info(
                 "[tx:{tx}] Transcript rejected by quality guard (reason={r}): '{t}'",
-                tx=tx_id, r=reason, t=text[:60],
+                tx=tx_id, r=reason, t=raw_text[:60],
             )
             return
 
         # -- Step 2b: Transcript deduplication guard --------------------------------
-        # Drops the same transcript if re-delivered within dedup_window seconds.
-        # This catches stale capture-buffer audio re-transcribed after relisten,
-        # WITHOUT suppressing two genuinely separate identical commands.
         if self._dedup_window > 0.0:
             _now = time.monotonic()
             _norm = text.lower().strip()
@@ -377,17 +513,23 @@ class ContinuousVoiceController:
             self._last_transcript = _norm
             self._last_transcript_time = _now
 
-        # ── STT timing ────────────────────────────────────────────────────
-        if self._measure_latency and self._speech_end_time is not None:
-            stt_latency = (time.monotonic() - self._speech_end_time) * 1000
-            log.info("[tx:{tx}] [Voice latency] stt_to_brain_start={ms:.0f}ms", tx=tx_id, ms=stt_latency)
-
-        log.info("[tx:{tx}] Transcript: '{t}'", tx=tx_id, t=text[:80])
+        session_state = getattr(self._session, "state", None)
+        ss_name = session_state.name if hasattr(session_state, "name") else ("AWAKE" if getattr(self._session, "is_active", False) else "IDLE")
+        cap_obj = getattr(getattr(self._engine, "_capture_engine", None), "mode", "unknown")
+        cap_str = cap_obj.name if hasattr(cap_obj, "name") else str(cap_obj)
+        log.info("[tx:{tx}] Clean Transcript: '{t}'", tx=tx_id, t=text[:80])
+        log.info("[VOICE AUDIO] accepted source=user")
+        log.info(
+            "[VOICE FLOW] audio_source=user capture_mode={cap} session_state={ss} "
+            "tts_state=False stt_state=LISTENING wake_state={ws} transcript='{t}' "
+            "origin=user accepted/rejected=accepted",
+            cap=str(cap_str),
+            ss=str(ss_name),
+            ws="ACTIVE" if getattr(self._session, "is_active", False) else "IDLE",
+            t=text[:40],
+        )
 
         # ── Step 3: Interrupt detection ────────────────────────────────────
-        # SAFETY: This runs BEFORE Brain, LLM, Memory, or any other component.
-        # The interrupt handler is purely deterministic (lexical matching).
-        # No NVIDIA, Ollama, Brain, Planner, Memory, or web-search involved.
         interrupt_cmd = self._interruption.detect(text)
         if interrupt_cmd is not None:
             response = await self._interruption.execute(interrupt_cmd, text)
@@ -395,34 +537,27 @@ class ContinuousVoiceController:
                 log.info("[tx:{tx}] Stop command -- restoring overlay and re-listen.", tx=tx_id)
                 from spidy.ui.events import UIStateChangeEvent
                 await self._bus.publish(UIStateChangeEvent(state="listening"))
-                if self._continuous_mode and self._session.is_active:
-                    self._engine.signal_relisten()
+                if self._continuous_mode and getattr(self._session, "is_active", False) is True:
+                    if hasattr(self._engine, "signal_relisten"):
+                        self._engine.signal_relisten()
             elif response:
                 await self._streaming_tts.speak(response)
-            return
-
-        # -- Step 4: Session gate -- HARD DROP if no active session ----------------
-        # A transcript MUST NOT open a session by itself. Only a real
-        # wake_word.detected event may activate a VoiceSession.
-        # Removes the old "text-mode test" fallback that allowed any raw
-        # STT transcript to silently open a session with wake='(none)'.
-        if not self._session.is_active:
-            log.warning(
-                "[tx:{tx}] Transcript while SLEEPING (no active session) -- "
-                "dropping. Only a real wake event may open a session.",
-                tx=tx_id,
-            )
+            trace_event = trace.finish()
+            await self._bus.publish(trace_event)
             return
 
         # ── Step 5: Record utterance ───────────────────────────────────────
-        await self._session.record_utterance(text)
+        await self._safe_session_call("record_utterance", text)
 
         # ── Step 6: Intent classification + Step 7: Brain routing ──────────
         _brain_start = time.monotonic()
         try:
+            t_intent_start = time.monotonic()
             intent = await self._intent_clf.classify(text)
-            _t_intent = (time.monotonic() - _brain_start) * 1000
+            _t_intent = (time.monotonic() - t_intent_start) * 1000
+            trace.intent_ms = _t_intent
             log.info("[tx:{tx}] [Voice latency] intent_classify={ms:.0f}ms", tx=tx_id, ms=_t_intent)
+
             if self._goal_clf.is_executable(intent):
                 response = await self._brain.run_goal(text)
             else:
@@ -430,13 +565,20 @@ class ContinuousVoiceController:
         except Exception as exc:  # noqa: BLE001
             log.error("[tx:{tx}] Brain error: {exc}", tx=tx_id, exc=exc)
             response = "I ran into a problem. Please try again."
+            from spidy.brain.events import BrainResponseReadyEvent
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=getattr(self._session, "session_id", ""),
+                response_text=response,
+                decision_mode="error",
+            ))
 
-        # -- Step 8: Latency measurement -------------------------------------------
+        # -- Step 8: Latency measurement & Trace Finalize --------------------------
         if self._measure_latency:
             _brain_total = (time.monotonic() - _brain_start) * 1000
             log.info("[tx:{tx}] [Voice latency] brain_roundtrip={ms:.0f}ms", tx=tx_id, ms=_brain_total)
 
-        # Response delivery is handled by _on_brain_response (via event bus)
+        trace_event = trace.finish()
+        await self._bus.publish(trace_event)
 
     async def _on_brain_response(self, event: Any) -> None:
         """
@@ -448,14 +590,22 @@ class ContinuousVoiceController:
         """
         response_text: str = getattr(event, "response_text", "") or getattr(event, "text", "")
         if not response_text.strip():
+            if hasattr(self._engine, "return_to_sleeping"):
+                self._engine.return_to_sleeping()
+            await self._safe_session_call("mark_response_complete")
+            if self._continuous_mode and getattr(self._session, "is_active", False) is True:
+                if hasattr(self._engine, "signal_relisten"):
+                    self._engine.signal_relisten()
             return
 
-        if self._session.is_paused:
+        if getattr(self._session, "is_paused", False) is True:
             log.debug("ContinuousVoiceController: session paused -- skipping TTS.")
+            if hasattr(self._engine, "return_to_sleeping"):
+                self._engine.return_to_sleeping()
+            await self._safe_session_call("mark_response_complete")
             return
 
         # Apply TTS text filter — strip markdown/code for natural speech.
-        # The original response_text is NOT modified; the UI sees full markdown.
         filter_result = self._tts_filter.filter(response_text)
         tts_text = filter_result.tts_text
 
@@ -470,27 +620,34 @@ class ContinuousVoiceController:
 
         if not tts_text.strip():
             log.debug("[TTS filter] filtered text is empty -- skipping TTS.")
+            if hasattr(self._engine, "return_to_sleeping"):
+                self._engine.return_to_sleeping()
+            await self._safe_session_call("mark_response_complete")
+            if self._continuous_mode and getattr(self._session, "is_active", False) is True:
+                if hasattr(self._engine, "signal_relisten"):
+                    self._engine.signal_relisten()
             return
 
-        await self._session.mark_speaking()
+        await self._safe_session_call("mark_speaking")
+        if hasattr(self._engine, "set_speaking"):
+            self._engine.set_speaking(True)
 
         # Switch mic to BARGE_IN mode so BargeInDetector can hear "Spidy stop".
-        # BARGE_IN routes audio ONLY to barge_in.feed_chunk — the wake-word
-        # model and main STT buffer receive nothing (no self-talk risk).
-        # Falls back to IDLE if barge-in is not available (None / disabled).
         from spidy.perception.voice.audio_capture import CaptureMode
-        capture = self._engine._capture_engine  # access engine's capture instance
+        capture = getattr(self._engine, "_capture_engine", None)
 
-        if self._barge_in is not None and self._barge_in.is_loaded:
-            capture.set_mode(CaptureMode.BARGE_IN)
-            self._barge_in.start(tts=self._streaming_tts)
+        if self._barge_in is not None and getattr(self._barge_in, "is_loaded", False) is True:
+            if capture is not None:
+                capture.set_mode(CaptureMode.BARGE_IN)
+            self._barge_in.start(tts=self._streaming_tts, spoken_text=tts_text)
             log.info(
                 "[BargeIn] CaptureMode.BARGE_IN activated — "
-                "BargeInDetector listening for stop phrase."
+                "BargeInDetector listening for the user speaking over Spidy."
             )
         else:
             # No barge-in configured: fall back to IDLE (safe, mic muted)
-            capture.set_mode(CaptureMode.IDLE)
+            if capture is not None:
+                capture.set_mode(CaptureMode.IDLE)
             log.debug("[BargeIn] barge-in not available — mic IDLE during TTS.")
 
         _tts_start = time.monotonic()
@@ -498,6 +655,14 @@ class ContinuousVoiceController:
         try:
             await self._streaming_tts.speak(tts_text)
         finally:
+            # ── The user talked over Spidy: skip the flush, record their new request ──
+            interrupted = (
+                self._barge_in is not None
+                and getattr(self._barge_in, "interrupted", False) is True
+            )
+            if interrupted:
+                self._resume_after_interrupt()
+
             # ── Always stop barge-in detection first ───────────────────────
             if self._barge_in is not None:
                 self._barge_in.stop()
@@ -505,83 +670,155 @@ class ContinuousVoiceController:
             _tts_ms = (time.monotonic() - _tts_start) * 1000
             log.info("[Voice latency] tts_complete={ms:.0f}ms", ms=_tts_ms)
 
-            # ── Echo-settle delay ──────────────────────────────────────────────
-            # After TTS finishes, the speaker hardware has a short echo tail
-            # (~100–200ms). Restoring mic capture immediately can cause the
-            # STT engine to transcribe Spidy's own TTS audio, producing
-            # spurious transcripts and self-generated conversation (Issue 4).
-            #
-            # Strategy:
-            #   1. First reset_buffer() call — discard TTS audio in OWW before IDLE
-            #   2. Wait 150ms settle delay — let hardware echo decay
-            #   3. Second reset_buffer() call — flush any echo captured during settle
-            #   4. Restore CaptureMode.DETECTING — mic is now clean
-            self._engine._wake_model.reset_buffer()
+            if interrupted:
+                await self._after_interrupt()
+            else:
+                await self._finish_playback(capture)
 
-            _settle_start = time.monotonic()
-            await asyncio.sleep(0.15)  # 150ms echo-settle
-            _settle_ms = (time.monotonic() - _settle_start) * 1000
+    def _resume_after_interrupt(self) -> None:
+        """
+        The user spoke over Spidy and TTS has been cut off: record the rest of their request.
+
+        Runs synchronously (no awaits) so the mic is back in a recording mode within milliseconds
+        of the speech stopping; the audio barge-in collected so far is handed to the recorder.
+        """
+        log.info(
+            "[BargeIn] user interrupted Spidy ('{t}') -- listening to the new request.",
+            t=getattr(self._barge_in, "interrupt_text", "")[:60],
+        )
+        resume = getattr(self._engine, "resume_listening_after_interrupt", None)
+        if callable(resume):
+            resume(self._barge_in.consume_interrupt)
+        elif hasattr(self._engine, "signal_relisten"):
+            self._engine.signal_relisten()
+
+    async def _after_interrupt(self) -> None:
+        """Session bookkeeping once an interrupted utterance is over."""
+        await self._safe_session_call("mark_response_complete")
+        from spidy.ui.events import UIStateChangeEvent
+        await self._bus.publish(UIStateChangeEvent(state="listening"))
+
+    async def _finish_playback(self, capture: Any) -> None:
+        """Normal end of an utterance: flush the echo, restore wake listening, re-listen if the session goes on."""
+        from spidy.perception.voice.audio_capture import CaptureMode
+
+        # ── Post-TTS Audio Flush & Echo Settle ─────────────────────────
+        await self._safe_session_call("mark_audio_flush")
+        if hasattr(self._engine, "enter_audio_flush"):
+            await self._safe_engine_call("enter_audio_flush", settle_seconds=0.20)
+        else:
+            if hasattr(self._engine, "_wake_model") and hasattr(self._engine._wake_model, "reset_buffer"):
+                self._engine._wake_model.reset_buffer()
+            await asyncio.sleep(0.15)
+            if hasattr(self._engine, "_capture_buffer"):
+                with getattr(self._engine, "_buffer_lock", threading.Lock()):
+                    self._engine._capture_buffer.clear()
+            if hasattr(self._engine, "_wake_model") and hasattr(self._engine._wake_model, "reset_buffer"):
+                self._engine._wake_model.reset_buffer()
+
+        # Use the single recovery primitive so every normal response and
+        # every session-end path has the same clean state: SLEEPING,
+        # DETECTING, empty buffers, and reset wake-model history.
+        if hasattr(self._engine, "return_to_sleeping"):
+            self._engine.return_to_sleeping()
+        else:
+            if hasattr(self._engine, "exit_audio_flush"):
+                self._engine.exit_audio_flush()
+            if capture is not None:
+                capture.set_mode(CaptureMode.DETECTING)
+        log.info(
+            "[Voice latency] microphone_restored — listening for next utterance."
+        )
+
+        if self._measure_latency and self._speech_end_time is not None:
+            total_latency = (time.monotonic() - self._speech_end_time) * 1000
             log.info(
-                "[Safety] TTS echo-settle complete ({ms:.0f}ms) — "
-                "flushing OWW buffer and restoring capture.",
-                ms=_settle_ms,
+                "[Voice latency] speech_end_to_tts_complete={ms:.0f}ms",
+                ms=total_latency,
             )
+        await self._safe_session_call("mark_response_complete")
 
-            # Second buffer flush — discard any echo that leaked during settle
-            self._engine._wake_model.reset_buffer()
-
-            # Restore wake-word detection now that playback is complete.
-            capture.set_mode(CaptureMode.DETECTING)
-            log.info(
-                "[Voice latency] microphone_restored — listening for next utterance."
-            )
-
-            if self._measure_latency and self._speech_end_time is not None:
-                total_latency = (time.monotonic() - self._speech_end_time) * 1000
-                log.info(
-                    "[Voice latency] speech_end_to_tts_complete={ms:.0f}ms",
-                    ms=total_latency,
-                )
-            await self._session.mark_response_complete()
-
-            # ── Continuous conversation re-listen ──────────────────────────
-            # After TTS finishes and the session is still open, signal the
-            # VoiceEngine to immediately start a new listen cycle.  This is
-            # the key mechanism for continuous conversation: the user can ask
-            # a follow-up without repeating the wake word.
-            #
-            # We only signal when:
-            #   1. continuous_mode is enabled (default: True)
-            #   2. the session is still active (not timed out, not cancelled)
-            #   3. the session is not paused (user said "wait")
-            #
-            # signal_relisten() itself is also guarded: if the engine is not
-            # in SLEEPING state, the signal is silently dropped.
-            if (
-                self._continuous_mode
-                and self._session.is_active
-                and not self._session.is_paused
-            ):
+        # ── Continuous conversation re-listen ──────────────────────────
+        if (
+            self._continuous_mode
+            and getattr(self._session, "is_active", False) is True
+            and not getattr(self._session, "is_paused", False)
+        ):
+            if hasattr(self._engine, "signal_relisten"):
                 self._engine.signal_relisten()
-                log.info(
-                    "ContinuousVoiceController: re-listen triggered "
-                    "(session={sid}).",
-                    sid=self._session.session_id,
-                )
-                # Overlay back to AWAKE/LISTENING after each response
-                from spidy.ui.events import UIStateChangeEvent
-                await self._bus.publish(UIStateChangeEvent(state="listening"))
+            log.info(
+                "ContinuousVoiceController: re-listen triggered "
+                "(session={sid}).",
+                sid=getattr(self._session, "session_id", ""),
+            )
+            from spidy.ui.events import UIStateChangeEvent
+            await self._bus.publish(UIStateChangeEvent(state="listening"))
 
     async def _on_speaking_end(self, event: Any) -> None:
         """Record when speech ends (for latency measurement)."""
         self._speech_end_time = time.monotonic()
 
     async def _on_session_timeout(self, event: Any) -> None:
-        """Session timed out — already deactivated by VoiceSessionManager."""
-        log.info("ContinuousVoiceController: session timed out.")
-        # Overlay → SLEEPING (idle) when session expires
+        """Session timed out — already deactivated by VoiceSessionManager. Restore wake listener."""
+        log.info("ContinuousVoiceController: session timed out — restoring wake listener.")
+        # 1. Return engine and capture to clean wake detection state
+        if hasattr(self._engine, "return_to_sleeping"):
+            self._engine.return_to_sleeping()
+        else:
+            if hasattr(self._engine, "exit_audio_flush"):
+                self._engine.exit_audio_flush()
+            if hasattr(self._engine, "_set_state"):
+                from spidy.perception.voice.engine import VoiceState
+                self._engine._set_state(VoiceState.SLEEPING)
+            from spidy.perception.voice.audio_capture import CaptureMode
+            capture = getattr(self._engine, "_capture_engine", None)
+            if capture is not None:
+                capture.set_mode(CaptureMode.DETECTING)
+            if hasattr(self._engine, "_wake_model") and hasattr(self._engine._wake_model, "reset_buffer"):
+                self._engine._wake_model.reset_buffer()
+            if hasattr(self._engine, "_capture_buffer"):
+                with getattr(self._engine, "_buffer_lock", threading.Lock()):
+                    self._engine._capture_buffer.clear()
+
+        # 2. Reset deduplication & transient state
+        self._last_transcript = ""
+        self._last_transcript_time = 0.0
+
+        # 3. Overlay → SLEEPING (idle) when session expires
         from spidy.ui.events import UIStateChangeEvent
         await self._bus.publish(UIStateChangeEvent(state="idle"))
+
+    async def _on_session_ended(self, event: Any) -> None:
+        """Session ended (timeout, user stop, max turns, etc.) — ensure wake listener is restored."""
+        reason = getattr(event, "reason", "unknown")
+        log.info(
+            "ContinuousVoiceController: session ended (reason={r}) — ensuring wake listener active.",
+            r=reason,
+        )
+        if hasattr(self._engine, "return_to_sleeping"):
+            self._engine.return_to_sleeping()
+        else:
+            if hasattr(self._engine, "exit_audio_flush"):
+                self._engine.exit_audio_flush()
+            if hasattr(self._engine, "_set_state"):
+                from spidy.perception.voice.engine import VoiceState
+                self._engine._set_state(VoiceState.SLEEPING)
+            from spidy.perception.voice.audio_capture import CaptureMode
+            capture = getattr(self._engine, "_capture_engine", None)
+            if capture is not None:
+                capture.set_mode(CaptureMode.DETECTING)
+            if hasattr(self._engine, "_wake_model") and hasattr(self._engine._wake_model, "reset_buffer"):
+                self._engine._wake_model.reset_buffer()
+            if hasattr(self._engine, "_capture_buffer"):
+                with getattr(self._engine, "_buffer_lock", threading.Lock()):
+                    self._engine._capture_buffer.clear()
+
+        self._last_transcript = ""
+        self._last_transcript_time = 0.0
+
+        if reason != "timeout":
+            from spidy.ui.events import UIStateChangeEvent
+            await self._bus.publish(UIStateChangeEvent(state="idle"))
 
     async def _on_shutdown(self, event: Any) -> None:
         """Handle application shutdown."""
