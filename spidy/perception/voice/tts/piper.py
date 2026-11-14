@@ -51,6 +51,7 @@ import numpy as np
 
 from spidy.logging.logger import get_logger
 from spidy.perception.voice.tts.base import AudioBuffer, TTSEngine
+from spidy.core import level_meter as _level_meter
 
 log = get_logger(__name__)
 
@@ -327,6 +328,7 @@ class PiperTTSEngine(TTSEngine):
                         self._stream.write(chunk)
                     else:
                         break
+                _level_meter.report("spidy", chunk)      # the HUD blob waves with her voice
                 offset = end
 
             # Bounded hardware DAC drain period: ensure audio has physically played

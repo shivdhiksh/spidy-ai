@@ -181,19 +181,19 @@ class FunctionPage(QWidget):
             QLabel {{ color: #eceef4; font-family: 'Segoe UI'; font-size: {px(15)}px; background: transparent; }}
             QLabel#title {{ font-size: {px(30)}px; font-weight: 300; letter-spacing: {px(2)}px; }}
             QLabel#sub {{ color: #8f95a6; font-size: {px(15)}px; margin-bottom: {px(6)}px; }}
-            QLabel#section {{ color: #ff4a52; font-size: {px(11)}px; letter-spacing: {px(3)}px; margin-top: {px(8)}px; }}
+            QLabel#section {{ color: #c8afff; font-size: {px(11)}px; letter-spacing: {px(3)}px; margin-top: {px(8)}px; }}
             QLabel#note {{ color: #8f95a6; font-size: {px(13)}px; }}
             QPushButton#tile {{ background: rgba(255,255,255,0.04); color: #eceef4; border: 1px solid rgba(255,255,255,0.10);
                 border-radius: {px(14)}px; padding: {px(14)}px; font-family: 'Segoe UI'; font-size: {px(15)}px; text-align: left; }}
-            QPushButton#tile:hover {{ border-color: #ff4a52; background: rgba(226,36,44,0.12); }}
+            QPushButton#tile:hover {{ border-color: #c8afff; background: rgba(150,115,255,0.14); }}
             QPushButton#tile:pressed {{ background: rgba(226,36,44,0.25); }}
-            QPushButton#go {{ background: #e2242c; color: white; border: none; border-radius: {px(12)}px;
+            QPushButton#go {{ background: #9673ff; color: white; border: none; border-radius: {px(12)}px;
                 padding: {px(10)}px {px(26)}px; font-size: {px(15)}px; font-family: 'Segoe UI'; }}
-            QPushButton#go:hover {{ background: #ff4a52; }}
+            QPushButton#go:hover {{ background: #c8afff; }}
             QLineEdit {{ background: rgba(255,255,255,0.05); color: #eceef4; border: 1px solid rgba(255,255,255,0.14);
                 border-radius: {px(12)}px; padding: {px(10)}px {px(14)}px; font-size: {px(15)}px; font-family: 'Segoe UI';
-                selection-background-color: #e2242c; }}
-            QLineEdit:focus {{ border-color: #ff4a52; }}
+                selection-background-color: #9673ff; }}
+            QLineEdit:focus {{ border-color: #c8afff; }}
             QListWidget {{ background: rgba(255,255,255,0.03); color: #eceef4; border: 1px solid rgba(255,255,255,0.10);
                 border-radius: {px(12)}px; font-size: {px(14)}px; font-family: 'Segoe UI'; outline: 0; }}
             QListWidget::item {{ padding: {px(8)}px {px(12)}px; }}

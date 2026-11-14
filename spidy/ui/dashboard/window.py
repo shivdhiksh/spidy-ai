@@ -74,7 +74,7 @@ class ChatPage(QWidget):
         px = max(11, int(18 * k))
         self.view.setStyleSheet(
             f"QTextBrowser {{ background: transparent; color: #eceef4; font-family: 'Segoe UI'; font-size: {px}px;"
-            f" padding: 8px; selection-background-color: #e2242c; }}"
+            f" padding: 8px; selection-background-color: #9673ff; }}"
             f"QScrollBar:vertical {{ background: transparent; width: {max(6, int(8 * k))}px; }}"
             f"QScrollBar::handle:vertical {{ background: rgba(255,255,255,0.22); border-radius: 3px; min-height: 30px; }}"
             f"QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{ height: 0; }}")
@@ -82,7 +82,7 @@ class ChatPage(QWidget):
 
     def add(self, role: str, msg: str) -> None:
         user = role.lower() in ("user", "you")
-        who, color = ("YOU", "#9aa0b0") if user else ("SPIDY", "#ff4a52")
+        who, color = ("YOU", "#9aa0b0") if user else ("SPIDY", "#c8afff")
         self._blocks.append(
             f"<p style='margin:12px 0 2px 0'><span style='color:{color};font-weight:500;letter-spacing:3px;font-size:11px'>{who}</span></p>"
             f"<p style='margin:0 0 10px 0;color:#eceef4'>{html.escape(msg).replace(chr(10), '<br>')}</p>")

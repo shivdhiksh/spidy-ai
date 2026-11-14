@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 
 from spidy.logging.logger import get_logger
+from spidy.core import level_meter as _level_meter
 
 log = get_logger(__name__)
 
@@ -281,6 +282,8 @@ class AudioCaptureEngine:
                         elif avg_rms >= 0.005:
                             self._low_signal_warned = False  # reset if signal recovers
 
+                    if self._mode == CaptureMode.RECORDING:          # the user is talking to Spidy
+                        _level_meter.report("user", audio_flat * 0.5)
                     self._dispatch(audio_flat)
 
         except Exception as exc:  # noqa: BLE001

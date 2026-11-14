@@ -13,7 +13,8 @@ from PySide6.QtWidgets import QLineEdit
 from spidy.ui.dashboard import art, palette as pal
 from spidy.ui.dashboard.base import RefWidget, text
 from spidy.ui.dashboard.icons import draw_icon
-from spidy.ui.dashboard.sphere import DotSphere
+from spidy.core import level_meter
+from spidy.ui.dashboard.sphere import DotBlob, DotSphere  # noqa: F401  (DotSphere kept for compatibility)
 
 LEFT = Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter
 RIGHT = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
@@ -22,8 +23,8 @@ LIGHT = QFont.Weight.Light
 MEDIUM = QFont.Weight.Medium
 
 
-SPHERE = DotSphere(1000)
-MINI_SPHERE = DotSphere(420)
+SPHERE = DotBlob(2400)          # the voice-reactive dot-blob (Cosmic Violet)
+MINI_SPHERE = DotBlob(420)
 
 
 def caps(p: QPainter, rect: QRectF, s: str, px: float, color: QColor, spacing: float = 2.4,
@@ -74,8 +75,8 @@ class NavRail(RefWidget):
 
     def paintEvent(self, _e) -> None:
         p = self.begin()
-        MINI_SPHERE.paint(p, 62, 68, 24, phase=0.9, level=0.45, rings=False)
-        p.setPen(QPen(QColor(64, 204, 232, 150), 1.2))
+        MINI_SPHERE.paint(p, 62, 68, 24, phase=0.9, level=0.0, rings=False)
+        p.setPen(QPen(pal.with_alpha(pal.RED_BRIGHT, 150), 1.2))
         p.drawEllipse(QPointF(62, 68), 33, 33)
         p.setPen(QPen(pal.HAIR, 1))
         p.drawLine(QPointF(28, 128), QPointF(212, 128))
@@ -195,7 +196,8 @@ class HeroHead(RefWidget):
     def __init__(self, parent=None) -> None:
         super().__init__(860, 410, parent)
         self.state = "idle"
-        self.level = 0.0                  # live voice amplitude (0..1)
+        self.level = 0.0                  # live voice amplitude (0..1) pushed by update_waveform
+        self.voice = 0.0                  # smoothed voice loudness that makes the blob wave
         self._phase = 0.0
         self._tilt = [0.0, 0.0]
         self._target = [0.0, 0.0]
@@ -223,10 +225,14 @@ class HeroHead(RefWidget):
 
     def _busy(self) -> bool:
         moving = any(abs(self._target[i] - self._tilt[i]) > 0.05 for i in (0, 1))
-        return moving or self.state in ("listening", "speaking", "thinking", "working", "error")
+        return moving or self.voice > 0.02 or self.state in ("listening", "speaking", "thinking", "working", "error")
 
     def _tick(self) -> None:
-        self._phase += 0.07 if self._busy() else 0.1
+        # live loudness of Spidy's voice / the user's voice: fast attack, slower release = feels alive
+        target = max(level_meter.current(), self.level * 0.5)
+        rate = 0.55 if target > self.voice else 0.14
+        self.voice += (target - self.voice) * rate
+        self._phase += 0.07 + 0.09 * self.voice if self._busy() else 0.1
         for i in (0, 1):
             self._tilt[i] += (self._target[i] - self._tilt[i]) * 0.14
         self._t.setInterval(40 if self._busy() else 100)   # ~25 fps when active, ~10 fps when idle
@@ -269,14 +275,13 @@ class HeroHead(RefWidget):
             }
         return self._layers[key]
 
-    SPHERE_R = 134.0          # radius of the dot sphere in reference pixels (rings reach ~1.46x)
+    SPHERE_R = 150.0          # radius of the dot sphere in reference pixels (rings reach ~1.46x)
 
     def _paint_sphere(self) -> None:
         k = self.k
         p = QPainter(self)
-        SPHERE.paint(p, self.ref_w / 2 * k, self.ref_h / 2 * k, self.SPHERE_R * k, self._phase, self.current_level(),
-                     tilt=(self._tilt[0], self._tilt[1]), state=self.state, k=k,
-                     grid_rect=QRectF(0, 0, self.ref_w * k, self.ref_h * k))
+        SPHERE.paint(p, self.ref_w / 2 * k, self.ref_h / 2 * k, self.SPHERE_R * k, self._phase, self.voice,
+                     tilt=(self._tilt[0], self._tilt[1]), state=self.state, k=k)
 
     def paintEvent(self, _e) -> None:
         self._paint_sphere()
@@ -444,8 +449,8 @@ class CommandInput(QLineEdit):
         self.setStyleSheet(
             f"QLineEdit {{ background: rgba(255,255,255,0.05); color: #eceef4; font-family: 'Segoe UI'; "
             f"font-size: {max(10, int(19 * k))}px; border: 1px solid rgba(255,255,255,0.18); "
-            f"border-radius: {max(6, int(20 * k))}px; padding: 0 {int(18 * k)}px; selection-background-color: #e2242c; }}"
-            f"QLineEdit:focus {{ border: 1px solid #ff4a52; }}")
+            f"border-radius: {max(6, int(20 * k))}px; padding: 0 {int(18 * k)}px; selection-background-color: #9673ff; }}"
+            f"QLineEdit:focus {{ border: 1px solid #c8afff; }}")
 
     def _send(self) -> None:
         msg = self.text().strip()
@@ -565,7 +570,7 @@ class SuggestionList(RefWidget):
             text(p, QRectF(0, 30, 310, 30), self.goal, pal.font(15), pal.SOFT, LEFT)
             for i, (desc, status) in enumerate(self.steps[:6]):
                 y = 74 + i * 40
-                col = {"done": pal.GREEN, "running": pal.RED_BRIGHT, "failed": pal.RED}.get(status, pal.FAINT)
+                col = {"done": pal.GREEN, "running": pal.RED_BRIGHT, "failed": pal.DANGER}.get(status, pal.FAINT)
                 p.setBrush(QBrush(col) if status != "pending" else Qt.BrushStyle.NoBrush)
                 p.setPen(QPen(col, 1.6))
                 p.drawEllipse(QPointF(8, y + 14), 5, 5)
@@ -586,7 +591,7 @@ class SuggestionList(RefWidget):
 
 # ── Quick actions ───────────────────────────────────────────────────────────
 
-QUICK = [("power", "Shutdown", "shut down the computer", pal.RED_BRIGHT),
+QUICK = [("power", "Shutdown", "shut down the computer", pal.DANGER),
          ("restart", "Restart", "restart the computer", pal.SOFT),
          ("lock", "Lock", "lock my computer", pal.SOFT),
          ("moon", "Sleep", "put my computer to sleep", pal.SOFT)]

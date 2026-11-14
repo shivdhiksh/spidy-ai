@@ -159,6 +159,35 @@ def test_caption_bar_shows_and_clears():
     assert app is not None
 
 
+# ── the dot-blob waves with the voice ────────────────────────────────────────
+
+def test_voice_level_meter_reports_and_fades():
+    from spidy.core import level_meter
+    level_meter.reset()
+    assert level_meter.current() == 0.0
+    level_meter.report("spidy", np.full(1024, 0.3, np.float32))
+    assert level_meter.current("spidy") > 0.5
+    time.sleep(0.3)
+    assert level_meter.current() == 0.0                    # a stopped voice never leaves the blob stuck
+
+
+def test_blob_shape_follows_the_voice():
+    from PySide6.QtGui import QImage, QPainter
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from spidy.ui.dashboard.sphere import DotBlob
+
+    def draw(level):
+        img = QImage(300, 300, QImage.Format.Format_ARGB32)
+        img.fill(0)
+        p = QPainter(img)
+        DotBlob(600).paint(p, 150, 150, 80, phase=1.0, level=level)
+        p.end()
+        return img
+    quiet, loud = draw(0.0), draw(1.0)
+    assert quiet != loud                                    # louder voice -> different (waving) shape
+
+
 # ── memory ───────────────────────────────────────────────────────────────────
 
 def test_memory_trim_runs():

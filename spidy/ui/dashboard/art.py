@@ -296,41 +296,40 @@ def draw_card(p: QPainter, rect: QRectF, radius: float = 20.0, strength: float =
 # ── Background ──────────────────────────────────────────────────────────────
 
 def make_background(w: int, h: int, dpr: float = 1.0, k: float = 1.0) -> QPixmap:
-    """Near-black backdrop, a faint red glow behind the hero, film grain and the rounded outer frame."""
+    """Cosmic Violet backdrop: indigo-black, a violet glow behind the blob, cooler blue glows in the
+    corners, faint star dust, a vignette and the rounded outer frame."""
     pm = QPixmap(max(1, int(w * dpr)), max(1, int(h * dpr)))
     pm.setDevicePixelRatio(dpr)
     p = QPainter(pm)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    p.fillRect(0, 0, w, h, QColor(4, 4, 6))
+    p.fillRect(0, 0, w, h, pal.BG)
 
-    glow = QRadialGradient(QPointF(w * 0.47, h * 0.34), w * 0.42)
-    glow.setColorAt(0.0, QColor(170, 20, 30, 46))
-    glow.setColorAt(0.6, QColor(120, 14, 22, 14))
-    glow.setColorAt(1.0, QColor(120, 14, 22, 0))
-    p.fillRect(0, 0, w, h, QBrush(glow))
-    floor = QRadialGradient(QPointF(w * 0.6, h * 1.02), w * 0.5)
-    floor.setColorAt(0.0, QColor(255, 255, 255, 10))
-    floor.setColorAt(1.0, QColor(255, 255, 255, 0))
-    p.fillRect(0, 0, w, h, QBrush(floor))
+    for cxr, cyr, rr, col, a in ((0.47, 0.34, 0.45, pal.GLOW, 70), (0.15, 0.95, 0.5, pal.GLOW_2, 34),
+                                 (0.95, 0.05, 0.35, pal.GLOW_2, 26)):
+        glow = QRadialGradient(QPointF(w * cxr, h * cyr), w * rr)
+        glow.setColorAt(0.0, pal.with_alpha(col, a))
+        glow.setColorAt(0.6, pal.with_alpha(col, a // 4))
+        glow.setColorAt(1.0, pal.with_alpha(col, 0))
+        p.fillRect(0, 0, w, h, QBrush(glow))
 
     rnd = random.Random(21)
     p.setPen(Qt.PenStyle.NoPen)
-    for _ in range(int(w * h / 900)):
+    for _ in range(int(w * h / 700)):                       # faint star dust
         x, y = rnd.uniform(0, w), rnd.uniform(0, h)
-        p.setBrush(QBrush(QColor(255, 255, 255, rnd.randint(3, 12))))
+        p.setBrush(QBrush(pal.with_alpha(pal.RED_BRIGHT, rnd.randint(4, 22))))
         p.drawRect(QRectF(x, y, 1, 1))
 
     vg = QRadialGradient(QPointF(w / 2, h / 2), math.hypot(w, h) * 0.56)
     vg.setColorAt(0.6, QColor(0, 0, 0, 0))
-    vg.setColorAt(1.0, QColor(0, 0, 0, 190))
+    vg.setColorAt(1.0, QColor(0, 0, 0, 170))
     p.fillRect(0, 0, w, h, QBrush(vg))
 
     inset = 24 * k
     frame = QRectF(inset, inset, w - 2 * inset, h - 2 * inset)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(QPen(QColor(255, 255, 255, 34), 1.0))
+    p.setPen(QPen(pal.with_alpha(pal.RED_BRIGHT, 60), 1.0))
     p.drawRoundedRect(frame, 40 * k, 40 * k)
-    p.setPen(QPen(QColor(255, 255, 255, 12), 1.0))
+    p.setPen(QPen(pal.with_alpha(pal.RED_BRIGHT, 18), 1.0))
     p.drawRoundedRect(frame.adjusted(5, 5, -5, -5), 36 * k, 36 * k)
     p.end()
     return pm
