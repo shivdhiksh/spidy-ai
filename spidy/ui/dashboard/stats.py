@@ -113,7 +113,8 @@ def fetch_weather(lat: float, lon: float) -> tuple[str, str] | None:
     url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
            "&current=temperature_2m,weather_code")
     try:
-        with urllib.request.urlopen(url, timeout=6) as resp:
+        from spidy.brain.quick_actions import ssl_context
+        with urllib.request.urlopen(url, timeout=6, context=ssl_context()) as resp:
             cur = json.loads(resp.read().decode("utf-8"))["current"]
         return f"{round(cur['temperature_2m'])}°C", _WEATHER_TEXT.get(int(cur["weather_code"]), "—")
     except Exception:  # noqa: BLE001

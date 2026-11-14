@@ -166,7 +166,7 @@ class PiperTTSEngine(TTSEngine):
                 )
                 self._stream.start()
 
-    async def synthesize(self, text: str) -> AudioBuffer:
+    async def synthesize(self, text: str, style=None) -> AudioBuffer:
         """
         Synthesise text to an AudioBuffer (non-blocking).
 
@@ -181,7 +181,7 @@ class PiperTTSEngine(TTSEngine):
             )
 
         t0 = time.monotonic()
-        buf = await asyncio.to_thread(self._synthesize_sync, text)
+        buf = await asyncio.to_thread(self._synthesize_sync, text, style)
         elapsed = (time.monotonic() - t0) * 1000
         log.debug("[TTS] synth_complete: ms={ms:.0f}ms | dur={dur:.2f}s | text='{t}'",
                   ms=elapsed, dur=buf.duration_seconds, t=text[:40])
@@ -256,15 +256,16 @@ class PiperTTSEngine(TTSEngine):
 
     # ── Internal helpers ──────────────────────────────────────────────────
 
-    def _synthesize_sync(self, text: str) -> AudioBuffer:
+    def _synthesize_sync(self, text: str, style=None) -> AudioBuffer:
         """Run Piper synthesis synchronously (called via asyncio.to_thread)."""
         from piper.config import SynthesisConfig
 
         syn_config = SynthesisConfig(
-            length_scale=1.0 / self._speed,
-            noise_scale=0.667,
-            noise_w_scale=0.8,
-            volume=self._volume,
+            # style (spidy.voice.emotion.VoiceStyle) shapes each sentence: speed, expressiveness, loudness
+            length_scale=1.0 / (self._speed * (style.speed if style else 1.0)),
+            noise_scale=style.expressiveness if style else 0.667,
+            noise_w_scale=style.rhythm if style else 0.8,
+            volume=self._volume * (style.volume if style else 1.0),
         )
 
         wav_buffer = io.BytesIO()

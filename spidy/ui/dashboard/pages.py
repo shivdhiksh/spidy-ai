@@ -398,7 +398,9 @@ class AutomationPage(FunctionPage):
             ("Study mode", "Notepad + lo-fi music", "Open notepad and play lofi study music on YouTube"),
             ("Chill mode", "Relaxing music", "Play relaxing music on YouTube"),
             ("News", "Today's top stories", "Open today's top news"),
-            ("Clean desktop", "Tidy Desktop files", "Organise the files on my Desktop into folders by type"),
+            ("Clean desktop", "plan first, asks before moving",
+             "Look at the files on my Desktop and suggest how to sort them into folders by type. "
+             "Ask me before moving anything."),
             ("Focus 25 min", "Timer + quiet", "Set a timer for 25 minutes"),
             ("Daily briefing", "Weather, time, news", "Give me a quick briefing: the time, the weather and the top news"),
             ("Battery & system", "Health check", "Show system info"),
@@ -418,8 +420,8 @@ class CodePage(FunctionPage):
         self.section("Start something")
         self.tiles([
             ("New Python script", "hello-world to start", "Create a python program that prints hello world"),
-            ("Explain code", "paste or point to a file", "Explain the code in my clipboard"),
-            ("Fix an error", "Spidy reads the error", "Help me fix the error I just got"),
+            ("Explain code", "copy the code first", "Explain the code I copied"),
+            ("Fix an error", "copy the error first", "Fix the error I copied"),
             ("Write a function", "describe it, Spidy writes it", "Write a python function to sort a list of names"),
         ], cols=4)
         self.section("Tools")

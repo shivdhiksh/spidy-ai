@@ -158,7 +158,7 @@ class TTSManager(TTSEngine):
 
     # ── Synthesis & Speech Dispatch ───────────────────────────────────────────
 
-    async def synthesize(self, text: str) -> AudioBuffer:
+    async def synthesize(self, text: str, style=None) -> AudioBuffer:
         """
         Synthesize text using the primary online engine, falling back to offline engine on failure.
         """
@@ -188,7 +188,10 @@ class TTSManager(TTSEngine):
         if self._fallback is not None:
             log.info("[TTS] provider=piper voice={v}", v=self._fallback.voice_name)
             self._active_engine = self._fallback
-            return await self._fallback.synthesize(text)
+            try:
+                return await self._fallback.synthesize(text, style=style)
+            except TypeError:
+                return await self._fallback.synthesize(text)
 
         raise RuntimeError("TTSManager: No available TTS engine could synthesize audio.")
 

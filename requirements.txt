@@ -53,3 +53,4 @@ faster-whisper>=1.0.0       # Fast Whisper STT (CPU int8 by default, CUDA float1
 
 # Text-to-speech (REQUIRED for voice mode)
 # pip install piper-tts       # Piper TTS — high-quality offline neural TTS
+certifi>=2024.2.2          # CA bundle (this PC's Windows store breaks some HTTPS sites)

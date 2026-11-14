@@ -209,7 +209,8 @@ class ConversationManager:
             from spidy.utils.datetime_utils import get_local_datetime
             now = get_local_datetime()
             time_ctx = f"\n[Current Time: {now.strftime('%A, %B %d, %Y %I:%M %p')} ({now.tzname() or str(now.tzinfo)})]"
-            messages.append({"role": "system", "content": self._system_prompt + time_ctx})
+            from spidy.brain.quick_actions import facts_context
+            messages.append({"role": "system", "content": self._system_prompt + time_ctx + facts_context()})
         messages.extend(t.to_llm_message() for t in self._turns)
         return messages
 

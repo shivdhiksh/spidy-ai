@@ -25,9 +25,11 @@ plans multi-step tasks, and she speaks her answers in a natural female American 
 | **Code assistant** | Write, explain and fix code; open your editor and terminal |
 | **Screen vision** | "What's on my screen?", read text, summarise what you are looking at |
 | **Autonomous tasks** | Plans multi-step goals, executes them, verifies the result, and asks before anything risky |
-| **Memory** | Remembers things you teach her and what you talked about |
 | **Dashboard** | A dark HUD: rotating light-sphere face that reacts to her state, live CPU/GPU/RAM/network, weather, and a working screen for every menu item |
 | **Always on, light on resources** | Starts with Windows, lives in the tray, loads the heavy speech models only when the wake word starts to sound and frees them when idle |
+| **Everyday tasks, instantly** | Websites, Google search, weather, a daily briefing (time, weather, headlines), timers that ring, folders, file search that shows the file in Explorer, "create a Python program that…" writes a real file and opens it in VS Code, "explain / fix the code I copied" |
+| **Natural voice** | Female American voice that sounds glad about good news, gentle when something fails and curious when asking; never reads symbols, emoji or markdown aloud |
+| **Memory** | "Remember that…" is kept across restarts and used in later answers; "what do you remember about me?" |
 | **Safe** | Permission tiers, confirmation for dangerous actions, no fake "done" messages |
 
 ---
@@ -169,6 +171,11 @@ ruff check spidy tests                     # lint
 
 Known issues: `tests/unit/test_browser_agent.py` has failing tests (an outdated fake backend), and one
 integration acceptance test (`test_acceptance_03`) fails on a "save it to to" phrasing bug.
+
+## Privacy
+
+Questions about your screen ("what's on my screen?", "read the text on my screen") take a screenshot and send it to NVIDIA's vision model (
+vidia/nemotron-3.5-super-vl-120b-a12b) to be described. Screenshots are also saved in Pictures\Spidy. Everything else about the screen ("which app am I using?") stays on your PC.
 
 ## Troubleshooting
 

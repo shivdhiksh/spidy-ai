@@ -74,7 +74,8 @@ _HEADER = re.compile(r'^#{1,6}\s+(.+)$', re.MULTILINE)
 _BOLD = re.compile(r'\*{2}(.+?)\*{2}|_{2}(.+?)_{2}', re.DOTALL)
 
 # Italic: *text* or _text_ (single markers, not already consumed by bold)
-_ITALIC = re.compile(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!_)(.+?)(?<!_)_(?!_)')
+# (markdown italics hug their text: "*word*" yes, "10 * 2 * 3" no)
+_ITALIC = re.compile(r'(?<![\*\w])\*(?![\*\s])(.+?)(?<![\*\s])\*(?![\*\w])|(?<![_\w])_(?![_\s])(.+?)(?<![_\s])_(?![_\w])')
 
 # Strikethrough: ~~text~~
 _STRIKETHROUGH = re.compile(r'~~(.+?)~~', re.DOTALL)
@@ -105,6 +106,58 @@ _MULTI_BLANK = re.compile(r'\n{3,}')
 
 # Multiple spaces
 _MULTI_SPACE = re.compile(r' {2,}')
+
+
+# ── Symbols ───────────────────────────────────────────────────────────────────
+# Spoken as words when they carry meaning between numbers / words; everything else that is not a letter,
+# digit or normal sentence punctuation is dropped so the voice never reads "asterisk" or "plus sign".
+_NUM = r'(\d+(?:[.,]\d+)?)'
+_SYMBOL_WORDS = [
+    (re.compile(_NUM + r'\s*%'), r'\1 percent'),
+    (re.compile(_NUM + r'\s*°\s*C\b'), r'\1 degrees Celsius'),
+    (re.compile(_NUM + r'\s*°\s*F\b'), r'\1 degrees Fahrenheit'),
+    (re.compile(_NUM + r'\s*°'), r'\1 degrees'),
+    (re.compile(r'\$\s*' + _NUM), r'\1 dollars'),
+    (re.compile(r'₹\s*' + _NUM), r'\1 rupees'),
+    (re.compile(r'€\s*' + _NUM), r'\1 euros'),
+    (re.compile(_NUM + r'\s*[x×*]\s*' + _NUM), r'\1 times \2'),
+    (re.compile(_NUM + r'\s*÷\s*' + _NUM), r'\1 divided by \2'),
+    (re.compile(_NUM + r'\s+/\s+' + _NUM), r'\1 divided by \2'),
+    (re.compile(_NUM + r'\s*\+\s*' + _NUM), r'\1 plus \2'),
+    (re.compile(_NUM + r'\s+[-−]\s+' + _NUM), r'\1 minus \2'),
+    (re.compile(_NUM + r'\s*(?:-|–|to)\s*' + _NUM + r'(?=\s*(?:percent|degrees|minutes|hours|days|years|seconds))'), r'\1 to \2'),
+    (re.compile(r'\s*(?:->|→|=>)\s*'), ' to '),
+    (re.compile(r'\s*(?:<=|≤)\s*'), ' less than or equal to '),
+    (re.compile(r'\s*(?:>=|≥)\s*'), ' greater than or equal to '),
+    (re.compile(r'(?<=\d)\s*<\s*(?=\d)'), ' is less than '),
+    (re.compile(r'(?<=\d)\s*>\s*(?=\d)'), ' is greater than '),
+    (re.compile(r'\s*(?:==|=)\s*'), ' equals '),
+    (re.compile(r'\s*&\s*'), ' and '),
+    (re.compile(r'\band/or\b', re.IGNORECASE), 'and or'),
+    (re.compile(r'(?<=\w)/(?=\w)'), ' or '),          # yes/no
+    (re.compile(r'#(?=\d)'), 'number '),
+    (re.compile(r'~(?=\s*\d)'), 'about '),
+    (re.compile(r'(?<=\w)@(?=\w)'), ' at '),
+]
+# Emoji and pictographs
+_EMOJI = re.compile('[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF️‍]+')
+# Anything that is still not speakable: keep letters/digits/whitespace and . , ! ? ' " : ; - ( )
+_UNSPEAKABLE = re.compile(r"[^\w\s.,!?'\":;\-()’‘“”]")
+_REPEAT_PUNCT = re.compile(r'([.,!?;:])\1+')
+_SPACE_BEFORE_PUNCT = re.compile(r'\s+([.,!?;:])')
+
+
+def speakable_symbols(text: str) -> str:
+    """Turn symbols into words where they mean something; remove the rest."""
+    t = _EMOJI.sub(' ', text)
+    for pattern, repl in _SYMBOL_WORDS:
+        t = pattern.sub(repl, t)
+    t = t.replace('_', ' ')
+    t = _UNSPEAKABLE.sub(' ', t)
+    t = re.sub(r'(?:^|\s)[-:;,.]+(?=\s|$)', ' ', t)     # punctuation left on its own
+    t = _REPEAT_PUNCT.sub(r'\1', t)
+    t = _SPACE_BEFORE_PUNCT.sub(r'\1', t)
+    return _MULTI_SPACE.sub(' ', t).strip()
 
 
 @dataclass
@@ -246,8 +299,12 @@ class TTSTextFilter:
         # 11. Bare URLs → replacement word
         t = _URL.sub(self._url_replacement, t)
 
-        # 12. Collapse whitespace
+        # 12. Symbols: say the meaningful ones as words, drop the rest (no "asterisk", "slash"...)
+        t = speakable_symbols(t)
+
+        # 13. Collapse whitespace
         t = _MULTI_BLANK.sub('\n\n', t)
+        t = re.sub(r'(?<![.!?,:;])[ \t]*\n+(?=\s*\S)', '. ', t)   # a line break is a pause (list items, lines)
         t = t.replace('\n', ' ')       # newlines → spaces for TTS flow
         t = _MULTI_SPACE.sub(' ', t)
         t = t.strip()

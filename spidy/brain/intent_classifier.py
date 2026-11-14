@@ -599,6 +599,18 @@ def _extract_brightness_level(text: str) -> list[Entity]:
     return []
 
 
+_GREETING_WORDS = frozenset(
+    "hi hey hello hiya yo howdy greetings there spidy spidey good morning afternoon evening night boss sir "
+    "shiva how are you doing what's whats up".split()
+)
+
+
+def _is_just_greeting(text: str) -> bool:
+    """'hey spidy, good morning' yes; 'say hello and tell me a fact' / 'print hello world' no."""
+    words = re.findall(r"[a-z']+", text.lower())
+    return sum(1 for w in words if w not in _GREETING_WORDS) <= 1
+
+
 # ─── Rule Definitions ─────────────────────────────────────────────────────────
 #
 # Priority ordering (first matching rule with highest confidence wins):
@@ -1421,6 +1433,13 @@ class IntentClassifier:
         self._rules = _RULES
 
     async def classify(self, utterance: str) -> Intent:
+        """Classify; a "greet" only counts when the utterance is really just a greeting."""
+        intent = await self._classify_full(utterance)
+        if intent.action == "greet" and not _is_just_greeting(utterance):
+            return Intent(action="chat", confidence=_LOW_CONFIDENCE, raw_utterance=utterance, source="heuristic")
+        return intent
+
+    async def _classify_full(self, utterance: str) -> Intent:
         """
         Classify a raw utterance into an Intent.
 

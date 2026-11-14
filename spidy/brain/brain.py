@@ -268,6 +268,27 @@ class Brain:
             ))
             return CREATOR_REPLY
 
+        # Everyday tasks (sites, search, weather, timers, files, screen, memory) done directly and reliably.
+        quick = await self._quick_actions().try_handle(utterance)
+        if quick is not None and quick.reply:
+            self._conversation.add_turn(TurnRole.USER, utterance)
+            self._conversation.add_turn(TurnRole.ASSISTANT, quick.reply)
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid, response_text=quick.reply, decision_mode="quick_action",
+            ))
+            return quick.reply
+        if quick is not None and quick.rewrite:
+            utterance = quick.rewrite          # e.g. clipboard code attached for the language model
+        if quick is not None and quick.code:
+            reply = await self._write_code_file(*quick.code)
+            if reply:
+                self._conversation.add_turn(TurnRole.USER, utterance)
+                self._conversation.add_turn(TurnRole.ASSISTANT, reply)
+                await self._bus.publish(BrainResponseReadyEvent(
+                    session_id=sid, response_text=reply, decision_mode="quick_action",
+                ))
+                return reply
+
         # ── Step 0: Check if an autonomous goal is waiting for user input ───
         if self._agent is not None and self._agent.has_waiting_goal():
             log.info("Brain: routing input to resume paused autonomous goal.")
@@ -504,6 +525,54 @@ class Brain:
         self._agent = agent
         log.debug("Brain: AutonomousAgent attached.")
 
+    def _quick_actions(self):
+        if getattr(self, "_quick", None) is None:
+            from spidy.brain.quick_actions import QuickActions
+            self._quick = QuickActions(announce=self._announce)
+        return self._quick
+
+    async def _write_code_file(self, language: str, description: str) -> str | None:
+        """Have the model write a complete program, save it in Documents/Spidy Code and open it."""
+        if self._llm is None:
+            return None
+        import re as _re
+        import subprocess
+        from spidy.brain.quick_actions import user_folder
+        from spidy.llm.client import LLMMessage
+        ext = {"python": ".py", "javascript": ".js", "js": ".js", "html": ".html", "java": ".java",
+               "c++": ".cpp", "c#": ".cs", "c": ".c", "bash": ".sh", "powershell": ".ps1"}.get(language, ".py")
+        resp = await self._llm.complete([
+            LLMMessage("system", f"You write complete, runnable {language} programs. Reply with ONLY the code in one "
+                                 "code block, with short comments. No explanation outside the code."),
+            LLMMessage("user", description),
+        ], temperature=0.2)
+        if not resp.success or not resp.text.strip():
+            return None
+        block = _re.search(r"```[\w+#-]*\n(.*?)```", resp.text, _re.DOTALL)
+        code = (block.group(1) if block else resp.text).strip() + "\n"
+        words = _re.findall(r"[a-z0-9]+", description.lower())
+        stem = "_".join(w for w in words if w not in ("a", "an", "the", "that", "which", "to", "of", "and"))[:40] or "program"
+        folder = user_folder("documents") / "Spidy Code"
+        folder.mkdir(parents=True, exist_ok=True)
+        path, n = folder / f"{stem}{ext}", 2
+        while path.exists():
+            path, n = folder / f"{stem}_{n}{ext}", n + 1
+        path.write_text(code, encoding="utf-8")
+        try:
+            subprocess.Popen(["cmd", "/c", "code", str(path)], creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            opened = "opened it in VS Code"
+        except Exception:  # noqa: BLE001
+            opened = "saved it"
+        log.info("Brain: wrote {p}", p=path)
+        return f"Done! I wrote {path.name} in your Documents, in the Spidy Code folder, and {opened}."
+
+    async def _announce(self, text: str) -> None:
+        """Say something on Spidy's own initiative (a timer going off)."""
+        from spidy.brain.events import BrainResponseReadyEvent
+        await self._bus.publish(BrainResponseReadyEvent(
+            session_id=self._conversation.session_id, response_text=text, decision_mode="reminder",
+        ))
+
     async def run_goal(self, goal: str, session_id: str | None = None) -> str:
         """
         Execute a high-level goal autonomously (Milestone 13).
@@ -524,6 +593,18 @@ class Brain:
         str
             Natural language response describing what was accomplished.
         """
+        quick = await self._quick_actions().try_handle(goal)
+        if quick is not None and quick.reply:
+            sid = session_id or self._conversation.session_id
+            self._conversation.add_turn(TurnRole.USER, goal)
+            self._conversation.add_turn(TurnRole.ASSISTANT, quick.reply)
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid, response_text=quick.reply, decision_mode="quick_action",
+            ))
+            return quick.reply
+        if quick is not None and (quick.rewrite or quick.code):
+            return await self.process(goal, session_id=session_id)
+
         if self._agent is not None:
             sid = session_id or self._conversation.session_id
             response_text = await self._agent.run_goal(goal, session_id=sid)

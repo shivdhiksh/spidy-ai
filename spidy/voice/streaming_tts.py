@@ -46,6 +46,10 @@ from typing import TYPE_CHECKING
 
 from spidy.logging.logger import get_logger
 from spidy.voice.echo_canceller import PlaybackReference
+from spidy.voice.emotion import style_for
+from spidy.voice.tts_text_filter import TTSTextFilter
+
+_CLEANER = TTSTextFilter()   # every spoken line: no markdown, symbols or emoji read aloud
 
 if TYPE_CHECKING:
     from spidy.perception.voice.tts.base import TTSEngine
@@ -104,6 +108,7 @@ class StreamingTTSWrapper:
         text:
             The full response text. May contain multiple sentences.
         """
+        text = _CLEANER.filter(text).tts_text
         if not text.strip():
             return
 
@@ -148,7 +153,7 @@ class StreamingTTSWrapper:
                 # 2. While sentence i is playing, concurrently synthesize sentence i+1 in the background.
                 # 3. Sentence i+1 begins playing with 0ms gap when sentence i finishes.
                 t_syn0 = time.monotonic()
-                current_buf = await self._safe_synthesize(sentences[0])
+                current_buf = await self._safe_synthesize(sentences[0], style_for(sentences[0]))
                 syn0_ms = (time.monotonic() - t_syn0) * 1000
                 first_sound_latency = (time.monotonic() - _response_start) * 1000
 
@@ -172,7 +177,7 @@ class StreamingTTSWrapper:
                     # Start synthesizing next sentence concurrently during current playback
                     if i + 1 < _n and not self._interrupt_flag.is_set():
                         next_task = asyncio.create_task(
-                            self._safe_synthesize(sentences[i + 1])
+                            self._safe_synthesize(sentences[i + 1], style_for(sentences[i + 1]))
                         )
 
                     # Play current sentence buffer
@@ -223,14 +228,17 @@ class StreamingTTSWrapper:
             finally:
                 self._speaking = False
 
-    async def _safe_synthesize(self, text: str) -> Any:
-        """Safely invoke engine synthesize whether async, sync, or mock."""
+    async def _safe_synthesize(self, text: str, style=None) -> Any:
+        """Safely invoke engine synthesize whether async, sync, or mock; adds the style's pause."""
         try:
             if hasattr(self._engine, "synthesize"):
-                res = self._engine.synthesize(text)
+                try:
+                    res = self._engine.synthesize(text, style=style) if style is not None else self._engine.synthesize(text)
+                except TypeError:          # engine without per-sentence styles
+                    res = self._engine.synthesize(text)
                 if asyncio.iscoroutine(res) or hasattr(res, "__await__"):
-                    return await res
-                return res
+                    res = await res
+                return _with_pause(res, getattr(style, "pause_after", 0.0))
         except Exception as exc:
             log.debug("StreamingTTS: synthesize error: {exc}", exc=exc)
         return None
@@ -326,3 +334,16 @@ class StreamingTTSWrapper:
                 result.append(pending)
 
         return result or [text.strip()]
+
+
+def _with_pause(buf: Any, seconds: float) -> Any:
+    """Append a short silence (the breath after a sentence) to a synthesized AudioBuffer."""
+    samples = getattr(buf, "samples", None)
+    rate = getattr(buf, "sample_rate", 0)
+    if seconds <= 0 or samples is None or not getattr(samples, "size", 0) or not rate:
+        return buf
+    import numpy as np
+    from spidy.perception.voice.tts.base import AudioBuffer
+    pad = np.zeros(int(rate * seconds), dtype=samples.dtype)
+    return AudioBuffer(samples=np.concatenate([samples, pad]), sample_rate=rate,
+                       duration_seconds=getattr(buf, "duration_seconds", 0.0) + seconds)
