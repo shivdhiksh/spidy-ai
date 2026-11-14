@@ -50,8 +50,8 @@ def get_default_autostart_command(background: bool = True) -> str:
     """
     pythonw = _get_pythonw_executable()
     flag = " --background" if background else ""
-    # Ensure working directory / PYTHONPATH is preserved or cd / script run
-    cmd = f'"{pythonw}" -m spidy.main{flag}'
+    # --supervise: like a phone's assistant service, Spidy comes back by itself if it ever crashes
+    cmd = f'"{pythonw}" -m spidy.main --supervise{flag}'
     return cmd
 
 

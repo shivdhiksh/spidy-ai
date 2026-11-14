@@ -71,10 +71,10 @@ def test_single_instance_secondary_detection_and_ipc():
 # ─── Autostart Manager Tests ────────────────────────────────────────────────
 
 def test_get_autostart_command():
-    """Autostart command should use pythonw.exe and --background flag."""
+    """Autostart command should use pythonw.exe, the crash supervisor and the --background flag."""
     cmd = get_default_autostart_command()
     assert "pythonw.exe" in cmd.lower()
-    assert "-m spidy.main --background" in cmd
+    assert "-m spidy.main --supervise --background" in cmd
 
 
 def test_autostart_registry_enable_disable():

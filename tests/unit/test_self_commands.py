@@ -1,49 +1,40 @@
-"""Spidy must recognise 'close yourself' style commands, and nothing else."""
+"""Voice commands addressed to Spidy: dismiss ("close yourself") keeps her listening; only a clear request quits."""
 
 from __future__ import annotations
 
 import pytest
 
-from spidy.brain.self_commands import is_quit_request
+from spidy.brain.self_commands import is_dismiss_request, is_quit_request
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "close yourself",
-        "Thank you. Okay, smarty close yourself.",   # real transcript from a session
-        "quit Spidy",
-        "exit spidey",
-        "shut yourself down",
-        "turn yourself off",
-        "Spidy, shut down",
-        "Spidy please quit",
-        "terminate yourself",
-    ],
-)
-def test_quit_phrases(text):
+@pytest.mark.parametrize("text", [
+    "shut yourself down", "turn yourself off", "Spidy, shut down", "terminate yourself", "power off spidy",
+    "close yourself completely", "quit spidy completely", "exit for good", "shut down spidy",
+])
+def test_full_quit_needs_an_unmistakable_request(text):
     assert is_quit_request(text)
+    assert not is_dismiss_request(text)
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "close chrome",
-        "close the window",
-        "quit the app",
-        "exit full screen",
-        "shut down the computer",
-        "how are you",
-        "open vs code",
-        "stop the music",
-        "Spidy stop",          # barge-in phrase: interrupts speech only
-        "stop Spidy",
-        "stop",
-        "",
-    ],
-)
-def test_other_commands_are_not_quit(text):
+@pytest.mark.parametrize("text", [
+    "close yourself",
+    "close your self",                            # real transcript, 14 Nov: Spidy quit and could not be woken
+    "Thank you. Okay, smarty close yourself.",
+    "quit Spidy", "exit spidey", "Spidy please quit", "go away", "go to sleep", "that's all for now",
+    "bye spidy", "hide yourself", "minimize yourself",
+])
+def test_close_yourself_only_dismisses(text):
     assert not is_quit_request(text)
+    assert is_dismiss_request(text) or "smarty" in text   # "smarty" is a mis-heard name: no name match
+
+
+@pytest.mark.parametrize("text", [
+    "close chrome", "close the window", "quit the app", "exit full screen", "shut down the computer",
+    "how are you", "open vs code", "stop the music", "Spidy stop", "stop Spidy", "stop", "",
+])
+def test_other_commands_are_neither(text):
+    assert not is_quit_request(text)
+    assert not is_dismiss_request(text)
 
 
 # ── "Who developed you?" always gets the same answer ─────────────────────────

@@ -14,23 +14,42 @@ import re
 # "stop" is deliberately NOT a quit word: "Spidy stop" is the barge-in phrase that only
 # interrupts speech.
 _NAME = r"(?:spid(?:y|ey|ie|i)|spiddy)"
+# Like a phone assistant, Spidy is never "closed" by a casual request: "close yourself" only dismisses
+# her (window hidden, current task stopped) and she keeps listening for "Hey Spidy". Exiting the program
+# takes an unmistakable request: shut down / turn off / power off / terminate, or "quit ... completely".
+_FULL = r"(?:completely|fully|entirely|for\s+good|totally)"
 _QUIT_RE = re.compile(
     r"\b(?:"
-    rf"(?:close|quit|exit|terminate|kill|turn\s+off|power\s+off|shut\s*(?:down|off))"
-    rf"\s+(?:your\s*self|yourselves|{_NAME})"
+    rf"(?:terminate|kill|turn\s+off|power\s+off|shut\s*(?:down|off))\s+(?:your\s*self|yourselves|{_NAME})"
     r"|shut\s+(?:your\s*self)\s+(?:down|off)"
     r"|turn\s+(?:your\s*self)\s+off"
-    rf"|{_NAME}\W+(?:please\W+)?(?:shut\s*(?:down|off)|quit|exit)"
+    rf"|{_NAME}\W+(?:please\W+)?(?:shut\s*(?:down|off)|turn\s+off|power\s+off)"
+    rf"|(?:close|quit|exit|stop)\s+(?:your\s*self|{_NAME}|the\s+app|the\s+program|spidy\s+app)\s+{_FULL}"
+    rf"|(?:quit|exit|close)\s+{_FULL}"
+    r")\b",
+    re.IGNORECASE,
+)
+_DISMISS_RE = re.compile(
+    r"\b(?:"
+    rf"(?:close|quit|exit|hide|minimi[sz]e|dismiss)\s+(?:your\s*self|yourselves|{_NAME})"
+    rf"|{_NAME}\W+(?:please\W+)?(?:quit|exit|close|go\s+away|go\s+to\s+sleep|hide|dismiss)"
+    rf"|(?:go\s+away|go\s+to\s+sleep|that'?s\s+all(?:\s+for\s+now)?|(?:good)?\s*bye\s+{_NAME})"
     r")\b",
     re.IGNORECASE,
 )
 
 
 def is_quit_request(text: str) -> bool:
-    """True if the user is asking Spidy to close/exit itself."""
+    """True if the user wants to exit Spidy completely (shut down / turn off / quit completely)."""
     return bool(text and _QUIT_RE.search(text))
 
 
+def is_dismiss_request(text: str) -> bool:
+    """True if the user wants Spidy out of the way for now ("close yourself"); she keeps listening."""
+    return bool(text and not is_quit_request(text) and _DISMISS_RE.search(text))
+
+
+DISMISS_REPLY = "Okay! I'll be right here. Just say Hey Spidy when you need me."
 QUIT_FAREWELL = "Okay, closing now. Goodbye!"
 
 

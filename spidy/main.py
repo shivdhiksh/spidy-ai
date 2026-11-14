@@ -51,12 +51,51 @@ def _exit_now(code: int) -> None:
     kill_self(code)   # TerminateProcess: a normal exit can hang in a DLL's detach code
 
 
+def supervise(child_args: list[str], max_crashes: int = 5, window_s: float = 600.0,
+              run=None, sleep=None) -> int:
+    """
+    Run Spidy as a child process and bring it back if it crashes, the way a phone keeps its assistant
+    service alive. Exit code 0 means a deliberate quit (stop supervising); anything else is a crash.
+    More than ``max_crashes`` crashes in ``window_s`` seconds means something is broken: give up.
+    """
+    import subprocess
+    import time
+    run = run or (lambda: subprocess.call([sys.executable, "-m", "spidy.main", *child_args],
+                                          creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)))
+    sleep = sleep or time.sleep
+    crashes: list[float] = []
+    while True:
+        code = run()
+        if code == 0:
+            return 0
+        now = time.monotonic()
+        crashes = [t for t in crashes if now - t < window_s] + [now]
+        _note_crash(code, len(crashes))
+        if len(crashes) > max_crashes:
+            return code
+        sleep(3.0)
+
+
+def _note_crash(code: int, n: int) -> None:
+    try:
+        log_dir = Path(os.environ.get("APPDATA", str(Path.home()))) / "Spidy" / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        import datetime
+        with open(log_dir / "spidy_crash.log", "a", encoding="utf-8") as f:
+            f.write(f"\n[supervisor {datetime.datetime.now():%Y-%m-%d %H:%M:%S}] Spidy exited with code {code} "
+                    f"(crash {n} in 10 min) -- restarting.\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _build_cli_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Spidy — Autonomous Desktop AI Companion")
     parser.add_argument("config_path", nargs="?", default=None, help="Path to YAML config file")
     parser.add_argument("--text-mode", action="store_true", help="Skip voice pipeline and open interactive text REPL")
     parser.add_argument("--background", "--hidden", dest="background", action="store_true", help="Start Spidy in background with HUD hidden")
     parser.add_argument("--quit", action="store_true", help="Ask the running Spidy to close itself, then exit")
+    parser.add_argument("--supervise", action="store_true",
+                        help="Keep Spidy available: start it and restart it if it crashes (not after a deliberate quit)")
     parser.add_argument("--install-autostart", action="store_true", help="Register Spidy in HKCU Run to start on Windows login")
     parser.add_argument("--uninstall-autostart", action="store_true", help="Remove Spidy from HKCU Run")
     parser.add_argument("--status-autostart", action="store_true", help="Check Windows login autostart registration status")
@@ -100,6 +139,12 @@ def main() -> None:
         cmd = get_autostart_command()
         print(f"[Spidy] Autostart enabled: {enabled} (cmd: {cmd})")
         sys.exit(0)
+
+    if opts.supervise:
+        child = [a for a in sys.argv[1:] if a != "--supervise"]
+        from spidy.config.manager import PROJECT_ROOT
+        os.chdir(PROJECT_ROOT)
+        sys.exit(supervise(child))
 
     config_path = Path(opts.config_path) if opts.config_path else None
     if config_path and not config_path.exists():

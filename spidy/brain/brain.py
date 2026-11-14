@@ -259,6 +259,16 @@ class Brain:
             self._quit_task = asyncio.create_task(self._quit_after_farewell())
             return QUIT_FAREWELL
 
+        # "Close yourself": hide and stop, but keep listening for the wake word (like a phone assistant).
+        from spidy.brain.self_commands import DISMISS_REPLY, is_dismiss_request
+        if is_dismiss_request(utterance):
+            log.info("Brain: dismiss request recognised: '{utt}'", utt=utterance[:80])
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid, response_text=DISMISS_REPLY, decision_mode="self_command",
+            ))
+            self._dismiss_task = asyncio.create_task(self._dismiss_after_reply())
+            return DISMISS_REPLY
+
         # Who made Spidy: always the same answer, never the model's (it would name the API provider).
         from spidy.brain.self_commands import CREATOR_REPLY, is_creator_question
         if is_creator_question(utterance):
@@ -459,6 +469,13 @@ class Brain:
         )
 
         return response_text
+
+    async def _dismiss_after_reply(self, delay_seconds: float = 3.5) -> None:
+        """After the spoken reply: hide the window and end the conversation; the wake word stays on."""
+        from spidy.ui.events import UIClosedEvent, UIHideEvent
+        await asyncio.sleep(delay_seconds)
+        await self._bus.publish(UIHideEvent(source="voice_dismiss"))
+        await self._bus.publish(UIClosedEvent())
 
     async def _quit_after_farewell(self, delay_seconds: float = 3.5) -> None:
         """Give the spoken goodbye time to play, then ask the app to shut down."""

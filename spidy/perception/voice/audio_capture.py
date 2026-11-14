@@ -100,6 +100,7 @@ class AudioCaptureEngine:
         self._on_barge_in_chunk = on_barge_in_chunk
         self._on_other_chunk: AudioCallback | None = None   # tap for modes other than BARGE_IN
         self.barge_in_gain_scale = 0.25    # mic gain multiplier while Spidy speaks (BARGE_IN mode)
+        self.chunks_read = 0               # grows while the microphone delivers audio (health check)
         self._mic_gain = float(mic_gain)  # Software amplification factor (applied before OWW/STT)
         self._low_signal_warned = False   # One-shot warning for very quiet mic
 
@@ -248,6 +249,7 @@ class AudioCaptureEngine:
                         log.debug("Audio buffer overflow — some samples dropped.")
 
                     audio_flat = audio_chunk.flatten()
+                    self.chunks_read += 1
 
                     # ── Software microphone gain ──────────────────────────────
                     # While Spidy speaks (BARGE_IN) her own voice is loud in the mic: at the normal

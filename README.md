@@ -108,13 +108,18 @@ python -m spidy.main --quit          # ask a running Spidy to close
 python -m spidy.main --install-autostart     # also: --status-autostart, --uninstall-autostart
 ```
 
+Autostart runs Spidy under a small supervisor (--supervise) that starts her again if she ever crashes, like a phone keeps its assistant running. The microphone listener also restarts itself if the mic stream dies.
+
+```powershell
+```
+
 ### Using the window
 
 | Button | What it does |
 |---|---|
 | **–** (minimize) | Sends Spidy to the taskbar; she keeps listening |
-| **X** | Closes the window and stops speech and running tasks; she keeps listening for "Hey Spidy" |
-| **Settings → Quit Spidy** (or tray → Quit) | Closes Spidy completely |
+| **X**, or saying "close yourself" / "go away" | Hides the window and stops speech and running tasks; she keeps listening for "Hey Spidy" |
+| **Settings → Quit Spidy**, tray → Quit, or saying "shut down Spidy" / "quit completely" | Closes Spidy completely |
 
 The menu on the left has a working screen for **Voice, Browser, Files, Apps, Automate, Code, Vision, Memory** and
 **Settings**; every button either sends a request to Spidy (the answer appears in Chat) or acts directly.

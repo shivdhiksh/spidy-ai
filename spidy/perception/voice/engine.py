@@ -321,6 +321,7 @@ class VoiceEngine:
             self._processing_loop(), name="voice-processing-loop"
         )
         self._processing_task.add_done_callback(self._on_processing_task_done)
+        self._health_task = asyncio.create_task(self._listener_health(), name="voice-listener-health")
         if self._idle_unload > 0 and hasattr(self._recognizer, "ensure_loaded"):
             self._governor_task = asyncio.create_task(self._resource_governor(), name="voice-resource-governor")
 
@@ -339,6 +340,8 @@ class VoiceEngine:
         self._stop_event.set()
         if self._governor_task is not None:
             self._governor_task.cancel()
+        if getattr(self, "_health_task", None) is not None:
+            self._health_task.cancel()
         if self._wake_verify_pool is not None:
             self._wake_verify_pool.shutdown(wait=False, cancel_futures=True)
         self._tts.stop()
@@ -592,6 +595,41 @@ class VoiceEngine:
             await asyncio.sleep(10.0)
             if self._should_release_models():
                 await asyncio.to_thread(self._release_models)
+
+    async def _listener_health(self, every: float = 5.0, stall_after: float = 12.0) -> None:
+        """Keep the wake word always available: restart a dead or stalled microphone / voice loop."""
+        last_count, last_progress = -1, time.monotonic()
+        while not self._stop_event.is_set():
+            await asyncio.sleep(every)
+            if self._stop_event.is_set():
+                break
+            try:
+                self.ensure_processing_task()
+                cap = self._capture_engine
+                count = getattr(cap, "chunks_read", None)
+                if count is not None and count != last_count:
+                    last_count, last_progress = count, time.monotonic()
+                stalled = count is not None and time.monotonic() - last_progress > stall_after
+                if not cap.is_running or stalled:
+                    log.warning("[VOICE HEALTH] microphone {why} -- restarting the listener.",
+                                why="stopped" if not cap.is_running else "stalled")
+                    await asyncio.to_thread(self._restart_capture)
+                    last_progress = time.monotonic()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[VOICE HEALTH] check failed: {exc}", exc=exc)
+
+    def _restart_capture(self) -> None:
+        cap = self._capture_engine
+        try:
+            cap.stop()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            cap.start()
+            cap.set_mode(CaptureMode.DETECTING)
+            log.info("[VOICE HEALTH] microphone listener restarted.")
+        except Exception as exc:  # noqa: BLE001
+            log.warning("[VOICE HEALTH] could not reopen the microphone yet: {exc}", exc=exc)
 
     def _should_release_models(self) -> bool:
         with self._state_lock:
