@@ -40,6 +40,25 @@ def contains_wake_name(text: str) -> bool:
     return bool(_NAME_RE.search(letters))
 
 
+_NAME_WORD = re.compile(r"sp[iy]d{1,2}(?:y|ey|ie|i)s?")
+_CALL_WORDS = {"hey", "hi", "hello", "ok", "okay", "yo", "oi", "up", "hay", "a"}   # "wake up spidy", "a spidy"
+
+
+def is_wake_phrase(text: str) -> bool:
+    """
+    True only if someone *called* Spidy: "Hey Spidy", "Okay Spidy, ...", "Wake up Spidy" or the name
+    as the first word. A TV line that merely contains the name ("...and then Spidey jumped") is not a
+    call, like a phone assistant ignores its name inside other speech.
+    """
+    words = [re.sub(r"[^a-z]", "", w) for w in text.lower().split()]
+    words = [w for w in words if w]
+    for i, w in enumerate(words):
+        if _NAME_WORD.fullmatch(w) or (w.startswith("hey") and _NAME_WORD.fullmatch(w[3:])):
+            if i == 0 or w.startswith("hey") or words[i - 1] in _CALL_WORDS:
+                return True
+    return False
+
+
 class WakeVerifier:
     """
     Keeps a rolling window of recent audio and verifies wake detections.
@@ -106,4 +125,4 @@ class WakeVerifier:
         except Exception as exc:  # noqa: BLE001
             log.warning("[WAKE VERIFY] transcription failed ({exc}); accepting wake.", exc=exc)
             return True, ""
-        return contains_wake_name(text), text
+        return is_wake_phrase(text), text

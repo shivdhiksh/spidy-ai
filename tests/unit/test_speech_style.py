@@ -6,7 +6,7 @@ import asyncio
 
 import pytest
 
-from spidy.voice.emotion import CALM, CURIOUS, EXCITED, SORRY, WARM, style_for
+from spidy.voice.emotion import CALM, CARING, CURIOUS, EXCITED, HAPPY, SORRY, WARM, style_for
 from spidy.voice.streaming_tts import StreamingTTSWrapper
 from spidy.voice.tts_text_filter import TTSTextFilter
 
@@ -33,8 +33,10 @@ def test_nothing_unspeakable_survives():
 
 
 @pytest.mark.parametrize("sentence, style", [
-    ("Done! VS Code is open.", EXCITED),
-    ("That's great news.", EXCITED),
+    ("Done! VS Code is open.", HAPPY),
+    ("That's great news.", HAPPY),
+    ("Yay, it worked!", EXCITED),
+    ("Don't worry, I'm here.", CARING),
     ("Sorry, I couldn't find that file.", SORRY),
     ("Unfortunately the download failed.", SORRY),
     ("Which folder should I use?", CURIOUS),

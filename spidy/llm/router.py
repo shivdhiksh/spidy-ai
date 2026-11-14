@@ -114,9 +114,13 @@ class LLMRouter(BaseLLMClient):
         messages: list[LLMMessage],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        timeout: float | None = None,
     ) -> LLMResponse:
         """
         Attempt completion across providers in order.
+
+        ``timeout`` overrides the per-provider time limit for this call only (long jobs such as
+        writing a whole website take a big model well over a minute).
 
         Returns the first successful response, or failure if all fail.
 
@@ -169,6 +173,12 @@ class LLMRouter(BaseLLMClient):
             timeout_sec = self._provider_timeout
             if timeout_sec is None:
                 timeout_sec = float(getattr(provider, "timeout", 0) or getattr(provider, "_timeout", 0) or 25.0)
+            saved_http_timeout = None
+            if timeout is not None and timeout > timeout_sec:
+                timeout_sec = float(timeout)
+                if hasattr(provider, "_timeout"):          # the HTTP read timeout must not cut it short either
+                    saved_http_timeout = provider._timeout
+                    provider._timeout = max(provider._timeout or 0, int(timeout))
 
             _req_start = time.monotonic()
             try:
@@ -197,6 +207,9 @@ class LLMRouter(BaseLLMClient):
                     exc=exc,
                 )
                 response = LLMResponse.failure(str(exc), model=provider_model)
+            finally:
+                if saved_http_timeout is not None:
+                    provider._timeout = saved_http_timeout
 
             _duration_ms = (time.monotonic() - _req_start) * 1000
 

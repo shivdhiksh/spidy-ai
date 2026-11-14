@@ -126,15 +126,25 @@ def test_recent_transcription_keeps_the_model_loaded():
     assert not eng._should_release_models()
 
 
-def test_wake_word_starting_to_sound_loads_everything():
-    eng, rec = _engine(scores=[0.0, 0.1])               # 0.1 is below the detection threshold
+def test_background_noise_scores_load_nothing():
+    """A TV produces wake scores all evening: a stage-1 score alone must not load the speech models."""
+    eng, rec = _engine(scores=[0.0, 0.1, 0.3, 0.45])
     rec.unload()
     warmed = MagicMock()
     eng.add_resource_hooks(prewarm=warmed)
-    quiet = np.zeros(CHUNK, np.float32)
-    eng._process_wake_word(quiet)
-    assert not rec.is_loaded                            # silence does not load anything
-    eng._process_wake_word(quiet)                       # score 0.1: the wake word is starting
+    for _ in range(4):
+        eng._process_wake_word(np.zeros(CHUNK, np.float32))
+    time.sleep(0.05)
+    assert not rec.is_loaded
+    warmed.assert_not_called()
+
+
+def test_confirmed_wake_loads_everything():
+    eng, rec = _engine()
+    rec.unload()
+    warmed = MagicMock()
+    eng.add_resource_hooks(prewarm=warmed)
+    eng._fire_wake("hey_spidy", "Hey Spidy", 0.99)
     end = time.monotonic() + 3
     while not rec.is_loaded and time.monotonic() < end:
         time.sleep(0.01)

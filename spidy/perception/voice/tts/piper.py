@@ -259,10 +259,12 @@ class PiperTTSEngine(TTSEngine):
     def _synthesize_sync(self, text: str, style=None) -> AudioBuffer:
         """Run Piper synthesis synchronously (called via asyncio.to_thread)."""
         from piper.config import SynthesisConfig
+        from spidy.voice.emotion import apply_pitch, synth_speed
 
         syn_config = SynthesisConfig(
-            # style (spidy.voice.emotion.VoiceStyle) shapes each sentence: speed, expressiveness, loudness
-            length_scale=1.0 / (self._speed * (style.speed if style else 1.0)),
+            # style (spidy.voice.emotion.VoiceStyle) shapes each sentence: speed, pitch, expressiveness,
+            # loudness. Pitch is applied after synthesis, so synthesise at the compensating speed.
+            length_scale=1.0 / (self._speed * synth_speed(style)),
             noise_scale=style.expressiveness if style else 0.667,
             noise_w_scale=style.rhythm if style else 0.8,
             volume=self._volume * (style.volume if style else 1.0),
@@ -279,6 +281,10 @@ class PiperTTSEngine(TTSEngine):
 
         int16_samples = np.frombuffer(frames, dtype=np.int16)
         float32_samples = int16_samples.astype(np.float32) / 32767.0
+        try:
+            float32_samples = np.clip(apply_pitch(float32_samples, style), -1.0, 1.0)
+        except Exception as exc:  # noqa: BLE001 -- never lose the sentence over a pitch effect
+            log.debug("pitch shaping failed: {exc}", exc=exc)
         duration = len(float32_samples) / sr if sr > 0 else 0.0
 
         return AudioBuffer(

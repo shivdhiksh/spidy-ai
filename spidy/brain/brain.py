@@ -554,21 +554,57 @@ class Brain:
             return None
         import re as _re
         import subprocess
-        from spidy.brain.quick_actions import user_folder
+        from spidy.brain.quick_actions import CODE_LANGUAGES, user_folder
         from spidy.llm.client import LLMMessage
-        ext = {"python": ".py", "javascript": ".js", "js": ".js", "html": ".html", "java": ".java",
-               "c++": ".cpp", "c#": ".cs", "c": ".c", "bash": ".sh", "powershell": ".ps1"}.get(language, ".py")
-        resp = await self._llm.complete([
-            LLMMessage("system", f"You write complete, runnable {language} programs. Reply with ONLY the code in one "
-                                 "code block, with short comments. No explanation outside the code."),
-            LLMMessage("user", description),
-        ], temperature=0.2)
+        ext = next((e for lang, e in CODE_LANGUAGES.values() if lang == language), ".txt")
+        if language == "html":
+            rules = ("You are an expert web developer. Build exactly what the user asks as ONE complete, "
+                     "self-contained index.html: modern, beautiful, responsive design, all CSS in a <style> tag and "
+                     "all JavaScript in a <script> tag, fully working (every button and feature implemented), no "
+                     "external files except optional Google Fonts. If the request is vague, pick a sensible, "
+                     "impressive design.")
+        else:
+            rules = (f"You are an expert {language} developer. Write a complete, runnable, well-structured {language} "
+                     "program that does exactly what the user asks, with short helpful comments and sensible "
+                     "defaults. Single file, standard library where possible.")
+        await self._announce(f"On it! Writing your {'website' if language == 'html' else language + ' code'} now.")
+        msgs = [LLMMessage("system", rules + " Reply with ONLY the code in one fenced code block. No explanation."),
+                LLMMessage("user", description)]
+
+        async def ask(messages):
+            try:      # a whole program/website takes the big model a few minutes
+                return await self._llm.complete(messages, temperature=0.3, max_tokens=8000, timeout=300)
+            except TypeError:   # an LLM client without the timeout option
+                return await self._llm.complete(messages, temperature=0.3, max_tokens=8000)
+
+        resp = await ask(msgs)
         if not resp.success or not resp.text.strip():
-            return None
-        block = _re.search(r"```[\w+#-]*\n(.*?)```", resp.text, _re.DOTALL)
-        code = (block.group(1) if block else resp.text).strip() + "\n"
+            return "Sorry, I couldn't reach my coding brain just now. Please try again in a moment."
+        text_out = resp.text
+        # Long programs hit the model's output limit mid-file: ask it to carry on until the code block closes.
+        for _ in range(3):
+            body = _re.sub(r"^.*?```[\w+#.-]*[ \t]*\n", "", text_out, count=1, flags=_re.DOTALL)
+            finished = "```" in body or (language == "html" and "</html>" in text_out.lower())
+            if finished:
+                break
+            log.info("Brain: code was cut off at {n} chars -- asking the model to continue.", n=len(text_out))
+            more = await ask(msgs + [LLMMessage("assistant", text_out),
+                                     LLMMessage("user", "You were cut off. Continue the code exactly where it stopped "
+                                                        "(no repetition, no explanation) and close the code block.")])
+            if not more.success or not more.text.strip():
+                break
+            cont = _re.sub(r"^```[\w+#.-]*[ \t]*\n", "", more.text.lstrip(), count=1)
+            text_out += cont if text_out.endswith("\n") or cont.startswith("\n") else cont
+        blocks = _re.findall(r"```[\w+#.-]*[ \t]*\n(.*?)```", text_out, _re.DOTALL)
+        if blocks:
+            code = max(blocks, key=len).strip() + "\n"
+        else:                                      # an unterminated block or bare code
+            code = _re.sub(r"^```[\w+#.-]*[ \t]*\n", "", text_out.strip()).rstrip("`").strip() + "\n"
         words = _re.findall(r"[a-z0-9]+", description.lower())
-        stem = "_".join(w for w in words if w not in ("a", "an", "the", "that", "which", "to", "of", "and"))[:40] or "program"
+        skip = {"a", "an", "the", "that", "which", "to", "of", "and", "create", "make", "write", "build", "generate",
+                "code", "me", "using", "with", "in", "for", "please", "can", "you", "it", "open", "vs", "file",
+                "program", "simple", "new", "some", "html", "python", "javascript", "language", "just", "any", "kind"}
+        stem = "_".join(w for w in words if w not in skip)[:40].strip("_") or ("website" if language == "html" else "program")
         folder = user_folder("documents") / "Spidy Code"
         folder.mkdir(parents=True, exist_ok=True)
         path, n = folder / f"{stem}{ext}", 2
@@ -580,7 +616,14 @@ class Brain:
             opened = "opened it in VS Code"
         except Exception:  # noqa: BLE001
             opened = "saved it"
-        log.info("Brain: wrote {p}", p=path)
+        if language == "html":
+            try:
+                import webbrowser
+                webbrowser.open_new_tab(path.as_uri())
+                opened += " and in your browser"
+            except Exception:  # noqa: BLE001
+                pass
+        log.info("Brain: wrote {p} ({n} lines)", p=path, n=code.count("\n"))
         return f"Done! I wrote {path.name} in your Documents, in the Spidy Code folder, and {opened}."
 
     async def _announce(self, text: str) -> None:

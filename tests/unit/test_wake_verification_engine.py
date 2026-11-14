@@ -98,22 +98,23 @@ def _engine_scored(text: str, score: float):
     return eng, rec, published, done
 
 
-def test_confident_detection_with_no_words_heard_is_accepted_after_one_retry():
+def test_confident_detection_with_no_words_heard_is_rejected_after_one_retry():
+    """Silence is never a wake: accepting it let a TV wake Spidy and run its dialogue as commands."""
     eng, rec, published, done = _engine_scored("", 0.95)
     _feed(eng, n=1)
-    assert done.wait(2.0)
-    assert rec.calls == 2                                       # first look, then a longer one
-    assert any(isinstance(e, WakeWordDetectedEvent) for e in published)
-
-
-def test_weak_detection_with_no_words_heard_is_rejected():
-    eng, rec, published, done = _engine_scored("", 0.5)
-    _feed(eng, n=1)
     for _ in range(200):
-        if not eng._verifying and rec.calls:
+        if not eng._verifying and rec.calls >= 2:
             break
         threading.Event().wait(0.01)
-    assert rec.calls == 1 and not published
+    assert rec.calls == 2                                       # first look, then a longer one
+    assert not published
+
+
+def test_weak_detection_never_reaches_whisper():
+    eng, rec, published, done = _engine_scored("Hey Spidy", 0.5)
+    _feed(eng, n=20)                                            # stays below the 0.9 stage-1 gate
+    threading.Event().wait(0.05)
+    assert rec.calls == 0 and not published
 
 
 def test_confident_detection_with_other_words_is_still_rejected():

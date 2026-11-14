@@ -96,6 +96,74 @@ def normalize(text: str) -> str:
     return t.strip().rstrip(".!?").strip()
 
 
+# ── code requests ─────────────────────────────────────────────────────────────
+
+# language name -> (canonical language, file extension)
+CODE_LANGUAGES: dict[str, tuple[str, str]] = {
+    "html": ("html", ".html"), "css": ("html", ".html"), "website": ("html", ".html"), "web page": ("html", ".html"),
+    "webpage": ("html", ".html"), "landing page": ("html", ".html"), "web app": ("html", ".html"),
+    "portfolio": ("html", ".html"), "site": ("html", ".html"),
+    "python": ("python", ".py"), "py": ("python", ".py"),
+    "javascript": ("javascript", ".js"), "js": ("javascript", ".js"), "node": ("javascript", ".js"),
+    "nodejs": ("javascript", ".js"), "typescript": ("typescript", ".ts"), "ts": ("typescript", ".ts"),
+    "react": ("react", ".jsx"), "java": ("java", ".java"), "kotlin": ("kotlin", ".kt"),
+    "c++": ("c++", ".cpp"), "cpp": ("c++", ".cpp"), "c plus plus": ("c++", ".cpp"), "c#": ("c#", ".cs"),
+    "c sharp": ("c#", ".cs"), "csharp": ("c#", ".cs"), "c": ("c", ".c"), "go": ("go", ".go"), "golang": ("go", ".go"),
+    "rust": ("rust", ".rs"), "php": ("php", ".php"), "ruby": ("ruby", ".rb"), "swift": ("swift", ".swift"),
+    "sql": ("sql", ".sql"), "bash": ("bash", ".sh"), "shell": ("bash", ".sh"), "powershell": ("powershell", ".ps1"),
+    "batch": ("batch", ".bat"), "dart": ("dart", ".dart"), "r": ("r", ".r"), "lua": ("lua", ".lua"),
+    "json": ("json", ".json"), "yaml": ("yaml", ".yaml"), "markdown": ("markdown", ".md"),
+}
+_CODE_VERB = r"(?:create|make|write|build|generate|code|develop|design|program|craft|prepare|give\s+me|i\s+(?:want|need))"
+_CODE_NOUN = (r"(?:website|web\s*site|web\s*page|webpage|landing\s+page|portfolio|web\s+app|site|program|programme|"
+              r"script|app|application|game|tool|code|function|class|module|api|bot|calculator|query|"
+              r"(?:html|css|python|java\w*|c\+\+|c#|\w+)\s+file|page)")
+_LANG_RE = re.compile(r"\b(" + "|".join(sorted((re.escape(k) for k in CODE_LANGUAGES), key=len, reverse=True))
+                      + r")(?![\w+#])", re.IGNORECASE)
+
+
+def parse_code_request(text: str) -> tuple[str, str] | None:
+    """
+    ``(language, request)`` if ``text`` asks Spidy to write code, else None.
+
+    Handles "create a website using HTML", "make a calculator website", "write a python script that
+    renames files", "build a snake game in JavaScript", "open VS Code, create an HTML file, write
+    calculator code". "Create a file called notes" (no language) stays a file operation.
+    """
+    t = normalize(text)
+    low = re.sub(r"\b(?:vs|visual\s+studio)\s+code\b", "vscode", t.lower())
+    # the thing to build must follow the verb closely: "make me a simple calculator website",
+    # not "make the chrome app full screen" (verb ... noun ... more words is still fine)
+    if not re.search(rf"\b{_CODE_VERB}\b(?:\W+(?!(?:the|my|this|that)\b)\w+){{0,5}}?\W+{_CODE_NOUN}\b", low):
+        return None
+    if re.search(rf"\b{_CODE_VERB}\W+(?:the|my|this|that)\s+\w*\s*(?:app|application|site|page|game)\b", low) \
+            and not re.search(r"\b(?:code|program|script)\b", low):
+        return None
+    if re.search(r"\b(?:folder|directory|note|reminder|alarm|playlist|account|password|shortcut|backup)\b", low) \
+            and not re.search(r"\b(?:code|program|script|website|app)\b", low):
+        return None
+    lang_m = None
+    for m in _LANG_RE.finditer(low):
+        key = m.group(1).lower()
+        if key in ("c", "r", "go", "site", "page") and not re.search(
+                rf"\b(?:in|using|with|language)\s+{re.escape(key)}\b|\b{re.escape(key)}\s+(?:program|code|file|language|script)\b",
+                low):
+            if key == "site" and re.search(r"\bweb\s*site|\bsite\b", low):
+                lang_m = lang_m or m
+            continue
+        lang_m = lang_m or m
+    if lang_m is not None:
+        language = CODE_LANGUAGES[lang_m.group(1).lower()][0]
+    elif re.search(r"\b(?:website|web\s*site|web\s*page|webpage|landing\s+page|portfolio|web\s+app)\b", low):
+        language = "html"
+    else:
+        noun = re.search(r"\b(?:program|programme|script|app|application|game|tool|code|function|class|bot|calculator)\b", low)
+        if not noun:            # "create a file called x" / "make a page" with nothing code-like
+            return None
+        language = "python"
+    return language, t
+
+
 def user_folder(name: str) -> Path:
     for base in (HOME / "OneDrive", HOME):
         p = base / name.capitalize()
@@ -292,12 +360,8 @@ class QuickActions:
 
     # -- write a program to a file
     async def _create_code(self, t: str, low: str) -> QuickResult | None:
-        m = re.fullmatch(r"(?:create|make|write|build|generate|code)\s+(?:me\s+)?(?:a\s+|an\s+)?(?:new\s+)?"
-                         r"(python|javascript|js|html|java|c\+\+|c#|c|bash|powershell)?\s*"
-                         r"(program|script|file|app|application|game|tool)\s*(?:that|which|to|for|:|-|called)?\s*(.+)", low)
-        if not m or (m.group(2) == "file" and not m.group(1)):    # "create a file called x" is a file operation
-            return None
-        return QuickResult(code=((m.group(1) or "python"), m.group(3).strip()))
+        req = parse_code_request(t)
+        return QuickResult(code=req) if req else None
 
     # -- websites
     async def _site(self, t: str, low: str) -> QuickResult | None:

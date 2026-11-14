@@ -34,6 +34,7 @@ log = get_logger(__name__)
 LAYOUT = {
     "rail": (40, 60), "header": (320, 56), "hero": (300, 150), "voice": (300, 560), "dock": (300, 764),
     "sugg": (1180, 170), "quick": (1180, 520), "recent": (1180, 690), "stats": (300, 840), "buttons": (1432, 34),
+    "caption": (300, 504),
 }
 INPUT_RECT = (430.0, 566.0, 580.0, 44.0)
 PAGE_RECT = (300.0, 170.0, 1190.0, 650.0)
@@ -93,6 +94,42 @@ class ChatPage(QWidget):
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.scale(self.k, self.k)
         art.draw_card(p, QRectF(1, 1, PAGE_RECT[2] - 2, PAGE_RECT[3] - 2), 28)
+
+
+class CaptionBar(RefWidget):
+    """Live captions: what Spidy is hearing you say, word by word while you talk."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(860, 52, parent)
+        self.caption = ""
+        self.final = False
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self._clear = QTimer(self)
+        self._clear.setSingleShot(True)
+        self._clear.timeout.connect(lambda: self.set_caption("", False))
+
+    def set_caption(self, caption: str, final: bool) -> None:
+        self.caption, self.final = caption.strip(), final
+        if self.caption:
+            self._clear.start(6000 if final else 15000)
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        if not self.caption:
+            return
+        p = self.begin()
+        font = pal.font(19)
+        from PySide6.QtGui import QFontMetricsF
+        shown = self.caption if len(self.caption) <= 110 else "…" + self.caption[-109:]
+        width = min(self.ref_w - 4, QFontMetricsF(font).horizontalAdvance(shown) + 120)
+        card = QRectF((self.ref_w - width) / 2, 4, width, self.ref_h - 8)
+        p.setBrush(QBrush(QColor(8, 10, 14, 215)))
+        p.setPen(QPen(pal.with_alpha(pal.RED_BRIGHT, 150 if not self.final else 70), 1.2))
+        p.drawRoundedRect(card, 22, 22)
+        caps(p, QRectF(card.left() + 20, card.top(), 60, card.height()), "YOU", 11,
+             pal.RED_BRIGHT if not self.final else pal.MUTED, 3.0)
+        text(p, QRectF(card.left() + 84, card.top(), card.width() - 104, card.height()), shown, font,
+             pal.TEXT if not self.final else pal.MUTED)
 
 
 class ConfirmOverlay(RefWidget):
@@ -205,6 +242,7 @@ class DashboardWindow(QWidget):
         self.stats_row = StatsRow(self)
         self.buttons = WindowButtons(self)
         self.input = CommandInput(self)
+        self.caption = CaptionBar(self)
         self.chat = ChatPage(self)
         self.pages = {name: cls(self) for name, cls in PAGES.items()}     # every menu screen is real
         self.chat.hide()
@@ -214,7 +252,7 @@ class DashboardWindow(QWidget):
             page.toast.connect(lambda t: self.show_notification("", t))
         self.confirm = ConfirmOverlay(self)
         self._confirmation_card = HUDConfirmation(self)
-        self._home = [self.hero, self.voice, self.dock, self.sugg, self.quick, self.recent]
+        self._home = [self.hero, self.voice, self.dock, self.sugg, self.quick, self.recent, self.caption]
         self._layout()
 
         self.rail.navigate.connect(self.show_page)
@@ -248,7 +286,7 @@ class DashboardWindow(QWidget):
         k = self.k
         items = {"rail": self.rail, "header": self.header, "hero": self.hero, "voice": self.voice,
                  "dock": self.dock, "sugg": self.sugg, "quick": self.quick, "recent": self.recent,
-                 "stats": self.stats_row, "buttons": self.buttons}
+                 "stats": self.stats_row, "buttons": self.buttons, "caption": self.caption}
         for key, widget in items.items():
             x, y = LAYOUT[key]
             widget.set_k(k)
@@ -383,6 +421,8 @@ class DashboardWindow(QWidget):
         self.voice.set_state(state)
         self.hero.set_state(state)
         self.pages["Voice"].set_status(state)
+        if state == "listening" and self.caption.final:
+            self.caption.set_caption("", False)          # new turn: clear the previous caption
         if state in ("idle", "wake_ready", "error"):
             self.sugg.clear_task()
         self._refresh_status()
@@ -395,6 +435,13 @@ class DashboardWindow(QWidget):
             self._toast = msg.replace("\n", " ")
             self._toast_timer.start(9000)
             self._refresh_status()
+
+    def show_caption(self, caption: str, final: bool = False) -> None:
+        """Live caption of the user's speech (partial while talking, final once understood)."""
+        self.caption.set_caption(caption, final)
+        self.caption.raise_()
+        if caption and not final:
+            self.header.set_message(f"Listening… “{caption[-70:]}”")
 
     def update_waveform(self, amplitudes) -> None:
         try:

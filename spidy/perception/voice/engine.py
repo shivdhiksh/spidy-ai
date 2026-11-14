@@ -55,6 +55,7 @@ STT and TTS are awaited in the asyncio event loop.
 from __future__ import annotations
 
 import asyncio
+import re
 import threading
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -82,7 +83,69 @@ log = get_logger(__name__)
 # (nearly) ready by the time the wake word is confirmed.
 _PREWARM_SCORE = 0.08
 # A detection this confident with *no words at all* heard by Whisper is accepted (see _verify_and_fire).
-_EMPTY_ACCEPT_SCORE = 0.85
+_EMPTY_ACCEPT_SCORE = 0.85   # (kept for compatibility; an empty transcript is never accepted any more)
+
+# Stage-1 gate, like a phone's low-power wake detector: a candidate only reaches the (expensive)
+# Whisper check if the wake model's score climbs this high within _CANDIDATE_CHUNKS. Every real
+# "Hey Spidy" in the logs peaked at 0.99+, while half of the TV/room false triggers never pass 0.9.
+_VERIFY_MIN_SCORE = 0.9
+_CANDIDATE_CHUNKS = 15       # 1.2 s at 80 ms per chunk
+
+# Whole transcripts Whisper typically invents from TV audio or room noise.
+_STOCK_PHRASES = re.compile(
+    r"^(?:thank you(?: (?:so much|very much))? for watching|thanks for watching|"
+    r"(?:please )?(?:like and )?subscribe(?: to (?:our|my|the) channel)?|"
+    r"(?:and )?i(?:'ll| will) see you (?:in the next (?:video|one)|next time)|see you (?:in the next video|next time)|"
+    r"you|hmm+|uh+|um+)$")
+
+
+def trim_process_memory() -> int:
+    """
+    Release unused memory: Python garbage, then ask Windows to page out memory this process is not
+    using right now (EmptyWorkingSet). Pages that are needed again (the wake model) come straight
+    back. Returns the working set in MB afterwards (0 if unknown).
+    """
+    import gc
+    gc.collect()
+    try:
+        import ctypes
+        import sys
+        if sys.platform != "win32":
+            return 0
+        k32 = ctypes.windll.kernel32
+        k32.GetCurrentProcess.restype = ctypes.c_void_p
+        handle = ctypes.c_void_p(k32.GetCurrentProcess())
+        ctypes.windll.psapi.EmptyWorkingSet(handle)
+        try:
+            import psutil
+            mb = int(psutil.Process().memory_info().rss / 2**20)
+        except Exception:  # noqa: BLE001
+            mb = 0
+        log.info("[RESOURCES] idle: memory handed back to Windows (working set now {mb} MB).", mb=mb)
+        return mb
+    except Exception as exc:  # noqa: BLE001
+        log.debug("memory trim failed: {exc}", exc=exc)
+        return 0
+
+
+def looks_like_background_speech(text: str) -> bool:
+    """True for transcripts that are almost certainly not a request: stock video phrases or one
+    phrase repeated over and over ("Open Teams. Open Teams. Open Teams." is a Whisper loop)."""
+    norm = re.sub(r"[^a-z' ]", " ", text.lower())
+    norm = re.sub(r"\s+", " ", norm).strip()
+    if not norm:
+        return True
+    if _STOCK_PHRASES.match(norm):
+        return True
+    parts = [p.strip() for p in re.split(r"[.!?,]+", text.lower()) if p.strip()]
+    if len(parts) >= 3:
+        top = max(parts.count(p) for p in set(parts))
+        if top >= 3 and top / len(parts) >= 0.6:
+            return True
+    words = norm.split()
+    if len(words) >= 6 and len(set(words)) / len(words) < 0.3:
+        return True
+    return False
 
 
 # ─── Voice Events ─────────────────────────────────────────────────────────────
@@ -102,6 +165,14 @@ class WakeWordDetectedEvent(Event):
 class VoiceListeningEvent(Event):
     """Published when Spidy starts recording user speech."""
     topic = "voice.listening"
+
+
+@dataclass
+class VoiceCaptionEvent(Event):
+    """Live caption of what the user is saying: partial while they talk, ``final`` when done."""
+    topic = "voice.caption"
+    text: str = ""
+    final: bool = False
 
 
 @dataclass
@@ -229,6 +300,13 @@ class VoiceEngine:
         # Stage-2 wake verification (Whisper confirms the name "Spidy" was said).
         # Silently disabled for recognizers without quick_transcribe (tests, null STT).
         self._verifying: bool = False
+        # Wake candidate waiting to clear the stage-1 gate: [deadline_chunk, model, phrase, peak score]
+        self._candidate: list | None = None
+        # Live captions of the user's speech while recording (partial Whisper passes, ~every 0.8 s).
+        self._live_captions = True
+        self._caption_token = 0
+        self._caption_at = 0
+        self._caption_future = None
         # Set when the user interrupts Spidy: the capture buffer already holds the start of their
         # request, so the next listen cycle must not wipe it.
         self._keep_buffered_audio: bool = False
@@ -590,11 +668,24 @@ class VoiceEngine:
                 log.debug("prewarm hook failed: {exc}", exc=exc)
 
     async def _resource_governor(self) -> None:
-        """Free the speech models after a quiet spell; they reload on demand."""
+        """Free the speech models after a quiet spell (they reload on demand), then hand the memory
+        nobody is touching back to Windows -- like a phone suspending a backgrounded app. Only the
+        small wake-word model keeps running."""
+        last_trim = 0.0
         while not self._stop_event.is_set():
             await asyncio.sleep(10.0)
             if self._should_release_models():
                 await asyncio.to_thread(self._release_models)
+                last_trim = 0.0
+            if self._is_idle_for(self._idle_unload) and time.monotonic() - last_trim > 300:
+                await asyncio.to_thread(trim_process_memory)
+                last_trim = time.monotonic()
+
+    def _is_idle_for(self, seconds: float) -> bool:
+        with self._state_lock:
+            idle = self._state == VoiceState.SLEEPING and not self._tts_active and not self._flush_active
+        return (idle and not self._verifying and not self._wake_detected.is_set()
+                and time.monotonic() - self._last_active >= seconds)
 
     async def _listener_health(self, every: float = 5.0, stall_after: float = 12.0) -> None:
         """Keep the wake word always available: restart a dead or stalled microphone / voice loop."""
@@ -803,8 +894,8 @@ class VoiceEngine:
 
         # [DIAG-11] Log every non-trivial score so we can see when detection gets close.
         # Threshold 0.05 catches partial matches (model needs 0.4 to trigger).
-        if score > _PREWARM_SCORE:
-            self._prewarm_models()      # no-op when the models are already loaded
+        # Nothing heavy is loaded for a mere stage-1 score any more: a TV kept the speech models resident
+        # all evening. The speech models load when a candidate clears the gate / the wake is accepted.
         if score > 0.05:
             log.info(
                 "[VOICE DIAG-11] Wake score={s:.4f} | "
@@ -841,14 +932,14 @@ class VoiceEngine:
         if not is_detected and not hasattr(self._wake_model, "_min_consecutive_frames"):
             is_detected = (score >= self._wake_threshold)
 
-        if score > 0.30 and not is_detected:
-            log.info(
+        if score > 0.30 and not is_detected and self._candidate is None:
+            log.debug(
                 "[VOICE DIAG-GATE] Score above threshold but is_detected=False | score={s:.4f} | threshold={t}",
                 s=score,
                 t=self._wake_threshold,
             )
 
-        if is_detected:
+        if is_detected and self._candidate is None:
             detected_model = getattr(self._wake_model, "last_detected_model", "") or self._wake_model.model_name
             detected_phrase = getattr(self._wake_model, "last_detected_phrase", "") or getattr(self._wake_model, "wake_phrase", detected_model)
             log.info(
@@ -857,6 +948,22 @@ class VoiceEngine:
                 model=detected_model,
                 score=score,
             )
+            if self._wake_verifier is None:
+                self._fire_wake(detected_model, detected_phrase, score)
+                return
+            self._candidate = [self._wake_chunk_counter + _CANDIDATE_CHUNKS, detected_model, detected_phrase, score]
+
+        if self._candidate is not None:
+            cand = self._candidate
+            cand[3] = max(cand[3], score)
+            if cand[3] < _VERIFY_MIN_SCORE:
+                if self._wake_chunk_counter >= cand[0]:
+                    log.info("[WAKE] candidate too weak (peak {s:.2f} < {g}) -- ignored without waking Whisper.",
+                             s=cand[3], g=_VERIFY_MIN_SCORE)
+                    self._candidate = None
+                return
+            self._candidate = None
+            _, detected_model, detected_phrase, score = cand
             if self._wake_verifier is not None:
                 # Stage 2: confirm with Whisper off the audio thread.
                 self._verifying = True
@@ -868,22 +975,18 @@ class VoiceEngine:
                     self._verify_and_fire, detected_model, detected_phrase, score,
                 )
                 return
-            self._fire_wake(detected_model, detected_phrase, score)
 
     def _verify_and_fire(self, model: str, phrase: str, score: float) -> None:
         """Worker thread: Whisper-check a wake detection, then fire or discard it."""
         try:
             audio = self._wake_verifier.collect()  # type: ignore[union-attr]
             ok, text = self._wake_verifier.verify(audio)  # type: ignore[union-attr]
-            if not ok and not text.strip() and score >= _EMPTY_ACCEPT_SCORE:
-                # Whisper heard no words at all although the wake model is very sure: the phrase may
-                # simply have been clipped. Listen a little longer; if there is still nothing to
-                # contradict the wake model (false triggers always come with *other* words), accept.
+            if not ok and not text.strip():
+                # No words at all: the phrase may have been clipped, so listen a little longer -- but
+                # never accept silence. Accepting it let a TV wake Spidy twice and run its dialogue
+                # ("Open Discord. Open Teams...") as commands.
                 audio = self._wake_verifier.collect()  # type: ignore[union-attr]
                 ok, text = self._wake_verifier.verify(audio)  # type: ignore[union-attr]
-                if not ok and not text.strip():
-                    log.info("[WAKE VERIFY] no words heard but wake score {s:.2f} is high -- accepting.", s=score)
-                    ok = True
             if not ok:
                 rms = float(np.sqrt(np.mean(audio ** 2))) if len(audio) else 0.0
                 log.info("[WAKE VERIFY] audio rms={r:.3f} peak={p:.2f}", r=rms, p=float(np.abs(audio).max()) if len(audio) else 0.0)
@@ -901,6 +1004,7 @@ class VoiceEngine:
     def _fire_wake(self, model: str, phrase: str, score: float) -> None:
         """Enter WAKING and announce the wake word (audio thread or verify thread)."""
         self._set_state(VoiceState.WAKING)
+        self._prewarm_models()          # wake confirmed: bring the conversation models in now
         # Reset OWW's temporal smoothing buffer immediately after detection.
         self._wake_model.reset_buffer()
         self._bus.publish_threadsafe(
@@ -914,6 +1018,41 @@ class VoiceEngine:
         # (In conversation mode, ContinuousVoiceController coordinates ack and listening)
         if not self._conversation_mode:
             self._wake_detected.set()
+
+    # ── Live captions ─────────────────────────────────────────────────────
+
+    def _publish_caption(self, text: str, final: bool = False) -> None:
+        try:
+            self._bus.publish_threadsafe(VoiceCaptionEvent(text=text, final=final))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("caption publish failed: {exc}", exc=exc)
+
+    def _partial_caption(self, audio: np.ndarray, token: int) -> None:
+        """Worker thread: transcribe what has been said so far and show it (skipped if outdated)."""
+        quick = getattr(self._recognizer, "quick_transcribe", None)
+        if not callable(quick) or token != self._caption_token:
+            return
+        try:
+            text = (quick(audio) or "").strip()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("partial caption failed: {exc}", exc=exc)
+            return
+        if text and token == self._caption_token:
+            self._publish_caption(text, final=False)
+
+    def _maybe_caption(self, chunks: list[np.ndarray], speech_chunks: int) -> None:
+        """Called while recording: about every 0.8 s, caption the speech so far (one job at a time)."""
+        if not self._live_captions or speech_chunks < 3 or len(chunks) - self._caption_at < 10:
+            return
+        fut = self._caption_future
+        if fut is not None and not fut.done():
+            return
+        self._caption_at = len(chunks)
+        pool = self._wake_verify_pool          # the same single worker thread as wake checks (GPU-safe)
+        if pool is None:
+            return
+        audio = np.concatenate(chunks[-int(12 * self._sample_rate / max(1, len(chunks[0]))):]).astype(np.float32)
+        self._caption_future = pool.submit(self._partial_caption, audio, self._caption_token)
 
     def _buffer_audio(self, chunk: np.ndarray) -> None:
         """Buffer audio chunks during the LISTENING state."""
@@ -994,7 +1133,18 @@ class VoiceEngine:
                 self._set_state(VoiceState.SLEEPING)
                 continue
 
+            if looks_like_background_speech(result.text):
+                log.info("[VOICE] ignoring '{t}' -- repeated/stock phrase typical of TV or noise.", t=result.text[:80])
+                self._publish_caption("", final=True)
+                self._switch_to_detecting()
+                if self._conversation_mode:
+                    self._wake_detected.set()          # keep listening for the real request
+                else:
+                    self._set_state(VoiceState.SLEEPING)
+                continue
+
             log.info("User said: '{text}'", text=result.text)
+            self._publish_caption(result.text, final=True)
 
             self._switch_to_detecting()
             # In continuous mode the session controller is now processing
@@ -1022,6 +1172,15 @@ class VoiceEngine:
             )
 
     def _record_until_silence(self) -> np.ndarray | None:
+        """Record the user's request (see ``_record_until_silence_inner``) with live captions."""
+        self._caption_token += 1
+        self._caption_at = 0
+        try:
+            return self._record_until_silence_inner()
+        finally:
+            self._caption_token += 1           # late partial captions of this recording are dropped
+
+    def _record_until_silence_inner(self) -> np.ndarray | None:
         """
         Collect audio until silence is detected or max duration reached.
 
@@ -1101,6 +1260,8 @@ class VoiceEngine:
                     ended_on_silence = True
                     break
             else:
+                if new_chunks:
+                    self._maybe_caption(all_chunks, speech_chunks_seen)
                 time.sleep(0.01)
                 continue
             break

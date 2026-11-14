@@ -58,6 +58,7 @@ class UISignalBridge(QWidget):
     state_change_requested   = Signal(str)
     message_received         = Signal(str, str)       # role, text
     notification_requested   = Signal(str, str, str)  # title, msg, level
+    caption_received         = Signal(str, bool)      # live caption of the user's speech, final?
     waveform_data_received   = Signal(object)         # list[float]
     theme_change_requested   = Signal(object)         # Theme
     task_progress_received   = Signal(str, object)    # goal, steps
@@ -109,6 +110,9 @@ class UISignalBridge(QWidget):
 
     def request_message(self, role: str, text: str) -> None:
         self.message_received.emit(role, text)
+
+    def request_caption(self, text: str, final: bool) -> None:
+        self.caption_received.emit(text, final)
 
     def request_notification(self, title: str, msg: str, level: str = "info") -> None:
         self.notification_requested.emit(title, msg, level)

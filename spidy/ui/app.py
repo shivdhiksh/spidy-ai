@@ -194,6 +194,8 @@ class SpidyApp:
         self._bridge.quit_app_requested.connect(QApplication.instance().quit)
         self._bridge.state_change_requested.connect(self._overlay.set_state)
         self._bridge.message_received.connect(self._overlay.add_message)
+        if hasattr(self._overlay, "show_caption"):
+            self._bridge.caption_received.connect(self._overlay.show_caption)
         self._bridge.notification_requested.connect(
             self._overlay.show_notification
         )
@@ -277,6 +279,7 @@ class SpidyApp:
         b.subscribe("voice.listening_stopped",  self._handle_listening_stopped)
         b.subscribe("voice.speaking_started",   self._handle_speaking_started)
         b.subscribe("voice.speaking_stopped",   self._handle_speaking_stopped)
+        b.subscribe("voice.caption",            self._handle_caption)
 
         # Wake word
         b.subscribe("wake_word.detected", self._handle_wake_detected)
@@ -386,6 +389,10 @@ class SpidyApp:
     async def _handle_listening_stopped(self, event) -> None:
         if self._bridge:
             self._bridge.request_state_change("thinking")
+
+    async def _handle_caption(self, event) -> None:
+        if self._bridge:
+            self._bridge.request_caption(getattr(event, "text", ""), bool(getattr(event, "final", False)))
 
     async def _handle_speaking_started(self, event) -> None:
         if self._bridge:
