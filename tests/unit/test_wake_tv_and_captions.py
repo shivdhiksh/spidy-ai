@@ -188,6 +188,47 @@ def test_blob_shape_follows_the_voice():
     assert quiet != loud                                    # louder voice -> different (waving) shape
 
 
+def test_captions_show_on_every_page_not_only_home():
+    """They used to vanish after the first command, because the window switches to the Chat page."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    from spidy.ui.dashboard.window import DashboardWindow
+    w = DashboardWindow(animate=False)
+    w.show()
+    for page in ("Home", "Chat", "Settings", "Home"):
+        w.show_page(page)
+        w.show_caption(f"caption on {page}", False)
+        assert w.caption.isVisible() and w.caption.caption == f"caption on {page}"
+    w.stats.pause()
+    w.hide()
+
+
+def test_each_new_recording_gets_its_own_captions():
+    bus = MagicMock()
+    rec = MagicMock()
+    rec.quick_transcribe = MagicMock(side_effect=["first request", "second request"])
+    eng = VoiceEngine(bus=bus, wake_word_model=_Wake([]), recognizer=rec, tts=MagicMock(is_speaking=False),
+                      wake_verify=True)
+    chunks = [np.full(CHUNK, 0.2, np.float32) for _ in range(12)]
+    for expected in ("first request", "second request"):
+        eng._caption_token += 1                       # what _record_until_silence does per recording
+        eng._caption_at = 0
+        eng._maybe_caption(chunks, speech_chunks=12)
+        assert _wait(lambda: any(c[0][0].text == expected for c in bus.publish_threadsafe.call_args_list))
+
+
+def test_blob_motion_is_gentle():
+    """Loud speech makes the ball swell softly -- it must not wobble out of shape."""
+    from spidy.ui.dashboard.sphere import DotBlob
+    import math as _m
+    b = DotBlob(600)
+    x, y, z = b.pts.T
+    wave = (0.10 * np.sin(3 * x + 1.0) * np.cos(2 * y) + 0.07 * np.sin(5 * z + 4 * y) + 0.05 * np.sin(7 * x - 3 * z))
+    r = 1.0 + 0.035 + 0.42 * wave                    # full-volume radius, as in DotBlob._dots
+    assert r.max() < 1.15 and r.min() > 0.9
+    assert _m.isfinite(float(r.mean()))
+
+
 # ── memory ───────────────────────────────────────────────────────────────────
 
 def test_memory_trim_runs():

@@ -230,9 +230,9 @@ class HeroHead(RefWidget):
     def _tick(self) -> None:
         # live loudness of Spidy's voice / the user's voice: fast attack, slower release = feels alive
         target = max(level_meter.current(), self.level * 0.5)
-        rate = 0.55 if target > self.voice else 0.14
+        rate = 0.3 if target > self.voice else 0.1          # smooth: follows the voice without jitter
         self.voice += (target - self.voice) * rate
-        self._phase += 0.07 + 0.09 * self.voice if self._busy() else 0.1
+        self._phase += 0.05 + 0.025 * self.voice if self._busy() else 0.06
         for i in (0, 1):
             self._tilt[i] += (self._target[i] - self._tilt[i]) * 0.14
         self._t.setInterval(40 if self._busy() else 100)   # ~25 fps when active, ~10 fps when idle

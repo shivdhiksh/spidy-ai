@@ -201,7 +201,7 @@ def test_cut_off_website_is_continued_until_complete(monkeypatch, tmp_path):
         monkeypatch.setattr("webbrowser.open_new_tab", lambda *a, **k: True)
         return await brain.process("Make a calculator website.")
     reply = asyncio.run(go())
-    f = tmp_path / "Spidy Code" / "calculator_website.html"
+    f = tmp_path / "Spidy Code" / "calculator.html"
     code = f.read_text()
     assert code.startswith("<!DOCTYPE html>") and code.rstrip().endswith("</body></html>")
     assert "const a = 1;" in code and "const b = 2;" in code

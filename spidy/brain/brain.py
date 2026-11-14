@@ -567,16 +567,38 @@ class Brain:
             rules = (f"You are an expert {language} developer. Write a complete, runnable, well-structured {language} "
                      "program that does exactly what the user asks, with short helpful comments and sensible "
                      "defaults. Single file, standard library where possible.")
-        await self._announce(f"On it! Writing your {'website' if language == 'html' else language + ' code'} now.")
+        # Focused output finishes in one pass (~1-2 min) instead of several "continue" rounds (3+ min).
+        rules += " Keep it focused: complete and working, but no padding -- aim for under about 350 lines."
+        what = "website" if language == "html" else f"{language} code"
+        await self._announce(f"On it! Writing your {what} now. This takes a minute or two, I'll tell you when it's ready.")
         msgs = [LLMMessage("system", rules + " Reply with ONLY the code in one fenced code block. No explanation."),
                 LLMMessage("user", description)]
 
         async def ask(messages):
-            try:      # a whole program/website takes the big model a few minutes
-                return await self._llm.complete(messages, temperature=0.3, max_tokens=8000, timeout=300)
+            try:      # a whole program/website takes the big model a minute or two
+                return await self._llm.complete(messages, temperature=0.3, max_tokens=14000, timeout=360)
             except TypeError:   # an LLM client without the timeout option
-                return await self._llm.complete(messages, temperature=0.3, max_tokens=8000)
+                return await self._llm.complete(messages, temperature=0.3, max_tokens=14000)
 
+        async def progress():
+            """Keep the user in the loop while the model writes (it used to be minutes of silence)."""
+            for wait, msg in ((45, f"Still writing your {what}, it's coming along nicely."),
+                              (50, "Almost there, just finishing the last parts."),
+                              (60, "Still on it. Big ones take a little longer, hang tight!")):
+                await asyncio.sleep(wait)
+                await self._announce(msg)
+
+        ticker = asyncio.create_task(progress())
+        try:
+            return await self._finish_code_file(ask, msgs, resp_language=language, description=description,
+                                                ext=ext, LLMMessage=LLMMessage, user_folder=user_folder)
+        finally:
+            ticker.cancel()
+
+    async def _finish_code_file(self, ask, msgs, resp_language, description, ext, LLMMessage, user_folder) -> str:
+        import re as _re
+        import subprocess
+        language = resp_language
         resp = await ask(msgs)
         if not resp.success or not resp.text.strip():
             return "Sorry, I couldn't reach my coding brain just now. Please try again in a moment."
@@ -603,7 +625,11 @@ class Brain:
         words = _re.findall(r"[a-z0-9]+", description.lower())
         skip = {"a", "an", "the", "that", "which", "to", "of", "and", "create", "make", "write", "build", "generate",
                 "code", "me", "using", "with", "in", "for", "please", "can", "you", "it", "open", "vs", "file",
-                "program", "simple", "new", "some", "html", "python", "javascript", "language", "just", "any", "kind"}
+                "program", "simple", "new", "some", "html", "python", "javascript", "language", "just", "any", "kind",
+                "i", "want", "need", "on", "my", "vscode", "visual", "studio", "could", "would", "like", "spidy",
+                "hey", "bro", "now", "then", "also", "show", "give"}
+        from spidy.brain.quick_actions import CODE_LANGUAGES
+        skip |= {w for k in CODE_LANGUAGES for w in k.split()}           # "java", "react", "go", ...
         stem = "_".join(w for w in words if w not in skip)[:40].strip("_") or ("website" if language == "html" else "program")
         folder = user_folder("documents") / "Spidy Code"
         folder.mkdir(parents=True, exist_ok=True)

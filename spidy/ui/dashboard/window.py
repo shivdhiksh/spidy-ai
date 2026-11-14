@@ -252,7 +252,7 @@ class DashboardWindow(QWidget):
             page.toast.connect(lambda t: self.show_notification("", t))
         self.confirm = ConfirmOverlay(self)
         self._confirmation_card = HUDConfirmation(self)
-        self._home = [self.hero, self.voice, self.dock, self.sugg, self.quick, self.recent, self.caption]
+        self._home = [self.hero, self.voice, self.dock, self.sugg, self.quick, self.recent]
         self._layout()
 
         self.rail.navigate.connect(self.show_page)
@@ -407,6 +407,7 @@ class DashboardWindow(QWidget):
             page.setVisible(key == name)
         if name in self.pages:
             self.pages[name].on_show()
+        self._place_caption()
         self.confirm.raise_()
         self._confirmation_card.raise_()
 
@@ -436,10 +437,20 @@ class DashboardWindow(QWidget):
             self._toast_timer.start(9000)
             self._refresh_status()
 
+    def _place_caption(self) -> None:
+        """Captions show on every screen: under the blob on Home, along the bottom of other pages."""
+        x, y = LAYOUT["caption"] if self._page == "Home" else (PAGE_RECT[0] + (PAGE_RECT[2] - 860) / 2,
+                                                                PAGE_RECT[1] + PAGE_RECT[3] - 66)
+        k = self.k
+        self.caption.setGeometry(round(x * k), round(y * k), round(self.caption.ref_w * k) + 1,
+                                 round(self.caption.ref_h * k) + 1)
+        self.caption.show()
+        self.caption.raise_()
+
     def show_caption(self, caption: str, final: bool = False) -> None:
         """Live caption of the user's speech (partial while talking, final once understood)."""
         self.caption.set_caption(caption, final)
-        self.caption.raise_()
+        self._place_caption()
         if caption and not final:
             self.header.set_message(f"Listening… “{caption[-70:]}”")
 

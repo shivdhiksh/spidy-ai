@@ -83,9 +83,9 @@ class DotBlob:
         breath = 0.015 * math.sin(phase * 0.8)
         if state in ("thinking", "working"):
             breath += 0.03 * math.sin(phase * 3.0)
-        r = 1.0 + breath + level * 1.05 * wave
+        r = 1.0 + breath + 0.035 * level + level * 0.42 * wave     # gentle: a soft swell, not a wobble
         x, y, z = x * r, y * r, z * r
-        yaw = phase * (0.22 + 0.35 * level) + math.radians(tilt[0]) * 2.5
+        yaw = phase * (0.22 + 0.08 * level) + math.radians(tilt[0]) * 2.5
         pitch = 0.35 + math.radians(tilt[1]) * 2.5
         cyw, syw, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
         x1, z1 = x * cyw + z * syw, -x * syw + z * cyw
