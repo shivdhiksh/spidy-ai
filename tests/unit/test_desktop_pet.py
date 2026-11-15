@@ -303,3 +303,44 @@ def test_sit_calm_stays_put_and_hidden_pet_can_come_back():
     pet.set_enabled(True)                                              # tray: "Show desktop pet"
     assert pet.isVisible()
     pet._watch.stop(); pet._hide_now()
+
+def test_cursor_near_triggers_spidey_sense_and_he_looks_at_it():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    pet._set_state("idle", 9)
+    pet.sense = 0.0
+    head = pet._head_world()
+    pet._be_aware(0.033, QPointF(head.x() + 300, head.y()))          # far away
+    assert pet.sense == 0.0
+    pet._be_aware(0.033, QPointF(head.x() + 90, head.y() + 20))      # cursor comes close on his right
+    assert pet.sense == 1.0 and pet.yaw > 30                          # tingles, turns to look
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_gets_bored_then_wakes_up_when_you_move_the_mouse():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    pet._set_state("idle", 9)
+    far = QPointF(5, 5)
+    pet._be_aware(0.033, far)
+    pet.last_activity -= 200                                          # nobody touched the mouse for a while
+    pet._be_aware(0.033, far)
+    assert pet.state in ("nap", "phone", "snack")
+    pet.grab()                                                        # the activity paints (zzz / phone / burger)
+    pet._be_aware(0.033, QPointF(40, 40))                             # you move the mouse
+    assert pet.state == "idle" and pet.bubble == "Oh! Hi boss!"
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_new_tab_makes_him_look_and_think():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    pet._set_state("idle", 9)
+    pet.fg.poll = lambda: ("tab", "New Tab - Chrome", (1000, 100, 1600, 900))
+    pet._watch_screen()
+    assert pet.thought_t > 0 and pet.thought and pet.look_hold > 0 and pet.yaw > 0
+    pet.grab()
+    pet._watch.stop(); pet._hide_now()

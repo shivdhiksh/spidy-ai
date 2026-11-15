@@ -25,6 +25,7 @@ from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMenu, QWidget
 
 from spidy.ui.pet_sprites import SpriteBank
+from spidy.ui.pet_watch import ForegroundWatcher, is_wheel_message, register_scroll_sink
 
 RED = QColor(214, 35, 43)
 RED_SHADE = QColor(168, 22, 32)
@@ -41,7 +42,7 @@ JACKET = QColor(62, 74, 78)        # dark grey-teal hoodie jacket
 SHORTS = QColor(66, 56, 52)        # dark shorts
 SNEAKER = QColor(214, 34, 44)      # red sneakers with white soles
 
-W, H = 200, 225                 # widget size while on the floor (room for bubbles and spidey-sense)
+W, H = 330, 225                 # widget size while on the floor (room for bubbles and thoughts)
 FOOT = QPointF(W / 2, H - 12)   # where his feet stand inside that widget
 SPRITE_SCALE = 0.76             # 3D sprite size on screen (x depth: nearer = bigger)
 ROAM = 150                      # depth of the floor band above the taskbar he wanders around in
@@ -508,7 +509,7 @@ def _draw_blanket(p: QPainter) -> None:
         p.drawLine(QPointF(-20, y), QPointF(20, y))
 
 
-def _draw_bubble(p: QPainter, at: QPointF, text: str, k: float) -> None:
+def _draw_bubble(p: QPainter, at: QPointF, text: str, k: float, max_right: float = 1e9) -> None:
     """A comic speech bubble whose tail points down-left at ``at``."""
     p.save()
     p.setOpacity(k)
@@ -519,6 +520,8 @@ def _draw_bubble(p: QPainter, at: QPointF, text: str, k: float) -> None:
     w = p.fontMetrics().horizontalAdvance(text) + 22
     h = 30
     r = QRectF(at.x(), at.y() - h - 10, w, h)
+    if r.right() > max_right:
+        r.moveRight(max(max_right, at.x() + 30))
     tail = QPainterPath()
     tail.moveTo(r.left() + 10, r.bottom() - 2)
     tail.lineTo(at.x() - 4, at.y() + 4)
@@ -591,7 +594,20 @@ class DesktopPet(QWidget):
         self._last_cursor: QPointF | None = None
         self.jump = None
         self.splat_rot = 90.0                    # landing angle when he falls flat
-        self.calm = False                   # "Sit calm": stays sitting in one place
+        self.calm = False
+        # awareness: the cursor, the user being away, what happens on screen
+        import time as _time
+        self._now = _time.monotonic
+        self.last_activity = self._now()
+        self.look_hold = 0.0                 # seconds left looking at something on screen
+        self.thought, self.thought_t = "", 0.0
+        self._last_react = 0.0
+        self._scrolls = 0
+        self.bored_after = 75.0              # seconds without any mouse movement before he gets bored
+        self.fg = ForegroundWatcher()
+        self._fg_timer = QTimer(self)
+        self._fg_timer.setInterval(700)
+        self._fg_timer.timeout.connect(self._watch_screen)                   # "Sit calm": stays sitting in one place
         self.perch_box = -1                 # which toy box he is sitting on (-1 = floor)
         self.boxes = PetBoxes()             # the toy boxes in his corner
         self._anim = QTimer(self)
@@ -607,6 +623,11 @@ class DesktopPet(QWidget):
     # ── lifecycle ──────────────────────────────────────────────────────────
     def start(self) -> None:
         self._watch.start()
+        self._fg_timer.start()
+        try:
+            register_scroll_sink(int(self.winId()))      # hears mouse-wheel scrolls (no global hook)
+        except Exception:  # noqa: BLE001
+            pass
         self._sync_with_ui()
 
     def set_enabled(self, on: bool) -> None:
@@ -738,6 +759,9 @@ class DesktopPet(QWidget):
         self._set_state("shoot", 0.45)
 
     def _choose_next(self) -> None:
+        if self.look_hold > 0 and self.state in ("idle", "look", "sit"):  # still watching something
+            self.state_left = 1.0
+            return
         if self.calm:                                           # sitting calmly: stay put
             self._set_state("sit", 6.0)
             return
@@ -906,11 +930,14 @@ class DesktopPet(QWidget):
             if self.hop >= 1.0:
                 self._hide_now()
                 return
+        self._be_aware(dt)
         self._check_web_cut()
         self.bubble_t = max(0.0, self.bubble_t - dt)
         for piece in self.cut_pieces:
             piece["age"] += dt
         self.cut_pieces = [pc for pc in self.cut_pieces if pc["age"] < 0.7]
+        self.thought_t = max(0.0, self.thought_t - dt)
+        self.look_hold = max(0.0, self.look_hold - dt)
         if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave", "sit"):
             self._choose_next()
         self.update()
@@ -1036,6 +1063,85 @@ class DesktopPet(QWidget):
             return
         self._set_state("hop", 0.45)
         self.clicked.emit()
+
+    # ── awareness ─────────────────────────────────────────────────────────
+    def _head_world(self) -> QPointF:
+        return QPointF(self.fx, self.fy - 92 * SPRITE_SCALE * self._depth())
+
+    def _be_aware(self, dt: float, cursor: QPointF | None = None) -> None:
+        cur = QPointF(cursor) if cursor is not None else QPointF(QCursor.pos())
+        last = getattr(self, "_aware_cursor", None)
+        self._aware_cursor = cur
+        moved = last is not None and (cur - last).manhattanLength() > 2
+        if moved:
+            self.last_activity = self._now()
+            if self.state in ("nap", "phone", "snack"):               # you're back: he wakes up
+                self.say("Oh! Hi boss!")
+                self._set_state("idle", 2.0)
+        head = self._head_world()
+        dx, dy = cur.x() - head.x(), cur.y() - head.y()
+        near = math.hypot(dx, dy) < 170
+        if near and self.state not in ("held", "fly"):
+            self.sense = 1.0                                           # spidey-sense tingles
+        if near and self.state in ("idle", "look", "sit", "wave"):
+            self.yaw = max(-90.0, min(90.0, math.degrees(math.atan2(dx, max(dy, 1.0)))))   # looks at the cursor
+            self.facing = 1 if dx >= 0 else -1
+            if self.state == "look":
+                self.state = "idle"
+        idle_for = self._now() - self.last_activity
+        if idle_for > self.bored_after and self.state in ("idle", "look", "sit") and not self.calm:
+            kind = self._rng.choice(["nap", "nap", "phone", "snack"])
+            self.fy = self._floor() if kind == "nap" else self.fy
+            self._fit_floor()
+            self._set_state(kind, 9999.0)
+            if kind == "snack":
+                self.say("Snack time!")
+
+    def say(self, text: str, secs: float = 1.6) -> None:
+        self.bubble, self.bubble_t = text, secs
+
+    def think(self, text: str, look_at: QPointF | None = None) -> None:
+        """A thought bubble, turning to look at something on screen."""
+        if self.state in ("held", "fly", "swing", "lower", "shoot", "hammock", "intro", "hop", "nap"):
+            return
+        self.thought, self.thought_t = text, 3.2
+        if look_at is not None:
+            dx = look_at.x() - self.fx
+            self.yaw = max(-90.0, min(90.0, 70.0 if dx > 40 else -70.0 if dx < -40 else 0.0))
+            self.facing = 1 if dx >= 0 else -1
+            self.look_hold = 3.0
+        if self.state in ("phone", "snack"):
+            self._set_state("idle", 3.0)
+        elif self.state == "walk":
+            self._set_state("idle", 3.0)
+
+    def _watch_screen(self) -> None:
+        """Every ~0.7 s: new tab / window / PDF in the active window, or scrolling."""
+        if not self.isVisible():
+            return
+        now = self._now()
+        change = self.fg.poll()
+        if change and now - self._last_react > 6.0:
+            kind, title, (l, t, r, b) = change
+            self._last_react = now
+            where = QPointF((l + r) / 2, (t + b) / 2)
+            lines = {"pdf": ["Reading a PDF? Nerd mode!", "Ooh, a PDF... studying, boss?"],
+                     "tab": ["Ooh, a new tab!", "What's this one?", "Hmm, new page..."],
+                     "window": ["Whatcha opening, boss?", "Ooh, what's that?"]}[kind]
+            self.think(self._rng.choice(lines), where)
+        if self._scrolls and now - self._last_react > 10.0:
+            self._last_react = now
+            self.think(self._rng.choice(["Hmm... interesting...", "Scroll, scroll, scroll...", "Ooh, keep reading!"]),
+                       QPointF(QCursor.pos()))
+        self._scrolls = 0
+
+    def nativeEvent(self, event_type, message):
+        try:
+            if is_wheel_message(int(message)):
+                self._scrolls += 1
+        except Exception:  # noqa: BLE001
+            pass
+        return super().nativeEvent(event_type, message)
 
     # ── his play corner ───────────────────────────────────────────────────
     def _near_corner(self) -> bool:
@@ -1394,6 +1500,26 @@ def _paint_3d(self, p: QPainter) -> None:
         hip = loc(QPointF(self.fx, self.fy - 62 * S / SPRITE_SCALE))
         pts = b.blit(p, "tumble", 0, int(self.t * 10), "hip_c", hip, S, self.spin)
         head = pts["head"]
+    elif st == "nap":
+        floor = loc(QPointF(self.fx, self._floor()))
+        hips = QPointF(floor.x(), floor.y() - 16 * S / SPRITE_SCALE)
+        pts = b.blit(p, "sleep", 0, 0, "hip_c", hips, S, -90)
+        head = pts["head"]
+        _zzz(p, head, self.t)
+        head = None                                                      # no spidey-sense while asleep
+    elif st in ("phone", "snack"):
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        anim = "sit" if b.has("sit") else "idle"
+        pts = b.blit(p, anim, 0, int(self.t * 0.7), "feet", feet, S)
+        head = pts["head"]
+        hand = QPointF((pts["hand_l"].x() + pts["hand_r"].x()) / 2, (pts["hand_l"].y() + pts["hand_r"].y()) / 2 - 6 * S)
+        if st == "phone":
+            _held_phone(p, hand, S, self.t)
+        else:
+            _burger(p, hand, S, self.t)
+            if int(self.t) % 4 == 0 and self.bubble_t <= 0:
+                self.say("nom nom", 1.0)
     elif st == "sit":
         feet = loc(QPointF(self.fx, self.fy))
         _shadow(p, feet, S)
@@ -1439,7 +1565,9 @@ def _paint_3d(self, p: QPainter) -> None:
         if self.sense > 0:
             _spidey_sense(p, head, self.sense)
         if self.bubble_t > 0 and self.bubble:
-            _draw_bubble(p, QPointF(head.x() + 26 * S, head.y() - 40 * S), self.bubble, min(1.0, self.bubble_t * 4))
+            _draw_bubble(p, QPointF(head.x() + 26 * S, head.y() - 40 * S), self.bubble, min(1.0, self.bubble_t * 4), self.width() - 4)
+        elif self.thought_t > 0 and self.thought:
+            _thought(p, QPointF(head.x() + 18 * S, head.y() - 34 * S), self.thought, min(1.0, self.thought_t * 3), self.width() - 4)
 
 
 def _paint_intro_3d(self, p: QPainter, S: float):
@@ -1555,6 +1683,82 @@ def _stars(p: QPainter, head: QPointF, t: float, S: float) -> None:
         p.setPen(QPen(QColor(120, 80, 0), 1.0))
         p.setBrush(QBrush(QColor(255, 215, 40)))
         p.drawPath(star)
+    p.restore()
+
+
+def _thought(p: QPainter, at: QPointF, text: str, k: float, max_right: float = 1e9) -> None:
+    """A cloud-shaped thought bubble with little trailing circles."""
+    p.save()
+    p.setOpacity(k)
+    f = p.font()
+    f.setPixelSize(13)
+    f.setItalic(True)
+    p.setFont(f)
+    w = p.fontMetrics().horizontalAdvance(text) + 26
+    h = 30
+    r = QRectF(at.x(), at.y() - h - 14, w, h)
+    if r.right() > max_right:
+        r.moveRight(max_right)                                          # keep it inside the window
+    cloud = QPainterPath()
+    cloud.addRoundedRect(r, 15, 15)
+    p.setPen(QPen(QColor(60, 64, 90), 1.6))
+    p.setBrush(QBrush(QColor(255, 255, 255, 245)))
+    p.drawPath(cloud)
+    for i, rr in enumerate((5, 3.2)):                                   # trailing thought dots
+        p.drawEllipse(QPointF(at.x() - 2 - i * 7, at.y() - 4 + i * 8), rr, rr)
+    p.setPen(QColor(40, 44, 70))
+    p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+    p.restore()
+
+
+def _held_phone(p: QPainter, hand: QPointF, S: float, t: float) -> None:
+    """A little phone in his hands with a glowing screen (and him scrolling)."""
+    p.save()
+    p.translate(hand)
+    p.scale(S / SPRITE_SCALE, S / SPRITE_SCALE)
+    p.rotate(-8)
+    glow = QRadialGradient(QPointF(0, -4), 26)
+    glow.setColorAt(0.0, QColor(120, 200, 255, 90))
+    glow.setColorAt(1.0, QColor(120, 200, 255, 0))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(glow))
+    p.drawEllipse(QPointF(0, -10), 26, 22)
+    p.setPen(QPen(QColor(10, 10, 14), 1.4))
+    p.setBrush(QBrush(QColor(28, 30, 38)))
+    p.drawRoundedRect(QRectF(-8, -16, 16, 24), 3, 3)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(110, 190, 255)))
+    p.drawRoundedRect(QRectF(-6.4, -14, 12.8, 19), 2, 2)
+    p.setBrush(QBrush(QColor(255, 255, 255, 170)))
+    off = (t * 14) % 16
+    for i in range(3):                                                  # scrolling "posts"
+        y = -12 + ((i * 6 + off) % 17)
+        p.drawRoundedRect(QRectF(-5, y, 10, 3), 1, 1)
+    p.restore()
+
+
+def _burger(p: QPainter, hand: QPointF, S: float, t: float) -> None:
+    """A tiny burger he is munching on (with a bite missing)."""
+    p.save()
+    p.translate(hand.x(), hand.y() - 2 * math.sin(t * 6) ** 2)
+    p.scale(S / SPRITE_SCALE, S / SPRITE_SCALE)
+    outline = QPen(QColor(70, 40, 20), 1.2)
+    p.setPen(outline)
+    bun = QLinearGradient(QPointF(0, -14), QPointF(0, 6))
+    bun.setColorAt(0.0, QColor(240, 170, 80))
+    bun.setColorAt(1.0, QColor(190, 110, 40))
+    p.setBrush(QBrush(bun))
+    p.drawChord(QRectF(-13, -16, 26, 20), 0, 180 * 16)                   # top bun
+    p.setBrush(QBrush(QColor(90, 190, 70)))
+    p.drawRoundedRect(QRectF(-14, -7, 28, 4), 2, 2)                     # lettuce
+    p.setBrush(QBrush(QColor(110, 60, 35)))
+    p.drawRoundedRect(QRectF(-13, -4, 26, 6), 3, 3)                     # patty
+    p.setBrush(QBrush(bun))
+    p.drawRoundedRect(QRectF(-12, 2, 24, 6), 3, 3)                      # bottom bun
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(255, 240, 200)))
+    for sx, sy in ((-5, -11), (2, -13), (7, -9)):                       # sesame seeds
+        p.drawEllipse(QPointF(sx, sy), 1.3, 0.8)
     p.restore()
 
 
