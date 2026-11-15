@@ -275,6 +275,10 @@ def head_color(ch: Character, p):
         col[(e < 1.42) & front] = C["eye_frame"]
         col[(e < 1.18) & front] = C["eye_rim"]
         col[(e < 1.0) & front] = C["eye"]
+        if expr == "closed":                                                       # asleep: eyes shut
+            lid = (e < 1.42) & front
+            col[lid] = C["suit"]
+            col[lid & (np.abs(ry + 0.02) < 0.018)] = C["eye_rim"]
         if expr == "dizzy":                                                         # @_@ spiral eyes
             rr = np.sqrt(ex ** 2 + (ey - 0.02) ** 2)
             ang = np.arctan2(ey - 0.02, ex) * side
@@ -568,6 +572,12 @@ def sit(i, n):                       # sitting calmly on the floor, hands restin
                 head_tilt=b * 3)
 
 
+def nap(i, n):                       # dozing while sitting: eyes closed, head nodding
+    b = math.sin(2 * math.pi * i / n)
+    return Pose(hip_l=86, knee_l=40, hip_r=82, knee_r=46, bob=-0.30, arm_l=(30, 22, 40), arm_r=(30, 22, 40),
+                head_tilt=8 + b * 5, expr="closed")
+
+
 def sleep(i, n):
     return Pose(arm_l=(0, 8, 10), arm_r=(0, 8, 10), head_tilt=6)
 
@@ -585,6 +595,7 @@ ANIMS = {
     "tumble": (lambda i, n: tumble(i, n), 4, [0]),
     "dizzy": (lambda i, n: dizzy(i, n), 2, [0]),
     "sit": (sit, 2, [0]),
+    "nap": (nap, 2, [0]),
 }
 
 

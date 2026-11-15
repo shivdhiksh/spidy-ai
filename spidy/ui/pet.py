@@ -1091,7 +1091,6 @@ class DesktopPet(QWidget):
         idle_for = self._now() - self.last_activity
         if idle_for > self.bored_after and self.state in ("idle", "look", "sit") and not self.calm:
             kind = self._rng.choice(["nap", "nap", "phone", "snack"])
-            self.fy = self._floor() if kind == "nap" else self.fy
             self._fit_floor()
             self._set_state(kind, 9999.0)
             if kind == "snack":
@@ -1500,12 +1499,12 @@ def _paint_3d(self, p: QPainter) -> None:
         hip = loc(QPointF(self.fx, self.fy - 62 * S / SPRITE_SCALE))
         pts = b.blit(p, "tumble", 0, int(self.t * 10), "hip_c", hip, S, self.spin)
         head = pts["head"]
-    elif st == "nap":
-        floor = loc(QPointF(self.fx, self._floor()))
-        hips = QPointF(floor.x(), floor.y() - 16 * S / SPRITE_SCALE)
-        pts = b.blit(p, "sleep", 0, 0, "hip_c", hips, S, -90)
-        head = pts["head"]
-        _zzz(p, head, self.t)
+    elif st == "nap":                                                  # dozing off sitting up, eyes closed
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        anim = "nap" if b.has("nap") else "sit"
+        pts = b.blit(p, anim, 0, int(self.t * 0.6), "feet", feet, S)
+        _zzz(p, pts["head"], self.t)
         head = None                                                      # no spidey-sense while asleep
     elif st in ("phone", "snack"):
         feet = loc(QPointF(self.fx, self.fy))
