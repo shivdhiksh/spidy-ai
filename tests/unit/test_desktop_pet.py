@@ -73,6 +73,44 @@ def test_disabled_pet_stays_hidden():
     pet._watch.stop()
 
 
+def test_web_swing_from_anywhere_lands_back_on_the_floor():
+    """Top edge, corners, side walls: shoot a web, zip up, swing, lower down -- always back on the taskbar."""
+    pet, _ = _pet()
+    pet.start()
+    floor = pet._floor()
+    anchors = set()
+    for seed in range(10):
+        pet._rng.seed(seed)
+        pet._set_state("shoot", 0.45)
+        anchors.add((round(pet.anchor.x()) < 50, round(pet.anchor.y()) < 10))
+        seen = set()
+        for _ in range(900):
+            pet._tick()
+            seen.add(pet.state)
+            if pet.state == "idle" and "lower" in seen:
+                break
+        assert {"shoot", "swing", "lower"} <= seen
+        assert pet.state == "idle" and abs(pet.fy - floor) < 2
+    assert len(anchors) >= 2                          # webs went to different kinds of places
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_web_line_is_drawn_while_hanging():
+    pet, _ = _pet()
+    pet.start()
+    pet._rng.seed(1)
+    pet._set_state("shoot", 0.45)
+    for _ in range(40):
+        pet._tick()
+    assert pet.state == "swing"
+    img = pet.grab().toImage()
+    a = pet._local(pet.anchor)
+    near_anchor = [img.pixelColor(int(a.x()) + dx, int(a.y()) + dy) for dx in (-1, 0, 1) for dy in (2, 4, 6)
+                   if 0 <= int(a.x()) + dx < img.width() and 0 <= int(a.y()) + dy < img.height()]
+    assert any(c.alpha() > 0 and c.lightness() > 150 for c in near_anchor)     # white web visible at the anchor
+    pet._watch.stop(); pet._hide_now()
+
+
 def test_pet_walks_around():
     pet, _ = _pet()
     pet.start()
