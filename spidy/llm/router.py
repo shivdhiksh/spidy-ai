@@ -106,6 +106,8 @@ class LLMRouter(BaseLLMClient):
         self._session_id = session_id
         # Track consecutive failures per provider index
         self._failure_counts: dict[int, int] = {i: 0 for i in range(len(providers))}
+        self._last_failure: dict[int, float] = {}
+        self._retry_after = 20.0          # seconds: a tripped provider gets another try after this
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -135,7 +137,7 @@ class LLMRouter(BaseLLMClient):
 
         for idx, provider in enumerate(self._providers):
             # Skip providers that have exceeded failure threshold
-            if self._failure_counts.get(idx, 0) >= self._failure_threshold:
+            if self._is_tripped(idx):
                 log.debug(
                     "Skipping provider '{p}' (failure threshold reached).",
                     p=getattr(provider, "provider_name", str(idx)),
@@ -229,6 +231,7 @@ class LLMRouter(BaseLLMClient):
 
             # Provider failed
             self._failure_counts[idx] = self._failure_counts.get(idx, 0) + 1
+            self._last_failure[idx] = time.monotonic()
             last_error = response.error_message
             log.warning(
                 "LLM provider '{p}' failed (failures={n}): {err}",
@@ -262,7 +265,7 @@ class LLMRouter(BaseLLMClient):
         Falls back to non-streaming complete() if the primary stream fails.
         """
         for idx, provider in enumerate(self._providers):
-            if self._failure_counts.get(idx, 0) >= self._failure_threshold:
+            if self._is_tripped(idx):
                 continue
             provider_name = getattr(provider, "provider_name", f"provider_{idx}")
             try:
@@ -308,6 +311,17 @@ class LLMRouter(BaseLLMClient):
             else:
                 results[name] = True  # Assume healthy if no health_check method
         return results
+
+    def _is_tripped(self, idx: int) -> bool:
+        """Skip a provider that keeps failing -- but only for a while (a dropped Wi-Fi must not
+        kill Spidy's brain until restart), and never when every provider is tripped."""
+        if self._failure_counts.get(idx, 0) < self._failure_threshold:
+            return False
+        if time.monotonic() - self._last_failure.get(idx, 0.0) >= self._retry_after:
+            return False                                   # cooled down: give it another try
+        all_tripped = all(self._failure_counts.get(i, 0) >= self._failure_threshold
+                          for i in range(len(self._providers)))
+        return not all_tripped
 
     def reset_failures(self) -> None:
         """Reset all failure counters (e.g. after user re-enables a provider)."""
