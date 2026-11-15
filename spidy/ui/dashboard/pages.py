@@ -532,8 +532,8 @@ class SettingsPage(FunctionPage):
 
     def _set_autostart(self, on: bool) -> None:
         try:
-            from spidy.desktop.autostart import disable_autostart, enable_autostart
-            ok = enable_autostart(background=True) if on else disable_autostart()
+            from spidy.desktop.autostart import disable_autostart, ensure_reliable_autostart, remove_logon_task
+            ok = bool(ensure_reliable_autostart(background=True)) if on else (remove_logon_task() | disable_autostart())
             self.toast.emit(("Autostart on" if on else "Autostart off") if ok else "Could not change autostart")
         except Exception as exc:  # noqa: BLE001
             log.warning("Autostart change failed: {e}", e=exc)
@@ -547,8 +547,8 @@ class SettingsPage(FunctionPage):
 
     def on_show(self) -> None:
         try:
-            from spidy.desktop.autostart import is_autostart_enabled
-            on = bool(is_autostart_enabled())
+            from spidy.desktop.autostart import is_autostart_enabled, is_logon_task_installed
+            on = bool(is_autostart_enabled()) or is_logon_task_installed()
         except Exception:  # noqa: BLE001
             on = False
         self.autostart.blockSignals(True)

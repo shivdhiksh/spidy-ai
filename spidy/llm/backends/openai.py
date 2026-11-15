@@ -131,15 +131,34 @@ class OpenAIClient(BaseLLMClient):
             "max_tokens": max_tokens if max_tokens is not None else self._max_tokens,
             "stream": True,
         }
-        try:
-            chunks = await asyncio.to_thread(self._post_stream, "/chat/completions", payload)
-            for chunk in chunks:
-                delta = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                if delta:
-                    yield delta
-        except Exception as exc:  # noqa: BLE001
-            log.warning("OpenAIClient stream error: {exc}", exc=exc)
-            return
+        # Truly live: a reader thread pushes each SSE delta onto a queue as it arrives (the old version
+        # collected the whole answer first, so "streaming" only started once the model had finished).
+        import threading
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+        _END = object()
+
+        def reader() -> None:
+            try:
+                for chunk in self._iter_stream("/chat/completions", payload):
+                    choice = (chunk.get("choices") or [{}])[0]
+                    delta = (choice.get("delta") or {}).get("content") or ""
+                    if delta:
+                        loop.call_soon_threadsafe(q.put_nowait, delta)
+            except Exception as exc:  # noqa: BLE001
+                loop.call_soon_threadsafe(q.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, _END)
+
+        threading.Thread(target=reader, name="llm-stream", daemon=True).start()
+        while True:
+            item = await q.get()
+            if item is _END:
+                return
+            if isinstance(item, Exception):
+                log.warning("OpenAIClient stream error: {exc}", exc=item)
+                return
+            yield item
 
     async def close(self) -> None:
         """No persistent connection to close."""
@@ -174,6 +193,23 @@ class OpenAIClient(BaseLLMClient):
         req = urllib.request.Request(url, headers=self._headers(), method="GET")
         with urllib.request.urlopen(req, timeout=self._timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
+
+    def _iter_stream(self, path: str, payload: dict):
+        """Yield SSE chunks from the streaming endpoint as they arrive (blocking; run in a thread)."""
+        url = f"{self._base_url}{path}"
+        data = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(url, data=data, headers=self._headers(), method="POST")
+        with urllib.request.urlopen(req, timeout=max(self._timeout, 120)) as resp:
+            for line in resp:
+                line = line.strip().decode("utf-8", errors="replace")
+                if line.startswith("data: "):
+                    payload_str = line[6:]
+                    if payload_str == "[DONE]":
+                        return
+                    try:
+                        yield json.loads(payload_str)
+                    except json.JSONDecodeError:
+                        pass
 
     def _post_stream(self, path: str, payload: dict) -> list[dict]:
         """Collect SSE chunks from OpenAI streaming endpoint."""

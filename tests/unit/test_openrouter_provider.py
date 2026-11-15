@@ -485,7 +485,7 @@ class TestOpenRouterClientBasics:
             {"choices": [{"delta": {"content": "He"}}]},
             {"choices": [{"delta": {"content": "llo"}}]},
         ]
-        with patch.object(client, "_post_stream", return_value=chunks):
+        with patch.object(client, "_iter_stream", return_value=chunks):
             tokens = [tok async for tok in client.stream(_MSG)]
         assert "".join(tokens) == "Hello"
 

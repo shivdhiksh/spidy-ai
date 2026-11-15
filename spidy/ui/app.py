@@ -126,6 +126,7 @@ class SpidyApp:
         self._setup_tray()
         self._setup_hotkey()
         self._setup_event_subscriptions()
+        self._setup_pet()
 
         # Show initial overlay if not background mode
         if self._config.ui.enabled:
@@ -465,6 +466,25 @@ class SpidyApp:
     def _on_overlay_closed(self) -> None:
         from spidy.ui.events import UIClosedEvent
         self._publish_sync(UIClosedEvent())
+
+    def _setup_pet(self) -> None:
+        """The little desktop Spidey: on screen while the HUD is closed; click him to open Spidy."""
+        self._pet = None
+        if not getattr(self._config.ui, "desktop_pet", True) or self._overlay is None:
+            return
+        try:
+            from spidy.ui.pet import DesktopPet
+            ov = self._overlay
+
+            def hud_on_screen() -> bool:
+                return ov.isVisible() and not ov.isMinimized() and ov.windowOpacity() > 0.05
+
+            self._pet = DesktopPet(ui_visible=hud_on_screen)
+            self._pet.clicked.connect(self._on_show_requested)
+            self._pet.start()
+            log.info("[PET] desktop Spidey ready.")
+        except Exception as exc:  # noqa: BLE001 -- the pet is a toy; never let it stop Spidy
+            log.warning("[PET] could not start the desktop pet: {exc}", exc=exc)
 
     def _on_show_requested(self) -> None:
         self.show_hud()

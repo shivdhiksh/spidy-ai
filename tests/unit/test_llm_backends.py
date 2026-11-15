@@ -147,7 +147,7 @@ class TestOpenAIClient:
             {"choices": [{"delta": {"content": "Hel"}}]},
             {"choices": [{"delta": {"content": "lo"}}]},
         ]
-        with patch.object(client, "_post_stream", return_value=chunks):
+        with patch.object(client, "_iter_stream", return_value=chunks):
             tokens = []
             async for tok in client.stream(_MSG):
                 tokens.append(tok)
@@ -157,7 +157,7 @@ class TestOpenAIClient:
     async def test_stream_error_yields_nothing(self):
         import urllib.error
         client = self._make_client()
-        with patch.object(client, "_post_stream", side_effect=urllib.error.URLError("x")):
+        with patch.object(client, "_iter_stream", side_effect=urllib.error.URLError("x")):
             tokens = []
             async for tok in client.stream(_MSG):
                 tokens.append(tok)

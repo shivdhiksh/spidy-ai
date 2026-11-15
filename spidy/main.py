@@ -102,6 +102,19 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _boot_note(msg: str) -> None:
+    """One line per start in %LOCALAPPDATA%\\Spidy\\boot.log, written before anything heavy loads, so
+    a start that dies early (or never happens) after a reboot can be told apart."""
+    try:
+        import datetime
+        d = Path(os.environ.get("LOCALAPPDATA", str(Path.home()))) / "Spidy"
+        d.mkdir(parents=True, exist_ok=True)
+        with open(d / "boot.log", "a", encoding="utf-8") as f:
+            f.write(f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} pid={os.getpid()} {msg}\n")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def main() -> None:
     """
     Production entry point.
@@ -109,6 +122,7 @@ def main() -> None:
     Parses CLI arguments, creates SpidyCore, and runs it.
     Handles top-level exceptions with a clear error message.
     """
+    _boot_note(f"start args={sys.argv[1:]} cwd={os.getcwd()}")
     # Delayed import so logging is not configured at import time
     from spidy.core.app import SpidyCore
 
@@ -122,22 +136,25 @@ def main() -> None:
         sys.exit(0 if sent else 1)
 
     if opts.install_autostart:
-        from spidy.desktop.autostart import enable_autostart
-        ok = enable_autostart(background=True)
-        print(f"[Spidy] Autostart registration: {'SUCCESS' if ok else 'FAILED'}")
-        sys.exit(0 if ok else 1)
+        from spidy.desktop.autostart import ensure_reliable_autostart
+        how = ensure_reliable_autostart(background=True)
+        print(f"[Spidy] Autostart registration: SUCCESS via {'Task Scheduler (login + unlock)' if how == 'task' else 'registry Run key'}")
+        sys.exit(0)
 
     if opts.uninstall_autostart:
-        from spidy.desktop.autostart import disable_autostart
+        from spidy.desktop.autostart import disable_autostart, remove_logon_task
+        remove_logon_task()
         ok = disable_autostart()
         print(f"[Spidy] Autostart unregistration: {'SUCCESS' if ok else 'FAILED'}")
         sys.exit(0 if ok else 1)
 
     if opts.status_autostart:
-        from spidy.desktop.autostart import is_autostart_enabled, get_autostart_command
+        from spidy.desktop.autostart import TASK_NAME, get_autostart_command, is_autostart_enabled, is_logon_task_installed
+        task = is_logon_task_installed()
         enabled = is_autostart_enabled()
         cmd = get_autostart_command()
-        print(f"[Spidy] Autostart enabled: {enabled} (cmd: {cmd})")
+        print(f"[Spidy] Startup task '{TASK_NAME}': {'installed (login + unlock)' if task else 'not installed'}"
+              f" | registry Run entry: {enabled} (cmd: {cmd})")
         sys.exit(0)
 
     if opts.supervise:

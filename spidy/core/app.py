@@ -209,8 +209,11 @@ class SpidyCore:
             from spidy.core.single_instance import SingleInstanceGuard
             self._single_instance_guard = SingleInstanceGuard()
             if not self._single_instance_guard.acquire():
-                if self._single_instance_guard.notify_existing_instance("RESTORE_HUD"):
-                    log.info("[SPIDY LIFECYCLE] Another Spidy instance is already running; brought existing HUD to front.")
+                # A background start (login/unlock task) only needs Spidy to be running: ping quietly
+                # instead of popping the window up on every unlock. A manual start shows the HUD.
+                ping = "PING" if self._start_hidden else "RESTORE_HUD"
+                if self._single_instance_guard.notify_existing_instance(ping):
+                    log.info("[SPIDY LIFECYCLE] Another Spidy instance is already running ({p}); exiting.", p=ping)
                     self._state = LifecycleState.STOPPED
                     self._operational_state = AppLifecycleState.STOPPED
                     return

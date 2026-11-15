@@ -596,7 +596,7 @@ class TestNvidiaClientComplete:
             {"choices": [{"delta": {"content": "Hel"}}]},
             {"choices": [{"delta": {"content": "lo NIM"}}]},
         ]
-        with patch.object(client, "_post_stream", return_value=chunks):
+        with patch.object(client, "_iter_stream", return_value=chunks):
             tokens = [tok async for tok in client.stream(_MSG)]
         assert "".join(tokens) == "Hello NIM"
 
@@ -604,7 +604,7 @@ class TestNvidiaClientComplete:
     async def test_stream_error_yields_nothing(self):
         client = self._make_client()
         with patch.object(
-            client, "_post_stream", side_effect=urllib.error.URLError("refused")
+            client, "_iter_stream", side_effect=urllib.error.URLError("refused")
         ):
             tokens = [tok async for tok in client.stream(_MSG)]
         assert tokens == []

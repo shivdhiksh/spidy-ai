@@ -148,3 +148,88 @@ def disable_autostart() -> bool:
     except Exception as exc:
         log.error("Failed to remove autostart: {exc}", exc=exc)
         return False
+
+
+# ── Task Scheduler (reliable start at every login / unlock) ───────────────────
+# The registry Run list proved unreliable on this PC: after a reboot Windows ran only three of its
+# entries and silently skipped Spidy. A per-user scheduled task (no admin needed) starts Spidy at
+# login (after a short delay so audio/OneDrive are ready) and again whenever the PC is unlocked; a
+# Spidy that is already running ignores the extra start (single-instance guard / IgnoreNew).
+
+TASK_NAME = "Spidy Assistant"
+
+
+def _task_xml(background: bool = True) -> str:
+    import getpass
+    from xml.sax.saxutils import escape
+    user = escape(os.environ.get("USERDOMAIN", "") + "\\" + getpass.getuser())
+    exe = escape(_get_pythonw_executable())
+    args = escape("-m spidy.main --supervise" + (" --background" if background else ""))
+    cwd = escape(str(PROJECT_ROOT))
+    return f"""<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Starts Spidy so "Hey Spidy" works after every boot, login and unlock.</Description></RegistrationInfo>
+  <Triggers>
+    <LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId><Delay>PT15S</Delay></LogonTrigger>
+    <SessionStateChangeTrigger><Enabled>true</Enabled><StateChange>SessionUnlock</StateChange><UserId>{user}</UserId><Delay>PT5S</Delay></SessionStateChangeTrigger>
+  </Triggers>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure>
+    <Priority>6</Priority>
+  </Settings>
+  <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>{args}</Arguments><WorkingDirectory>{cwd}</WorkingDirectory></Exec></Actions>
+</Task>"""
+
+
+def install_logon_task(background: bool = True) -> bool:
+    """Register the per-user scheduled task (replaces the Run-key entry). Returns True on success."""
+    if sys.platform != "win32":
+        return False
+    import subprocess
+    import tempfile
+    path = Path(tempfile.gettempdir()) / "spidy_task.xml"
+    path.write_text(_task_xml(background), encoding="utf-16")
+    r = subprocess.run(["schtasks", "/Create", "/TN", TASK_NAME, "/XML", str(path), "/F"],
+                       capture_output=True, text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    try:
+        path.unlink()
+    except OSError:
+        pass
+    if r.returncode != 0:
+        log.warning("[SPIDY AUTOSTART] scheduled task not created: {e}", e=(r.stderr or r.stdout).strip())
+        return False
+    log.info("[SPIDY AUTOSTART] scheduled task '{t}' registered (login + unlock).", t=TASK_NAME)
+    return True
+
+
+def is_logon_task_installed() -> bool:
+    if sys.platform != "win32":
+        return False
+    import subprocess
+    r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True, text=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return r.returncode == 0
+
+
+def remove_logon_task() -> bool:
+    if sys.platform != "win32":
+        return False
+    import subprocess
+    r = subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], capture_output=True, text=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    return r.returncode == 0
+
+
+def ensure_reliable_autostart(background: bool = True) -> str:
+    """Prefer the scheduled task; fall back to the Run key. Returns "task" or "registry"."""
+    if install_logon_task(background):
+        disable_autostart()                    # one start mechanism, not two
+        return "task"
+    enable_autostart(background)
+    return "registry"

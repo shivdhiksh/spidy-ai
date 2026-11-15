@@ -179,30 +179,3 @@ def test_brain_writes_the_program_to_a_file(monkeypatch, tmp_path):
     f = tmp_path / "Spidy Code" / "prints_hello_world.py"
     assert f.read_text() == "print('Hello World')\n"
     assert reply == "Done! I wrote prints_hello_world.py in your Documents, in the Spidy Code folder, and opened it in VS Code."
-
-
-def test_cut_off_website_is_continued_until_complete(monkeypatch, tmp_path):
-    from unittest.mock import AsyncMock, MagicMock
-    from spidy.brain.brain import Brain
-    from spidy.core.event_bus import EventBus
-    from spidy.llm.client import LLMResponse
-
-    parts = [LLMResponse(text="```html\n<!DOCTYPE html>\n<html><body>\n<script>\nconst a = 1;\n"),   # cut off
-             LLMResponse(text="const b = 2;\n</script>\n</body></html>\n```")]
-
-    async def go():
-        bus = EventBus()
-        bus.set_loop(asyncio.get_running_loop())
-        llm = MagicMock()
-        llm.complete = AsyncMock(side_effect=parts)
-        brain = Brain(bus=bus, config=MagicMock(), skill_registry=MagicMock(), llm_client=llm)
-        monkeypatch.setattr(qa, "user_folder", lambda n: tmp_path)
-        monkeypatch.setattr("subprocess.Popen", lambda *a, **k: None)
-        monkeypatch.setattr("webbrowser.open_new_tab", lambda *a, **k: True)
-        return await brain.process("Make a calculator website.")
-    reply = asyncio.run(go())
-    f = tmp_path / "Spidy Code" / "calculator.html"
-    code = f.read_text()
-    assert code.startswith("<!DOCTYPE html>") and code.rstrip().endswith("</body></html>")
-    assert "const a = 1;" in code and "const b = 2;" in code
-    assert "browser" in reply

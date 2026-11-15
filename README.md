@@ -18,14 +18,15 @@ plans multi-step tasks, and she speaks her answers in a natural female American 
 | Area | What Spidy does |
 |---|---|
 | **Voice** | Wake word ("Hey Spidy" / "Wake up Spidy"), speech-to-text, spoken replies, hands-free conversation that stays open between questions |
-| **Wake-word accuracy** | Two-stage detection: a small ONNX model fires, then Whisper confirms the name "Spidy" was really said, so TV and background voices are ignored |
+| **Wake-word accuracy** | Two-stage detection like a phone: the small ONNX model must be very sure (score 0.9+) before Whisper even runs, then Whisper must hear the name being *called* ("Hey / Okay / Wake up Spidy"). Silence never counts, and typical TV / noise phrases ("subscribe to our channel", one phrase repeated) are ignored |
 | **Apps & websites** | "Open VS Code and WhatsApp", "open YouTube": launches the real app and tells you honestly if it could not |
 | **Files** | Find and open files by name, recent-files list, quick folders |
 | **Browser** | Open sites, search, play YouTube, browser automation |
-| **Code assistant** | Write, explain and fix code; open your editor and terminal |
+| **Code assistant (live)** | Writes code *on screen*: VS Code opens and you watch the code appear as she writes it. Any language (Python, JavaScript, Java, C++, Go, SQL, HTML ...). Ask for a whole project ("a todo website with frontend and backend") and she plans the files, opens the project in VS Code and writes every file live, then tells you how to run it. Also explains and fixes code you copied |
 | **Screen vision** | "What's on my screen?", read text, summarise what you are looking at |
 | **Autonomous tasks** | Plans multi-step goals, executes them, verifies the result, and asks before anything risky |
-| **Dashboard** | A dark HUD: rotating light-sphere face that reacts to her state, live CPU/GPU/RAM/network, weather, and a working screen for every menu item |
+| **Dashboard** | "Cosmic Violet" HUD: a 3D ball of glowing dots that softly swells and ripples with her voice and yours, live captions of what you say, live CPU/GPU/RAM/network, weather, and a working screen for every menu item |
+| **Desktop pet** | While the HUD is closed a little chibi Spidey walks along your taskbar, blinks, waves and swings on a web. Click him to open Spidy; say "Hey Spidy" and he hops up and turns into the HUD. Right-click to hide him (`ui.desktop_pet` in the config) |
 | **Always on, light on resources** | Starts with Windows, lives in the tray, loads the heavy speech models only when the wake word starts to sound and frees them when idle |
 | **Everyday tasks, instantly** | Websites, Google search, weather, a daily briefing (time, weather, headlines), timers that ring, folders, file search that shows the file in Explorer, "create a Python program that…" writes a real file and opens it in VS Code, "explain / fix the code I copied" |
 | **Natural voice** | Female American voice that sounds glad about good news, gentle when something fails and curious when asking; never reads symbols, emoji or markdown aloud |
@@ -85,7 +86,9 @@ python scripts/setup_models.py --stt                              # speech recog
 python scripts/setup_models.py --wake-word                        # openWakeWord feature models
 ```
 
-The two small custom wake-word models ("Hey Spidy" and "Wake up Spidy", about 10 KB) are included in\nssets/models/wake_word/. To retrain them: python scripts/build_spidy_wake_models.py.\n\n### Add your API keys
+The two small custom wake-word models ("Hey Spidy" and "Wake up Spidy", about 10 KB) are included in `assets/models/wake_word/`. To retrain them: `python scripts/build_spidy_wake_models.py`.
+
+### Add your API keys
 
 ```powershell
 copy .env.example .env      # then edit .env
@@ -108,10 +111,16 @@ python -m spidy.main --quit          # ask a running Spidy to close
 python -m spidy.main --install-autostart     # also: --status-autostart, --uninstall-autostart
 ```
 
-Autostart runs Spidy under a small supervisor (--supervise) that starts her again if she ever crashes, like a phone keeps its assistant running. The microphone listener also restarts itself if the mic stream dies.
+This creates a per-user Windows **Task Scheduler** task, "Spidy Assistant" (no admin needed), that starts Spidy
+hidden 15 seconds after you log in and again whenever you unlock the PC. If she is already running the extra start is
+ignored, so after every boot, restart or unlock only the light wake-word listener is waiting for "Hey Spidy". (The
+older registry Run entry proved unreliable: Windows sometimes skipped it after a reboot.) Each start is noted in
+`%LOCALAPPDATA%\Spidy\boot.log`.
 
-```powershell
-```
+Spidy runs under a small supervisor (`--supervise`) that starts her again if she ever crashes, and the microphone
+listener restarts itself if the mic stream dies.
+
+
 
 ### Using the window
 

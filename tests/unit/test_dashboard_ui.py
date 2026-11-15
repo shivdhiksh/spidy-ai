@@ -326,9 +326,12 @@ def test_files_and_apps_screens_list_real_things(win, monkeypatch, tmp_path):
 def test_settings_toggles_do_real_things(win, monkeypatch):
     import spidy.desktop.autostart as auto
     calls: list[str] = []
-    monkeypatch.setattr(auto, "enable_autostart", lambda background=True, custom_cmd=None: calls.append("on") or True)
+    # the toggle now prefers the Task Scheduler task (reliable after a reboot), never touching the real one here
+    monkeypatch.setattr(auto, "ensure_reliable_autostart", lambda background=True: calls.append("on") or "task")
     monkeypatch.setattr(auto, "disable_autostart", lambda: calls.append("off") or True)
+    monkeypatch.setattr(auto, "remove_logon_task", lambda: True)
     monkeypatch.setattr(auto, "is_autostart_enabled", lambda: False)
+    monkeypatch.setattr(auto, "is_logon_task_installed", lambda: False)
     page = win.pages["Settings"]
     page.on_show()
     assert not page.autostart.isChecked()

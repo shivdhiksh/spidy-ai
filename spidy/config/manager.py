@@ -410,6 +410,7 @@ class UIConfig(BaseModel):
     height: int = 0                  # M17.2: 0 = auto-responsive
     always_on_top: bool = True
     animate: bool = True
+    desktop_pet: bool = True         # little Spidey walking on the desktop while the HUD is closed
     hotkey: str = "ctrl+space"       # Global toggle hotkey
 
     # Home screen: "dashboard" (red/blue command centre) or "classic" (the previous HUD)
