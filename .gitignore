@@ -53,3 +53,6 @@ desktop.ini
 
 # pet render previews
 assets/pet/_*.png
+
+# local Claude Code config (never publish: may contain keys)
+.claude/
