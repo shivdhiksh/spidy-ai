@@ -111,6 +111,43 @@ def test_web_line_is_drawn_while_hanging():
     pet._watch.stop(); pet._hide_now()
 
 
+def test_hammock_lounge_then_back_down():
+    """He strings a web hammock across a top corner, lounges with his phone, then drops back to the floor."""
+    pet, _ = _pet()
+    pet.start()
+    floor = pet._floor()
+    pet._rng.seed(2)
+    pet.start_hammock()
+    seen = set()
+    for _ in range(1200):
+        pet._tick()
+        seen.add(pet.state)
+        if pet.state == "hammock":
+            assert pet.hammock is not None and pet.grab().width() > 200      # net drawn across the corner
+        if pet.state == "idle" and "lower" in seen:
+            break
+    assert {"shoot", "hammock", "lower"} <= seen
+    assert pet.state == "idle" and abs(pet.fy - floor) < 2 and pet.hammock is None
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_upside_down_and_spidey_sense_poses_draw():
+    from spidy.ui.pet import upside_pose, draw_spidey_pose
+    img = QImage(220, 220, QImage.Format.Format_ARGB32)
+    for wave in (False, True):
+        img.fill(0)
+        p = QPainter(img)
+        p.translate(110, 30)
+        p.rotate(180)
+        pose = upside_pose(0.5, 0.0, wave=wave)
+        pose.sense = 1.0
+        draw_spidey_pose(p, pose)
+        p.end()
+        yellow = sum(1 for x in range(0, 220, 3) for y in range(0, 220, 3)
+                     if (c := img.pixelColor(x, y)).alpha() > 0 and c.red() > 200 and c.green() > 180 and c.blue() < 120)
+        assert yellow > 3                               # the spidey-sense squiggles are there
+
+
 def test_pet_walks_around():
     pet, _ = _pet()
     pet.start()

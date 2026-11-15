@@ -50,6 +50,9 @@ class Pose:
     leg_n: tuple[float, float] = (0.0, 0.0)      # near leg: (hip, knee bend)
     leg_f: tuple[float, float] = (0.0, 0.0)
     reach_n: float = 1.0        # near-arm length multiplier (stretches up past the big head to grip a web)
+    reach_f: float = 1.0        # far-arm length multiplier
+    phone: bool = False         # holding a tiny phone in the near hand (lounging in the hammock)
+    sense: float = 0.0          # 0..1 spidey-sense squiggles around the head
     extras: dict = field(default_factory=dict)
 
 
@@ -88,6 +91,39 @@ def _arm(p: QPainter, sh: QPointF, sh_a: float, elbow: float, near: bool, reach:
     return h
 
 
+def _phone(p: QPainter, hand: QPointF) -> None:
+    """A tiny phone held in the hand, screen glowing."""
+    p.save()
+    p.translate(hand.x() + 2, hand.y() - 9)
+    p.rotate(-12)
+    p.setPen(QPen(INK, 1.6))
+    p.setBrush(QBrush(QColor(30, 32, 40)))
+    p.drawRoundedRect(QRectF(-4.5, -8, 9, 15), 2, 2)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(QColor(120, 200, 255, 230)))
+    p.drawRoundedRect(QRectF(-3.2, -6.6, 6.4, 11.4), 1.2, 1.2)
+    p.restore()
+
+
+def _spidey_sense(p: QPainter, head: QPointF, k: float) -> None:
+    """Yellow wavy squiggles around the head: his spidey-sense is tingling."""
+    p.save()
+    p.setOpacity(min(1.0, k))
+    for i in range(7):
+        a = math.radians(-160 + i * 47)
+        r0 = 38 + 3 * math.sin(i * 1.7)
+        base = QPointF(head.x() + math.cos(a) * r0, head.y() + math.sin(a) * r0)
+        path = QPainterPath(base)
+        for j in range(1, 4):
+            along = QPointF(math.cos(a) * 4.5 * j, math.sin(a) * 4.5 * j)
+            side = 3.2 * (1 if j % 2 else -1)
+            path.lineTo(QPointF(base.x() + along.x() - math.sin(a) * side, base.y() + along.y() + math.cos(a) * side))
+        p.setPen(QPen(QColor(255, 222, 40), 3.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.drawPath(path)
+    p.restore()
+
+
 def draw_spidey_pose(p: QPainter, pose: Pose) -> dict[str, QPointF]:
     """Chibi Spidey, feet near (0, 0), facing +x. Returns key points (hands, feet, hip) in local coords."""
     out: dict[str, QPointF] = {}
@@ -99,7 +135,7 @@ def draw_spidey_pose(p: QPainter, pose: Pose) -> dict[str, QPointF]:
     depth = 4 * pose.turn                                           # far limbs shift back in 3/4 view
     # far side first (behind the body)
     out["foot_f"] = _leg(p, QPointF(hip.x() - 5 + depth * 0.4, hip.y()), *pose.leg_f, near=False)
-    out["hand_f"] = _arm(p, QPointF(-12 + depth, sh_y), *pose.arm_f, near=False)
+    out["hand_f"] = _arm(p, QPointF(-12 + depth, sh_y), *pose.arm_f, near=False, reach=pose.reach_f)
     # torso: blue sides, red chest, belt
     body = QPainterPath()
     body.moveTo(-14, -48)
@@ -170,6 +206,10 @@ def draw_spidey_pose(p: QPainter, pose: Pose) -> dict[str, QPointF]:
     p.restore()
     if not gripping:
         out["hand_n"] = _arm(p, QPointF(12 + depth * 0.3, sh_y), *pose.arm_n, near=True, reach=pose.reach_n)
+    if pose.phone:
+        _phone(p, out["hand_n"])
+    if pose.sense > 0:
+        _spidey_sense(p, QPointF(depth * 0.6, -74), pose.sense)
     p.restore()
     # map points through bob/lean so callers can attach the web exactly to a hand
     lean = math.radians(pose.lean)
@@ -206,8 +246,30 @@ def hang_pose(t: float, blink: float, swing_v: float) -> Pose:
     """Holding the web overhead with the near hand; legs dangle and trail the swing."""
     trail = max(-30.0, min(30.0, -swing_v * 12))
     return Pose(turn=0.4, blink=blink, head_tilt=-trail * 0.15,
-                arm_n=(146, 24), reach_n=2.8,                 # up along the side of the head, hand above it arm_f=(-30 + math.sin(t * 3) * 10, 30),
+                arm_n=(146, 24), reach_n=2.8,                 # up along the side of the head, hand above it
+                arm_f=(-30 + math.sin(t * 3) * 10, 30),
                 leg_n=(trail + 6 + math.sin(t * 2.6) * 6, 18), leg_f=(trail - 4 + math.sin(t * 2.6 + 1) * 6, 26))
+
+
+def upside_pose(t: float, blink: float, wave: bool = False) -> Pose:
+    """Classic upside-down hang (drawn rotated 180 degrees by the caller): the web is stuck between his
+    feet, knees splayed out wide in a diamond, hands gripping the web up at his feet -- or the front
+    hand waving down past his head while the other one holds on."""
+    sway = math.sin(t * 2.2)
+    grip_n = (-9, 4)
+    near = (180 + math.sin(t * 10) * 18, -35 + math.sin(t * 10) * 20) if wave else grip_n
+    return Pose(turn=0.1, blink=blink, head_tilt=sway * 3,
+                leg_n=(70, 120), leg_f=(-70, -120),                     # knees out, feet together
+                arm_n=near, reach_n=1.0 if wave else 1.6,
+                arm_f=(9, -4), reach_f=1.6)
+
+def lounge_pose(t: float, blink: float) -> Pose:
+    """Lying back in a web hammock (drawn rotated by the caller): one knee up, the other leg crossed,
+    near hand holding a phone in front of his face, far hand behind his head."""
+    scroll = math.sin(t * 1.3)
+    return Pose(turn=0.3, blink=blink, head_tilt=-6,
+                leg_n=(-40, -75), leg_f=(-8, -6),                         # knee up, other leg stretched out
+                arm_n=(-120 + scroll * 4, 70), arm_f=(-178, -40), reach_f=1.25, phone=True)
 
 
 def shoot_pose(blink: float, aim_deg: float) -> Pose:
@@ -237,6 +299,16 @@ def draw_web(p: QPainter, a: QPointF, b: QPointF, alpha: float = 1.0) -> None:
     p.drawLine(a, b)
     p.setPen(QPen(WEB, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
     p.drawLine(a, b)
+    # twisty strand texture: small alternating wraps along the line
+    length = math.hypot(b.x() - a.x(), b.y() - a.y())
+    if length > 20:
+        ux, uy = (b.x() - a.x()) / length, (b.y() - a.y()) / length
+        p.setPen(QPen(WEB, 1.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        n = int(length // 11)
+        for i in range(1, n):
+            cx, cy = a.x() + ux * i * 11, a.y() + uy * i * 11
+            s = 2.6 if i % 2 else -2.6
+            p.drawLine(QPointF(cx - uy * s - ux * 2, cy + ux * s - uy * 2), QPointF(cx + uy * s + ux * 2, cy - ux * s + uy * 2))
     p.setPen(QPen(WEB, 1.3))
     for i in range(6):                                            # splat
         ang = math.radians(i * 60 + 15)
@@ -261,7 +333,7 @@ class DesktopPet(QWidget):
         self._rng = random.Random()
         self.enabled = True
         self.t = 0.0
-        self.state = "idle"        # idle | walk | look | wave | shoot | swing | lower | hop
+        self.state = "idle"        # idle | walk | look | wave | shoot | swing | lower | hammock | hop
         self.state_left = 2.0
         self.facing = 1
         self.target_x = 0.0
@@ -276,7 +348,12 @@ class DesktopPet(QWidget):
         self.theta = 0.0
         self.omega = 0.0
         self.upside = False
+        self.hang_wave = False
         self.shoot_k = 0.0
+        self.sense = 0.0                   # spidey-sense squiggles (hover, surprise)
+        self.after_shoot = ""               # "hammock": the web shot is for stringing a hammock
+        self.hammock: tuple[QPointF, QPointF] | None = None
+        self.hammock_k = 0.0
         self._press: QPointF | None = None
         self._dragged = False
         self._anim = QTimer(self)
@@ -364,11 +441,16 @@ class DesktopPet(QWidget):
             self.target_x = self._rng.uniform(a.left() + 60, a.right() - 60)
             self.facing = 1 if self.target_x > self.fx else -1
         elif state == "shoot":
-            self._pick_anchor()
+            if self.after_shoot == "hammock" and self.hammock is not None:
+                self.anchor = QPointF(self.hammock[0])            # first strand goes to the hammock's top end
+            else:
+                self._pick_anchor()
             self.shoot_k = 0.0
             self.facing = 1 if self.anchor.x() >= self.fx else -1
         elif state == "hop":
             self.hop = 0.0
+        elif state == "hammock":
+            self.hammock_k = 0.0
 
     def _pick_anchor(self) -> None:
         """Somewhere to stick the web: the top edge, a top corner, or a side wall."""
@@ -385,20 +467,56 @@ class DesktopPet(QWidget):
             self.anchor = QPointF(a.left() + 2, a.top() + a.height() * self._rng.uniform(0.25, 0.55))
         else:
             self.anchor = QPointF(a.right() - 2, a.top() + a.height() * self._rng.uniform(0.25, 0.55))
-        self.upside = where == "top" and self._rng.random() < 0.35
+        self.upside = where == "top" and self._rng.random() < 0.45
+        self.hang_wave = self._rng.random() < 0.5
+
+    def start_hammock(self) -> None:
+        """String a web hammock diagonally across a top corner and lounge in it for a while."""
+        a = self._area()
+        right = self.fx > (a.left() + a.right()) / 2 if self._rng.random() < 0.8 else self._rng.random() < 0.5
+        span = min(330.0, a.width() * 0.3)
+        if right:
+            top_end = QPointF(a.right() - span, a.top() + 2)
+            wall_end = QPointF(a.right() - 2, a.top() + span * 0.62)
+        else:
+            top_end = QPointF(a.left() + span, a.top() + 2)
+            wall_end = QPointF(a.left() + 2, a.top() + span * 0.62)
+        self.hammock = (top_end, wall_end)
+        self.after_shoot = "hammock"
+        self._set_state("shoot", 0.45)
 
     def _choose_next(self) -> None:
         r = self._rng.random()
-        if r < 0.42:
+        if r < 0.40:
             self._set_state("walk", 14.0)
-        elif r < 0.56:
+        elif r < 0.52:
             self._set_state("idle", self._rng.uniform(2.0, 4.0))
-        elif r < 0.68:
+        elif r < 0.62:
             self._set_state("look", 2.6)
-        elif r < 0.78:
+        elif r < 0.71:
             self._set_state("wave", 2.4)
-        else:
+        elif r < 0.85:
             self._set_state("shoot", 0.45)
+        else:
+            self.start_hammock()
+
+    # hammock geometry: a sagging band between the two ends
+    def _hammock_point(self, s: float, offset: float = 0.0) -> QPointF:
+        a, b = self.hammock
+        sag = 58 + 4 * math.sin(self.t * 1.2)                          # gentle sway
+        mid = QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2 + sag * 2)
+        x = (1 - s) ** 2 * a.x() + 2 * (1 - s) * s * mid.x() + s ** 2 * b.x()
+        y = (1 - s) ** 2 * a.y() + 2 * (1 - s) * s * mid.y() + s ** 2 * b.y() + offset
+        return QPointF(x, y)
+
+    def _fit_hammock(self) -> None:
+        a, b = self.hammock
+        low = self._hammock_point(0.5)
+        left = min(a.x(), b.x()) - 70
+        right = max(a.x(), b.x()) + 70
+        top = min(a.y(), b.y()) - 10
+        bottom = max(low.y(), b.y()) + 90
+        self.setGeometry(QRect(int(left), int(top), int(right - left), int(bottom - top)))
 
     def _start_swing(self) -> None:
         """Web stuck: zip up -- the rope starts at the current distance and reels in."""
@@ -417,6 +535,7 @@ class DesktopPet(QWidget):
         self.blink = max(0.0, self.blink - dt * 6)
         if self._rng.random() < dt / 3.5:
             self.blink = 1.0
+        self.sense = max(0.0, self.sense - dt * 0.7)
         if self._press is not None and self._dragged:
             self.update()
             return
@@ -433,7 +552,21 @@ class DesktopPet(QWidget):
             self.shoot_k = min(1.0, self.shoot_k + dt / 0.35)
             self._fit_shoot()
             if self.shoot_k >= 1.0:
-                self._start_swing()
+                if self.after_shoot == "hammock":
+                    self.after_shoot = ""
+                    self._set_state("hammock", self._rng.uniform(10.0, 16.0))
+                    self._fit_hammock()
+                else:
+                    self._start_swing()
+        elif st == "hammock":
+            self.hammock_k = min(1.0, self.hammock_k + dt / 0.6)       # net weaves in, he settles
+            self._fit_hammock()
+            if self.state_left <= 0:                                    # climb out: drop down on a web
+                spot = self._hammock_point(0.5)
+                self.anchor = QPointF(spot.x(), spot.y() - 4)
+                self.rope, self.theta, self.omega, self.upside = 20.0, 0.0, 0.0, False
+                self.hammock = None
+                self._set_state("lower", 99.0)
         elif st in ("swing", "lower"):
             if st == "swing":
                 self.rope += (self.rope_target - self.rope) * min(1.0, dt * 2.2)        # reel in
@@ -487,8 +620,8 @@ class DesktopPet(QWidget):
             if (g - self._press).manhattanLength() > 5:
                 self._dragged = True
             if self._dragged:
-                if self.state in ("swing", "lower", "shoot"):
-                    self.state = "idle"
+                if self.state in ("swing", "lower", "shoot", "hammock"):
+                    self.state, self.hammock, self.after_shoot = "idle", None, ""
                 self.fx, self.fy = g.x(), g.y() + 40
                 self.setGeometry(QRect(int(self.fx - FOOT.x()), int(self.fy - FOOT.y()), W, H))
 
@@ -509,6 +642,7 @@ class DesktopPet(QWidget):
         m.addAction("Open Spidy", self.clicked.emit)
         m.addAction("Wave!", lambda: self._set_state("wave", 2.4))
         m.addAction("Swing on a web", lambda: self._set_state("shoot", 0.45))
+        m.addAction("Relax in a web hammock", self.start_hammock)
         m.addSeparator()
         m.addAction("Hide the pet", lambda: self.set_enabled(False))
         m.exec(e.globalPos())
@@ -523,6 +657,8 @@ class DesktopPet(QWidget):
         st = self.state
         if st in ("swing", "lower"):
             self._paint_hanging(p)
+        elif st == "hammock":
+            self._paint_hammock(p)
         elif st == "shoot":
             self._paint_shoot(p)
         else:
@@ -551,7 +687,63 @@ class DesktopPet(QWidget):
             pose = idle_pose(self.t, self.blink, look=math.sin(self.t * 2.2))
         else:
             pose = idle_pose(self.t, self.blink)
+        pose.sense = self.sense
         draw_spidey_pose(p, pose)
+
+    def _paint_hammock(self, p: QPainter) -> None:
+        """A woven web hammock across the corner, Spidey lying back in it scrolling his phone."""
+        if self.hammock is None:
+            return
+        k = self.hammock_k
+        a, b = self.hammock
+        n = 22
+        top = [self._local(self._hammock_point(i / n)) for i in range(n + 1)]
+        bot = [self._local(self._hammock_point(i / n, offset=26 * math.sin(math.pi * i / n))) for i in range(n + 1)]
+        shown = max(2, int((n + 1) * min(1.0, k * 1.4)))
+        p.save()
+        for pts, w in ((top, 2.2), (bot, 1.8)):                          # two rims
+            path = QPainterPath(pts[0])
+            for q in pts[1:shown]:
+                path.lineTo(q)
+            p.setBrush(Qt.BrushStyle.NoBrush)
+            p.setPen(QPen(QColor(20, 20, 30, 140), w + 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawPath(path)
+            p.setPen(QPen(WEB, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+            p.drawPath(path)
+        p.setPen(QPen(QColor(246, 248, 255, 210), 1.1))                  # diamond mesh
+        for i in range(min(shown, n)):
+            p.drawLine(top[i], bot[i + 1])
+            p.drawLine(bot[i], top[i + 1])
+        draw_web(p, self._local(a), top[0])
+        draw_web(p, self._local(b), top[-1])
+        p.restore()
+        if k < 0.35:
+            return
+        # lie back in the sag of the hammock: hips in the dip, head toward the higher end
+        s = 0.5
+        here = self._hammock_point(s, offset=13)
+        ahead, behind = self._hammock_point(s - 0.06), self._hammock_point(s + 0.06)
+        dx, dy = ahead.x() - behind.x(), ahead.y() - behind.y()       # along the net, toward the top end
+        L = math.hypot(dx, dy) or 1.0
+        tx, ty = dx / L, dy / L
+        nx, ny = (-ty, tx) if tx > 0 else (ty, -tx)                    # normal pointing up, out of the net
+        if ny > 0:
+            nx, ny = -nx, -ny
+        hips = self._local(QPointF(here.x() + nx * 10, here.y() + ny * 10))
+        ang = math.degrees(math.atan2(tx, -ty))                         # body's "up" (head) along the net
+        p.save()
+        p.setOpacity(min(1.0, (k - 0.35) / 0.4))
+        p.translate(hips)
+        p.rotate(ang)
+        side = 1 if (nx * math.cos(math.radians(ang)) + ny * math.sin(math.radians(ang))) < 0 else -1
+        p.scale(side, 1)                                                # chest faces up, away from the net
+        p.translate(0, 24)                                              # put his hips at the origin
+        pose = lounge_pose(self.t, self.blink)
+        pose.sense = self.sense
+        draw_spidey_pose(p, pose)
+        p.restore()
+    def enterEvent(self, _e) -> None:
+        self.sense = 1.0                                                # spidey-sense tingles when you come close
 
     def _paint_shoot(self, p: QPainter) -> None:
         foot = self._local(QPointF(self.fx, self.fy))
@@ -575,17 +767,22 @@ class DesktopPet(QWidget):
         p.translate(grip)
         p.rotate(-math.degrees(self.theta))                           # hang along the rope
         if self.upside:
-            # upside down: the web is stuck to his feet, head hangs down, arms dangle and sway
+            # classic upside-down hang: web on his feet, knees out, hands gripping the web (or one waving)
             p.rotate(180)
-            sway = math.sin(self.t * 3)
-            pose = Pose(turn=0.2, blink=self.blink, head_tilt=sway * 4,
-                        arm_n=(160 + sway * 14, -18), arm_f=(-160 - sway * 14, 18), leg_n=(4, 2), leg_f=(-4, 2))
+            p.scale(self.facing, 1)
+            pose = upside_pose(self.t, self.blink, wave=self.hang_wave)
+            pose.sense = self.sense
         else:
             # one hand holds the web overhead, the other relaxes, legs trail the swing
             p.scale(self.facing, 1)
             pose = hang_pose(self.t, self.blink, self.omega)
+            pose.sense = self.sense
         probe = draw_spidey_pose(_NullPainter(), pose)                 # where does the gripping part end up?
-        attach = probe["foot_n"] if self.upside else probe["hand_n"]
+        if self.upside:
+            fn, ff = probe["foot_n"], probe["foot_f"]
+            attach = QPointF((fn.x() + ff.x()) / 2, (fn.y() + ff.y()) / 2)   # between his feet
+        else:
+            attach = probe["hand_n"]
         p.translate(-attach.x(), -attach.y())                          # ...put exactly that on the rope end
         draw_spidey_pose(p, pose)
         p.restore()
