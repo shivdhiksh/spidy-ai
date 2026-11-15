@@ -246,6 +246,7 @@ class HudMorph(QObject):
             self._overlay.restore_hud()
             return
         try:
+            pet.away = True                                 # no popping back while the dots fly
             pet.setWindowOpacity(0.0)                       # gone this very instant
             img = pet.grab().toImage()
             dpr = img.devicePixelRatio() or 1.0
@@ -258,14 +259,20 @@ class HudMorph(QObject):
             self._overlay.ensure_valid_geometry()
             target, radius = self._blob_target()
         except Exception:  # noqa: BLE001 -- never let the effect block opening Spidy
+            pet.away = False
+            pet._hide_now()
             self._overlay.restore_hud()
             return
         if not dots:
+            pet.away = False
             self._overlay.restore_hud()
             return
 
         def done() -> None:
             self._running = None
+            pet.away = False
+            pet._ui_was_visible = True
+            pet._sync_with_ui()
 
         self._running = self._view
         self._view.load(dots, target, radius, None, origin, self._overlay.restore_hud, done)

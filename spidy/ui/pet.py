@@ -641,6 +641,10 @@ class DesktopPet(QWidget):
         self._sync_with_ui()
 
     def _sync_with_ui(self) -> None:
+        if getattr(self, "away", False):           # turning into the UI: stay gone until it is open
+            if self.isVisible():
+                self._hide_now()
+            return
         ui = bool(self._ui_visible())
         if ui and not self._ui_was_visible and self.isVisible() and self.state != "hop":
             self._set_state("hop", 0.45)
