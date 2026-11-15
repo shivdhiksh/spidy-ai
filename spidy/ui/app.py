@@ -212,7 +212,11 @@ class SpidyApp:
         self._bridge.show_hud_requested.connect(self._overlay.show_hud)
         self._bridge.hide_hud_requested.connect(self._overlay.hide_hud)
         self._bridge.toggle_hud_requested.connect(self._overlay.toggle_hud)
-        self._bridge.restore_hud_requested.connect(self._overlay.restore_hud)
+        # Restore goes through the pet -> dots -> HUD morph (a QObject on the Qt thread, so the
+        # wake word's cross-thread signal is queued here safely).
+        from spidy.ui.morph import HudMorph
+        self._morph = HudMorph(self._overlay, lambda: getattr(self, "_pet", None))
+        self._bridge.restore_hud_requested.connect(self._morph.restore)
         self._bridge.minimize_hud_requested.connect(self._overlay.minimize_hud)
         self._bridge.foreground_hud_requested.connect(self._overlay._ensure_foreground)
 
@@ -498,7 +502,13 @@ class SpidyApp:
             log.debug("[PET] greeting not spoken: {exc}", exc=exc)
 
     def _on_show_requested(self) -> None:
-        self.show_hud()
+        morph = getattr(self, "_morph", None)
+        if morph is not None:
+            morph.restore()
+            if self._tray:
+                self._tray.set_overlay_visible(True)
+        else:
+            self.show_hud()
 
     def _on_hide_requested(self) -> None:
         self.hide_hud()
