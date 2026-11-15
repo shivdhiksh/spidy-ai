@@ -481,10 +481,19 @@ class SpidyApp:
 
             self._pet = DesktopPet(ui_visible=hud_on_screen)
             self._pet.clicked.connect(self._on_show_requested)
+            self._pet.greet.connect(self._pet_greets)
             self._pet.start()
             log.info("[PET] desktop Spidey ready.")
         except Exception as exc:  # noqa: BLE001 -- the pet is a toy; never let it stop Spidy
             log.warning("[PET] could not start the desktop pet: {exc}", exc=exc)
+
+    def _pet_greets(self, text: str) -> None:
+        """The pet woke up and waves: Spidy says it out loud (same path as her timer announcements)."""
+        try:
+            from spidy.brain.events import BrainResponseReadyEvent
+            self._publish_sync(BrainResponseReadyEvent(session_id="pet", response_text=text, decision_mode="greeting"))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[PET] greeting not spoken: {exc}", exc=exc)
 
     def _on_show_requested(self) -> None:
         self.show_hud()

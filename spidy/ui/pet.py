@@ -19,7 +19,8 @@ import random
 from dataclasses import dataclass, field
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QColor, QGuiApplication, QPainter, QPainterPath, QPen
+from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen,
+                           QRadialGradient)
 from PySide6.QtWidgets import QMenu, QWidget
 
 RED = QColor(214, 35, 43)
@@ -29,10 +30,18 @@ BLUE_SHADE = QColor(26, 60, 150)
 INK = QColor(18, 12, 14)
 WHITE = QColor(250, 250, 255)
 WEB = QColor(246, 248, 255)
+# Miles-style street outfit (an original chibi in that style)
+SUIT = QColor(28, 28, 38)          # black suit (mask, legs)
+SUIT_RED = QColor(214, 34, 44)     # red web lines / accents
+HOOD = QColor(200, 30, 38)         # red hood
+JACKET = QColor(62, 74, 78)        # dark grey-teal hoodie jacket
+SHORTS = QColor(66, 56, 52)        # dark shorts
+SNEAKER = QColor(214, 34, 44)      # red sneakers with white soles
 
 W, H = 130, 140                 # widget size while on the floor
 FOOT = QPointF(W / 2, H - 10)   # where his feet stand inside that widget
 GRAVITY = 1400.0                # px/s^2 for the web swing
+INTRO_WAKE, INTRO_WAVE, INTRO_STAND, INTRO_END = 1.8, 2.3, 5.2, 6.1   # wake-up intro timeline (seconds)
 
 
 # ── pose & drawing ───────────────────────────────────────────────────────────
@@ -62,32 +71,56 @@ def _pt(o: QPointF, length: float, angle_deg: float) -> QPointF:
 
 
 def _limb(p: QPainter, pts: list[QPointF], color: QColor, width: float) -> None:
+    """A lit 3D tube: soft dark rim, shaded side, base colour and a specular streak (light from top-left)."""
     path = QPainterPath(pts[0])
     for q in pts[1:]:                       # straight segments with round joints = a bent elbow/knee
         path.lineTo(q)
     p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(QPen(INK, width + 3.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    p.drawPath(path)
-    p.setPen(QPen(color, width, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    p.drawPath(path)
 
+    def stroke(col: QColor, w: float, dx: float = 0.0, dy: float = 0.0) -> None:
+        p.setPen(QPen(col, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawPath(path.translated(dx, dy))
+
+    rim = QColor(color.darker(320))
+    rim.setAlpha(225)
+    stroke(rim, width + 2.2)                               # silhouette
+    stroke(color.darker(155), width)                       # shadow side
+    stroke(color, width * 0.72, -0.9, -0.9)                # lit body
+    hi = QColor(color.lighter(165))
+    hi.setAlpha(190)
+    stroke(hi, width * 0.24, -1.9, -2.0)                   # specular streak
+
+
+def _ball(p: QPainter, c: QPointF, r: float, color: QColor) -> None:
+    """A shiny shaded sphere (gloves, boots, joints)."""
+    g = QRadialGradient(QPointF(c.x() - r * 0.35, c.y() - r * 0.4), r * 1.35)
+    g.setColorAt(0.0, color.lighter(170))
+    g.setColorAt(0.35, color)
+    g.setColorAt(1.0, color.darker(210))
+    rim = QColor(color.darker(320))
+    rim.setAlpha(225)
+    p.setPen(QPen(rim, 1.4))
+    p.setBrush(QBrush(g))
+    p.drawEllipse(c, r, r)
 
 def _leg(p: QPainter, hip: QPointF, hip_a: float, knee: float, near: bool) -> QPointF:
     k = _pt(hip, 12, hip_a)
     f = _pt(k, 12, hip_a - knee)
-    _limb(p, [hip, k, f], BLUE if near else BLUE_SHADE, 8.5)
-    boot_tip = _pt(f, 6, hip_a - knee + 90)                       # boot points forward
-    _limb(p, [_pt(f, 2.5, hip_a - knee + 180), boot_tip], RED if near else RED_SHADE, 7.5)
+    _limb(p, [k, f], SUIT if near else SUIT.darker(140), 7.6)                  # black suit shin
+    _limb(p, [hip, k], SHORTS if near else SHORTS.darker(135), 10.5)           # baggy shorts
+    a = hip_a - knee
+    heel, toe = _pt(f, 3.5, a + 180 + 90 * 0), _pt(f, 7.5, a + 90)
+    _limb(p, [_pt(f, 3.0, a - 90), toe], QColor(245, 246, 250), 8.6)          # chunky white sole
+    _limb(p, [_pt(f, 2.0, a - 90), _pt(f, 5.5, a + 90)], SNEAKER if near else SNEAKER.darker(140), 6.4)
+    del heel
     return f
 
 
 def _arm(p: QPainter, sh: QPointF, sh_a: float, elbow: float, near: bool, reach: float = 1.0) -> QPointF:
     e = _pt(sh, 10.5 * reach, sh_a)
     h = _pt(e, 10 * reach, sh_a + elbow)
-    _limb(p, [sh, e, h], RED if near else RED_SHADE, 7.5)
-    p.setPen(QPen(INK, 2.2))
-    p.setBrush(QBrush(RED if near else RED_SHADE))
-    p.drawEllipse(h, 4.6, 4.6)                                      # glove
+    _limb(p, [sh, e, h], JACKET if near else JACKET.darker(140), 8.4)          # hoodie sleeve
+    _ball(p, h, 4.8, SUIT_RED if near else SUIT_RED.darker(140))               # glove
     return h
 
 
@@ -124,6 +157,137 @@ def _spidey_sense(p: QPainter, head: QPointF, k: float) -> None:
     p.restore()
 
 
+def _draw_head(p: QPainter, pose: Pose, depth: float) -> None:
+    """The big masked head as a lit 3D sphere: shading + specular shine + rim light, the mask's web
+    pattern projected onto the sphere around the face, and glossy lenses that sit on the curve."""
+    R, RY = 31.0, 29.0
+    yaw = math.radians(34 * pose.turn)                 # head turns toward where he is going
+    pitch = math.radians(-8)                           # face looks slightly down
+    p.save()
+    p.translate(depth * 0.6, -74)
+    p.rotate(pose.head_tilt)
+    head = QRectF(-R, -RY, 2 * R, 2 * RY)
+    # red hood behind the head, with a soft peak at the back
+    hood = QPainterPath()
+    hood.addEllipse(QRectF(-R - 8, -RY - 11, 2 * R + 16, 2 * RY + 17))
+    peak = QPainterPath()
+    peak.moveTo(-R * 0.75, -RY * 0.55)
+    peak.quadTo(-R * 1.05, -RY * 1.35, -R * 0.35, -RY * 1.32)
+    peak.lineTo(R * 0.1, -RY * 0.9)
+    peak.closeSubpath()
+    hood = hood.united(peak)
+    cut = QPainterPath()
+    cut.addRect(QRectF(-R - 20, -RY - 30, 2 * R + 40, RY + 30 + RY * 0.62))   # open below the cheeks
+    hood = hood.intersected(cut)
+    hg = QRadialGradient(QPointF(-R * 0.45, -RY * 0.7), R * 1.9)
+    hg.setColorAt(0.0, HOOD.lighter(150))
+    hg.setColorAt(0.4, HOOD)
+    hg.setColorAt(1.0, HOOD.darker(250))
+    p.setPen(QPen(QColor(70, 6, 10, 235), 1.8))
+    p.setBrush(QBrush(hg))
+    p.drawPath(hood)
+    # black mask as a lit sphere (cool highlight)
+    g = QRadialGradient(QPointF(-R * 0.38, -RY * 0.42), R * 1.55)
+    g.setColorAt(0.0, QColor(110, 116, 148))
+    g.setColorAt(0.28, SUIT.lighter(160))
+    g.setColorAt(0.65, SUIT)
+    g.setColorAt(1.0, QColor(6, 6, 10))
+    p.setPen(QPen(QColor(8, 8, 12, 235), 1.6))
+    p.setBrush(QBrush(g))
+    p.drawEllipse(head)
+
+    # face frame: front pole f, right u, up v (rotated by yaw/pitch)
+    def rot(x, y, z):
+        x, z = x * math.cos(yaw) + z * math.sin(yaw), -x * math.sin(yaw) + z * math.cos(yaw)
+        y, z = y * math.cos(pitch) - z * math.sin(pitch), y * math.sin(pitch) + z * math.cos(pitch)
+        return x, y, z
+
+    def on_sphere(rho, phi):
+        # rho: angle from the face centre; phi: direction around it (0 = right, 90 = up)
+        x = math.sin(rho) * math.cos(phi)
+        y = -math.sin(rho) * math.sin(phi)
+        z = math.cos(rho)
+        return rot(x, y, z)
+
+    clip = QPainterPath()
+    clip.addEllipse(head)
+    p.save()
+    p.setClipPath(clip)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+    def polyline(pts3):
+        for (x0, y0, z0), (x1, y1, z1) in zip(pts3, pts3[1:]):
+            vis = min(z0, z1)
+            if vis <= 0.02:
+                continue
+            col = QColor(220, 36, 46, int(55 + 150 * min(1.0, vis * 1.6)))   # red web lines, fade toward the edge
+            p.setPen(QPen(col, 0.8 + 0.6 * vis))
+            p.drawLine(QPointF(x0 * R, y0 * RY), QPointF(x1 * R, y1 * RY))
+
+    for i in range(12):                                 # radial strands from the face centre
+        phi = math.radians(i * 30 + 15)
+        polyline([on_sphere(math.radians(r), phi) for r in range(0, 100, 6)])
+    for rho in (16, 32, 50, 70, 90):                    # concentric rings
+        polyline([on_sphere(math.radians(rho), math.radians(a)) for a in range(0, 366, 8)])
+    # rim light on the shadow side + soft specular shine
+    rim = QRadialGradient(QPointF(R * 0.15, RY * 0.15), R * 1.05)
+    rim.setColorAt(0.86, QColor(140, 160, 230, 0))
+    rim.setColorAt(0.97, QColor(150, 170, 240, 90))
+    rim.setColorAt(1.0, QColor(150, 170, 240, 0))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(rim))
+    p.drawEllipse(head)
+    shine = QRadialGradient(QPointF(-R * 0.42, -RY * 0.5), R * 0.42)
+    shine.setColorAt(0.0, QColor(220, 228, 255, 120))
+    shine.setColorAt(1.0, QColor(255, 255, 255, 0))
+    p.setBrush(QBrush(shine))
+    p.drawEllipse(QPointF(-R * 0.42, -RY * 0.5), R * 0.45, RY * 0.36)
+    p.restore()
+
+    # glossy lenses sitting on the sphere, foreshortened as the head turns (clipped: they wrap round it)
+    p.setClipPath(clip)
+    open_ = max(0.08, 1 - pose.blink)
+    for side in (-1, 1):
+        cx, cy, cz = on_sphere(math.radians(33), math.radians(90 - side * 62))
+        if cz <= 0.05:
+            continue
+        p.save()
+        p.translate(cx * R, cy * RY)
+        squash = max(0.35, min(1.0, cz * 1.15))           # seen at an angle -> narrower
+        p.scale(side * squash, open_)
+        eye = QPainterPath()
+        eye.moveTo(-8, 5)
+        eye.quadTo(-6, -9, 6, -13)
+        eye.quadTo(17, -14, 15, -2)
+        eye.quadTo(12, 10, -8, 5)
+        p.setPen(QPen(QColor(10, 8, 12), 4.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap,
+                      Qt.PenJoinStyle.RoundJoin))
+        lens = QLinearGradient(QPointF(0, -13), QPointF(0, 8))
+        lens.setColorAt(0.0, QColor(255, 255, 255))
+        lens.setColorAt(0.7, QColor(226, 232, 245))
+        lens.setColorAt(1.0, QColor(178, 188, 212))
+        p.setBrush(QBrush(lens))
+        p.drawPath(eye)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(255, 255, 255, 235)))
+        p.drawEllipse(QPointF(3, -7), 2.4, 1.6)          # tiny reflection
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(SUIT_RED, 1.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+        p.drawPath(eye)                                    # red rim inside the black frame
+        p.restore()
+    p.setClipping(False)
+    # the hood's front edge framing the face (over the top and down the sides)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+    edge = QRectF(-R - 3, -RY - 4, 2 * R + 6, 2 * RY + 6)
+    p.setPen(QPen(QColor(70, 6, 10, 235), 9.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawArc(edge, -12 * 16, 204 * 16)
+    p.setPen(QPen(HOOD, 7, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawArc(edge, -12 * 16, 204 * 16)
+    p.setPen(QPen(HOOD.lighter(160), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawArc(edge.adjusted(-1.5, -1.5, 1.5, 1.5), 95 * 16, 70 * 16)   # highlight on the hood rim
+    p.restore()
+
+
 def draw_spidey_pose(p: QPainter, pose: Pose) -> dict[str, QPointF]:
     """Chibi Spidey, feet near (0, 0), facing +x. Returns key points (hands, feet, hip) in local coords."""
     out: dict[str, QPointF] = {}
@@ -143,67 +307,44 @@ def draw_spidey_pose(p: QPainter, pose: Pose) -> dict[str, QPointF]:
     body.lineTo(9, -20)
     body.cubicTo(14, -22, 18, -34, 14, -48)
     body.cubicTo(8, -52, -8, -52, -14, -48)
-    p.setPen(QPen(INK, 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-    p.setBrush(QBrush(BLUE))
+    torso = QLinearGradient(QPointF(-17, 0), QPointF(17, 0))       # a lit cylinder
+    torso.setColorAt(0.0, JACKET.darker(115))
+    torso.setColorAt(0.32, JACKET.lighter(140))
+    torso.setColorAt(0.6, JACKET)
+    torso.setColorAt(1.0, JACKET.darker(230))
+    p.setPen(QPen(QColor(10, 18, 50, 225), 1.8, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
+    p.setBrush(QBrush(torso))
     p.drawPath(body)
     chest = QPainterPath()
     chest.moveTo(-9 + depth * 0.5, -49)
     chest.cubicTo(-11 + depth * 0.5, -36, -7, -27, 0 + depth * 0.4, -24)
     chest.cubicTo(7, -27, 11 + depth * 0.3, -36, 9 + depth * 0.5, -49)
+    chest_g = QLinearGradient(QPointF(-11, -49), QPointF(11, -24))
+    chest_g.setColorAt(0.0, SUIT.lighter(170))               # the black suit shirt in the open jacket
+    chest_g.setColorAt(0.45, SUIT)
+    chest_g.setColorAt(1.0, SUIT.darker(160))
     p.setPen(Qt.PenStyle.NoPen)
-    p.setBrush(QBrush(RED))
+    p.setBrush(QBrush(chest_g))
     p.drawPath(chest)
-    p.setPen(QPen(INK, 1.3))
-    ex = depth * 0.45                                               # little spider emblem
+    p.setPen(QPen(SUIT_RED, 1.4))
+    ex = depth * 0.45                                               # red spider emblem on the black shirt
     p.drawLine(QPointF(ex, -42), QPointF(ex, -33))
     for dy in (-40, -36):
         p.drawLine(QPointF(ex - 4, dy - 2), QPointF(ex + 4, dy + 2))
         p.drawLine(QPointF(ex + 4, dy - 2), QPointF(ex - 4, dy + 2))
+    p.setPen(QPen(QColor(20, 26, 30, 200), 1.3))                    # open jacket edges + hood drawstrings
+    p.drawLine(QPointF(-9 + depth * 0.5, -49), QPointF(-6, -24))
+    p.drawLine(QPointF(9 + depth * 0.5, -49), QPointF(6, -24))
+    p.setPen(QPen(HOOD, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    p.drawLine(QPointF(-4 + depth * 0.4, -48), QPointF(-6 + depth * 0.4, -35))
+    p.drawLine(QPointF(4 + depth * 0.4, -48), QPointF(5 + depth * 0.4, -37))
     # near leg + near arm
     out["foot_n"] = _leg(p, QPointF(hip.x() + 5 + depth * 0.2, hip.y()), *pose.leg_n, near=True)
     out["hip"] = hip
     gripping = pose.reach_n > 1.5            # arm stretched up to a web: it goes behind the head, past the ear
     if gripping:
         out["hand_n"] = _arm(p, QPointF(12 + depth * 0.3, sh_y), *pose.arm_n, near=True, reach=pose.reach_n)
-    # head
-    p.save()
-    p.translate(depth * 0.6, -74)
-    p.rotate(pose.head_tilt)
-    head = QRectF(-31, -29, 62, 58)
-    p.setPen(QPen(INK, 2.8))
-    p.setBrush(QBrush(RED))
-    p.drawEllipse(head)
-    clip = QPainterPath()
-    clip.addEllipse(head)
-    p.save()
-    p.setClipPath(clip)
-    p.setBrush(Qt.BrushStyle.NoBrush)
-    p.setPen(QPen(QColor(95, 8, 14, 190), 1.2))
-    c = QPointF(4 * pose.turn, 4)
-    for i in range(10):
-        a = math.radians(i * 36 + 10)
-        p.drawLine(c, QPointF(c.x() + math.cos(a) * 60, c.y() + math.sin(a) * 60))
-    for r in (11, 21, 32):
-        p.drawEllipse(c, r * 1.15, r)
-    p.restore()
-    open_ = max(0.08, 1 - pose.blink)
-    for side in (-1, 1):
-        far = side < 0
-        p.save()
-        shift = 8 * pose.turn
-        p.translate(side * (13 - (3 * pose.turn if far else 0)) + shift, 0)
-        sc = (0.78 if far and pose.turn > 0.3 else 1.0)
-        p.scale(side * sc, open_)
-        eye = QPainterPath()
-        eye.moveTo(-8, 5)
-        eye.quadTo(-6, -9, 6, -13)
-        eye.quadTo(17, -14, 15, -2)
-        eye.quadTo(12, 10, -8, 5)
-        p.setPen(QPen(INK, 3.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin))
-        p.setBrush(QBrush(WHITE))
-        p.drawPath(eye)
-        p.restore()
-    p.restore()
+    _draw_head(p, pose, depth)
     if not gripping:
         out["hand_n"] = _arm(p, QPointF(12 + depth * 0.3, sh_y), *pose.arm_n, near=True, reach=pose.reach_n)
     if pose.phone:
@@ -316,10 +457,82 @@ def draw_web(p: QPainter, a: QPointF, b: QPointF, alpha: float = 1.0) -> None:
     p.restore()
 
 
+def _draw_bed(p: QPainter, floor: QPointF, mat_y: float) -> None:
+    """A cozy little 3D-shaded bed on the taskbar: wooden frame, mattress and a pillow (head end on the left)."""
+    x0, x1 = floor.x() - 128, floor.x() + 34
+    wood = QColor(150, 96, 58)
+    frame = QLinearGradient(QPointF(0, mat_y), QPointF(0, floor.y()))
+    frame.setColorAt(0.0, wood.lighter(125))
+    frame.setColorAt(1.0, wood.darker(160))
+    p.setPen(QPen(QColor(60, 34, 18, 230), 1.4))
+    p.setBrush(QBrush(frame))
+    p.drawRoundedRect(QRectF(x0, mat_y + 6, x1 - x0, floor.y() - mat_y - 6), 4, 4)        # base
+    p.drawRoundedRect(QRectF(x0 - 6, mat_y - 34, 12, floor.y() - mat_y + 34), 4, 4)       # headboard
+    p.drawRoundedRect(QRectF(x1 - 6, mat_y - 12, 12, floor.y() - mat_y + 12), 4, 4)       # footboard
+    mat = QLinearGradient(QPointF(0, mat_y - 4), QPointF(0, mat_y + 10))
+    mat.setColorAt(0.0, QColor(250, 250, 255))
+    mat.setColorAt(1.0, QColor(196, 204, 222))
+    p.setBrush(QBrush(mat))
+    p.setPen(QPen(QColor(120, 128, 150, 200), 1.2))
+    p.drawRoundedRect(QRectF(x0 + 4, mat_y - 4, x1 - x0 - 8, 14), 6, 6)
+    pil = QRadialGradient(QPointF(x0 + 30, mat_y - 14), 26)
+    pil.setColorAt(0.0, QColor(255, 255, 255))
+    pil.setColorAt(1.0, QColor(200, 208, 230))
+    p.setBrush(QBrush(pil))
+    p.drawRoundedRect(QRectF(x0 + 8, mat_y - 22, 42, 18), 9, 9)                          # pillow
+
+
+def _draw_blanket(p: QPainter) -> None:
+    """A soft blue blanket over his body (in the body's own coordinates, so it lies with him)."""
+    g = QLinearGradient(QPointF(-22, 0), QPointF(22, 0))
+    g.setColorAt(0.0, QColor(70, 120, 220))
+    g.setColorAt(0.4, QColor(120, 170, 250))
+    g.setColorAt(1.0, QColor(40, 78, 170))
+    path = QPainterPath()
+    path.moveTo(-23, -50)
+    path.cubicTo(-10, -53, 10, -53, 23, -50)
+    path.lineTo(24, 6)
+    path.cubicTo(8, 9, -8, 9, -24, 6)
+    path.closeSubpath()
+    p.setPen(QPen(QColor(20, 40, 100, 220), 1.4))
+    p.setBrush(QBrush(g))
+    p.drawPath(path)
+    p.setPen(QPen(QColor(255, 255, 255, 90), 1.0))                  # quilt stitching
+    for y in (-36, -20, -4):
+        p.drawLine(QPointF(-20, y), QPointF(20, y))
+
+
+def _draw_bubble(p: QPainter, at: QPointF, text: str, k: float) -> None:
+    """A comic speech bubble whose tail points down-left at ``at``."""
+    p.save()
+    p.setOpacity(k)
+    f = p.font()
+    f.setPixelSize(15)
+    f.setBold(True)
+    p.setFont(f)
+    w = p.fontMetrics().horizontalAdvance(text) + 22
+    h = 30
+    r = QRectF(at.x(), at.y() - h - 10, w, h)
+    tail = QPainterPath()
+    tail.moveTo(r.left() + 10, r.bottom() - 2)
+    tail.lineTo(at.x() - 4, at.y() + 4)
+    tail.lineTo(r.left() + 24, r.bottom() - 2)
+    body = QPainterPath()
+    body.addRoundedRect(r, 13, 13)
+    body = body.united(tail)
+    p.setPen(QPen(QColor(20, 20, 30), 2.0))
+    p.setBrush(QBrush(QColor(255, 255, 255)))
+    p.drawPath(body)
+    p.setPen(QColor(200, 20, 30))
+    p.drawText(r, int(Qt.AlignmentFlag.AlignCenter), text)
+    p.restore()
+
+
 # ── the pet window ───────────────────────────────────────────────────────────
 
 class DesktopPet(QWidget):
     clicked = Signal()                     # open the full Spidy UI
+    greet = Signal(str)                    # the wake-up greeting (the app has Spidy say it out loud)
 
     def __init__(self, ui_visible=None, parent=None) -> None:
         super().__init__(parent)
@@ -352,6 +565,9 @@ class DesktopPet(QWidget):
         self.shoot_k = 0.0
         self.sense = 0.0                   # spidey-sense squiggles (hover, surprise)
         self.after_shoot = ""               # "hammock": the web shot is for stringing a hammock
+        self.intro_t = 0.0                  # wake-up intro after Spidy starts (bed -> wave -> stand)
+        self._greeted = False
+        self.greeting = "Hello boss!"
         self.hammock: tuple[QPointF, QPointF] | None = None
         self.hammock_k = 0.0
         self._press: QPointF | None = None
@@ -390,7 +606,13 @@ class DesktopPet(QWidget):
     def _show_now(self) -> None:
         self.hop = 0.0
         self._place_on_floor()
-        self._set_state("idle", 1.5)
+        if not self._greeted:                    # first appearance since Spidy started (every boot/login)
+            self._greeted = True
+            self.intro_t = 0.0
+            self.state, self.state_left = "intro", 99.0
+            self._fit_intro()
+        else:
+            self._set_state("idle", 1.5)
         self.setWindowOpacity(1.0)
         self.show()
         self.raise_()
@@ -592,6 +814,17 @@ class DesktopPet(QWidget):
                 self._fit_hanging()
                 if st == "swing" and self.state_left <= 0:
                     self._set_state("lower", 99.0)
+        elif st == "intro":
+            before = self.intro_t
+            self.intro_t += dt
+            if before < INTRO_WAVE <= self.intro_t:
+                self.greet.emit(self.greeting)                       # "Hello boss!" out loud
+            if self.intro_t >= INTRO_END:
+                self.fx, self.fy = self._intro_stand_x(), self._floor()
+                self._fit_floor()
+                self._set_state("idle", 1.0)
+            else:
+                self._fit_intro()
         elif st == "hop":
             self.hop = min(1.0, self.hop + dt / 0.45)
             if self.hop >= 1.0:
@@ -600,6 +833,69 @@ class DesktopPet(QWidget):
         if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave"):
             self._choose_next()
         self.update()
+
+    # ── wake-up intro: asleep in bed -> wakes, waves "Hello boss!" -> stands up ───
+    def _intro_stand_x(self) -> float:
+        return self.fx + 34
+
+    def _fit_intro(self) -> None:
+        self.setGeometry(QRect(int(self.fx - 150), int(self.fy - 205), 280, 215))
+
+    def _paint_intro(self, p: QPainter) -> None:
+        t = self.intro_t
+        floor = self._local(QPointF(self.fx, self.fy))
+        bed_fade = 1.0 if t < INTRO_STAND else max(0.0, 1 - (t - INTRO_STAND) / 0.7)
+        mat_y = floor.y() - 26                                         # top of the mattress
+        feet_lying = QPointF(floor.x() + 20, mat_y - 16)               # lying ON the mattress, head on the pillow
+        stand = min(1.0, max(0.0, (t - INTRO_STAND) / 0.6))           # 0 lying -> 1 standing
+        ease = stand * stand * (3 - 2 * stand)
+        if bed_fade > 0:
+            p.save()
+            p.setOpacity(bed_fade)
+            _draw_bed(p, floor, mat_y)
+            p.restore()
+        # body: rotate from lying (head on the pillow, to the left) to standing beside the bed
+        feet = QPointF(feet_lying.x() + (34 - 20) * ease, feet_lying.y() + (floor.y() - feet_lying.y()) * ease)
+        ang = -90 * (1 - ease)
+        waving = INTRO_WAVE <= t < INTRO_STAND
+        asleep = t < INTRO_WAKE
+        if waving:
+            pose = wave_pose(t, self.blink)
+            w = math.sin(t * 9)
+            pose.arm_n = (92 + w * 26, -28 + w * 22)                  # straight up out of the blanket (he's lying)
+        else:
+            pose = idle_pose(t, 1.0 if asleep else self.blink)
+            if t < INTRO_STAND:
+                pose.arm_n, pose.arm_f = (6, 10), (-6, 10)            # tucked under the blanket
+        pose.sense = 0.0
+        p.save()
+        p.translate(feet)
+        p.rotate(ang)
+        draw_spidey_pose(p, pose)
+        if t < INTRO_STAND + 0.25:                                      # the blanket, thrown off as he gets up
+            p.save()
+            p.setOpacity(max(0.0, 1 - max(0.0, t - INTRO_STAND) / 0.25))
+            _draw_blanket(p)
+            p.restore()
+        if waving:                                                      # the waving arm comes out over the blanket
+            _arm(p, QPointF(12, -45), *pose.arm_n, near=True, reach=1.45)
+        p.restore()
+        a = math.radians(ang)                                           # head = feet + (0, -74) rotated by ang
+        hx, hy = feet.x() + 74 * math.sin(a), feet.y() - 74 * math.cos(a)
+        if asleep:                                                      # Z z z
+            for i in range(3):
+                k = ((t * 0.8 + i / 3) % 1.0)
+                p.save()
+                p.setOpacity(1 - k)
+                f = p.font()
+                f.setPixelSize(int(11 + 6 * k))
+                f.setBold(True)
+                p.setFont(f)
+                p.setPen(QColor(235, 240, 255))
+                p.drawText(QPointF(hx + 18 + 14 * k, hy - 26 - 30 * k), "Z")
+                p.restore()
+        if INTRO_WAVE <= t < INTRO_END - 0.2:
+            _draw_bubble(p, QPointF(hx + 22, hy - 34), self.greeting, min(1.0, (t - INTRO_WAVE) / 0.25))
 
     def _fit_shoot(self) -> None:
         a = self.anchor
@@ -659,6 +955,8 @@ class DesktopPet(QWidget):
             self._paint_hanging(p)
         elif st == "hammock":
             self._paint_hammock(p)
+        elif st == "intro":
+            self._paint_intro(p)
         elif st == "shoot":
             self._paint_shoot(p)
         else:
@@ -667,10 +965,18 @@ class DesktopPet(QWidget):
 
     def _paint_floor(self, p: QPainter) -> None:
         foot = self._local(QPointF(self.fx, self.fy))
-        # soft shadow
+        # soft contact shadow (blurred, darker in the middle)
+        sh = QRadialGradient(QPointF(foot.x(), foot.y() + 2), 24)
+        sh.setColorAt(0.0, QColor(0, 0, 0, 95))
+        sh.setColorAt(0.55, QColor(0, 0, 0, 40))
+        sh.setColorAt(1.0, QColor(0, 0, 0, 0))
         p.setPen(Qt.PenStyle.NoPen)
-        p.setBrush(QBrush(QColor(0, 0, 0, 55)))
-        p.drawEllipse(QPointF(foot.x(), foot.y() + 2), 20, 4.5)
+        p.setBrush(QBrush(sh))
+        p.save()
+        p.translate(foot.x(), foot.y() + 2)
+        p.scale(1.0, 0.24)
+        p.drawEllipse(QPointF(0, 0), 24, 24)
+        p.restore()
         p.translate(foot)
         if self.state == "hop":
             k = self.hop

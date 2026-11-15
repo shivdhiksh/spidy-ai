@@ -148,6 +148,23 @@ def test_upside_down_and_spidey_sense_poses_draw():
         assert yellow > 3                               # the spidey-sense squiggles are there
 
 
+def test_wakes_up_in_bed_waves_hello_boss_then_stands():
+    """First appearance after Spidy starts (every boot/login): asleep in bed -> wave + 'Hello boss!' -> stand up."""
+    pet, _ = _pet()
+    said = []
+    pet.greet.connect(said.append)
+    pet.start()
+    assert pet.state == "intro"
+    for _ in range(int(7 / 0.033)):
+        pet._tick()
+    assert said == ["Hello boss!"]                    # greeted exactly once
+    assert pet.state not in ("intro",) and abs(pet.fy - pet._floor()) < 2
+    pet._hide_now()
+    pet._sync_with_ui()                              # shown again later: no second greeting
+    assert pet.state != "intro"
+    pet._watch.stop(); pet._hide_now()
+
+
 def test_pet_walks_around():
     pet, _ = _pet()
     pet.start()
