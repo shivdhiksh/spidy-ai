@@ -562,6 +562,12 @@ def dizzy(i, n):                     # sat down hard after a fall: legs out, wob
                 expr="dizzy", head_tilt=w * 8)
 
 
+def sit(i, n):                       # sitting calmly on the floor, hands resting, slow breathing
+    b = math.sin(2 * math.pi * i / n)
+    return Pose(hip_l=86, knee_l=40, hip_r=82, knee_r=46, bob=-0.30, arm_l=(30, 22, 40), arm_r=(30, 22, 40),
+                head_tilt=b * 3)
+
+
 def sleep(i, n):
     return Pose(arm_l=(0, 8, 10), arm_r=(0, 8, 10), head_tilt=6)
 
@@ -578,6 +584,7 @@ ANIMS = {
     "sleep": (sleep, 1, [0]),
     "tumble": (lambda i, n: tumble(i, n), 4, [0]),
     "dizzy": (lambda i, n: dizzy(i, n), 2, [0]),
+    "sit": (sit, 2, [0]),
 }
 
 

@@ -84,6 +84,7 @@ class SystemTrayManager(QObject):
     theme_change_requested = Signal(str)
     settings_requested = Signal()
     quit_requested = Signal()
+    show_pet_requested = Signal()
     _overlay_visible_changed = Signal(bool)
 
     def __init__(self, parent: QObject | None = None) -> None:
@@ -210,6 +211,10 @@ class SystemTrayManager(QObject):
         menu.addAction(light_action)
 
         menu.addSeparator()
+
+        pet_action = QAction("🕷  Show desktop pet", menu)
+        pet_action.triggered.connect(self.show_pet_requested.emit)
+        menu.addAction(pet_action)
 
         settings_action = QAction("⚙  Settings", menu)
         settings_action.triggered.connect(self.settings_requested.emit)

@@ -286,3 +286,20 @@ def test_lands_flat_when_tipped_over_then_gets_up():
     assert seen[:4] == ["fly", "splat", "getup", "dizzy"] or seen[1:4] == ["splat", "getup", "dizzy"]
     pet.grab()                                          # every state paints
     pet._watch.stop(); pet._hide_now()
+
+def test_sit_calm_stays_put_and_hidden_pet_can_come_back():
+    pet, _ = _pet()
+    pet.start()
+    pet.set_calm(True)
+    x, y = pet.fx, pet.fy
+    for _ in range(400):
+        pet._tick()
+    assert pet.state == "sit" and (pet.fx, pet.fy) == (x, y)          # sits in one place
+    pet.grab()
+    pet.set_calm(False)
+    assert pet.state == "idle"
+    pet.set_enabled(False)
+    assert not pet.isVisible()
+    pet.set_enabled(True)                                              # tray: "Show desktop pet"
+    assert pet.isVisible()
+    pet._watch.stop(); pet._hide_now()

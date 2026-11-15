@@ -590,7 +590,8 @@ class DesktopPet(QWidget):
         self._drag_samples: list[tuple[float, QPointF]] = []
         self._last_cursor: QPointF | None = None
         self.jump = None
-        self.splat_rot = 90.0                    # (start, end, t) while hopping onto / off a box
+        self.splat_rot = 90.0                    # landing angle when he falls flat
+        self.calm = False                   # "Sit calm": stays sitting in one place
         self.perch_box = -1                 # which toy box he is sitting on (-1 = floor)
         self.boxes = PetBoxes()             # the toy boxes in his corner
         self._anim = QTimer(self)
@@ -737,6 +738,9 @@ class DesktopPet(QWidget):
         self._set_state("shoot", 0.45)
 
     def _choose_next(self) -> None:
+        if self.calm:                                           # sitting calmly: stay put
+            self._set_state("sit", 6.0)
+            return
         if self.perch_box >= 0:                                 # sitting on a box: wave, look, or hop down
             r = self._rng.random()
             if r < 0.35:
@@ -907,7 +911,7 @@ class DesktopPet(QWidget):
         for piece in self.cut_pieces:
             piece["age"] += dt
         self.cut_pieces = [pc for pc in self.cut_pieces if pc["age"] < 0.7]
-        if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave"):
+        if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave", "sit"):
             self._choose_next()
         self.update()
 
@@ -1156,12 +1160,28 @@ class DesktopPet(QWidget):
             self.fx, self.fy = spot.x(), spot.y() + 60
         self.start_fly(vx, vy, "Eek!")
 
+    def set_calm(self, on: bool) -> None:
+        """Sit calmly on the spot (on) or go back to wandering around (off)."""
+        self.calm = on
+        if on:
+            self.hammock, self.after_shoot, self.perch_box = None, "", -1
+            if self.state not in ("idle", "walk", "look", "wave", "sit", "dizzy"):
+                self.fy = self._floor()
+            self._fit_floor()
+            self._set_state("sit", 6.0)
+        else:
+            self._set_state("idle", 1.0)
+
     def contextMenuEvent(self, e) -> None:
         m = QMenu(self)
         m.addAction("Open Spidy", self.clicked.emit)
         m.addAction("Wave!", lambda: self._set_state("wave", 2.4))
         m.addAction("Swing on a web", lambda: self._set_state("shoot", 0.45))
         m.addAction("Relax in a web hammock", self.start_hammock)
+        if self.calm:
+            m.addAction("Walk around", lambda: self.set_calm(False))
+        else:
+            m.addAction("Sit calm", lambda: self.set_calm(True))
         m.addSeparator()
         m.addAction("Hide the pet", lambda: self.set_enabled(False))
         m.exec(e.globalPos())
@@ -1373,6 +1393,12 @@ def _paint_3d(self, p: QPainter) -> None:
     elif st == "fly":
         hip = loc(QPointF(self.fx, self.fy - 62 * S / SPRITE_SCALE))
         pts = b.blit(p, "tumble", 0, int(self.t * 10), "hip_c", hip, S, self.spin)
+        head = pts["head"]
+    elif st == "sit":
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        anim = "sit" if b.has("sit") else "idle"
+        pts = b.blit(p, anim, 0, int(self.t * 0.7), "feet", feet, S)
         head = pts["head"]
     elif st in ("splat", "getup"):
         feet = loc(QPointF(self.fx, self.fy))
