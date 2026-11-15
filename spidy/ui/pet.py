@@ -634,8 +634,6 @@ class DesktopPet(QWidget):
         else:
             self._set_state("idle", 1.5)
         self.setWindowOpacity(1.0)
-        self.boxes.place(self._area())
-        self.boxes.show()
         self.show()
         self.raise_()                                   # always in front of his boxes
         self._anim.start()

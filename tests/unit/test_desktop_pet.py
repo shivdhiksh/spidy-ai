@@ -265,7 +265,6 @@ def test_plays_in_his_corner_and_hops_onto_the_boxes():
     for _ in range(30):
         pet._tick()
     assert pet.perch_box == 2 and abs(pet.fx - top.x()) < 1 and abs(pet.fy - top.y()) < 1
-    assert pet.boxes.isVisible()
     pet._hide_now()
     assert not pet.boxes.isVisible()                     # boxes go away with him
     pet._watch.stop()
