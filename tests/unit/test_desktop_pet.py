@@ -386,3 +386,20 @@ def test_sitting_calm_he_turns_his_head_to_the_cursor_and_to_new_tabs():
     pet.grab()
     pet._watch.stop(); pet._hide_now()
 
+
+def test_sitting_he_takes_a_phone_or_snack_break_every_minute_or_two():
+    pet, _ = _pet()
+    pet.start()
+    pet.set_calm(True)
+    pet.last_activity = pet._now() + 10_000                # pretend you are busy (no boredom)
+    pet._next_break = 60.0
+    pet.sit_for = 59.9
+    for _ in range(5):
+        pet._tick()
+    assert pet.state in ("phone", "snack")
+    for _ in range(int(16 / 0.033)):
+        pet.last_activity = pet._now() + 10_000
+        pet._tick()
+    assert pet.state == "sit"                              # back to sitting afterwards
+    pet._watch.stop(); pet._hide_now()
+

@@ -595,7 +595,8 @@ class DesktopPet(QWidget):
         self.jump = None
         self.splat_rot = 90.0                    # landing angle when he falls flat
         self.calm = False
-        self.web_torn = False               # fell because you tore his web: gets angry
+        self.web_torn = False
+        self.sit_for = 0.0                  # seconds sitting since the last phone / snack break               # fell because you tore his web: gets angry
         # awareness: the cursor, the user being away, what happens on screen
         import time as _time
         self._now = _time.monotonic
@@ -946,6 +947,19 @@ class DesktopPet(QWidget):
             piece["age"] += dt
         self.cut_pieces = [pc for pc in self.cut_pieces if pc["age"] < 0.7]
         self.thought_t = max(0.0, self.thought_t - dt)
+        if self.state == "sit":
+            self.sit_for += dt
+            if self.sit_for > getattr(self, "_next_break", 90.0):
+                self.sit_for = 0.0
+                self._next_break = self._rng.uniform(60.0, 120.0)
+                kind = self._rng.choice(["phone", "snack"])
+                self._set_state(kind, 15.0)
+                self._break = True
+                if kind == "snack":
+                    self.say("Snack time!")
+        elif self.state in ("phone", "snack") and getattr(self, "_break", False) and self.state_left <= 0:
+            self._break = False
+            self._set_state("sit", 6.0)
         self.gaze_t = max(0.0, self.gaze_t - dt)
         self.look_hold = max(0.0, self.look_hold - dt)
         if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave", "sit"):
