@@ -595,10 +595,13 @@ class DesktopPet(QWidget):
         self.jump = None
         self.splat_rot = 90.0                    # landing angle when he falls flat
         self.calm = False
+        self.web_torn = False               # fell because you tore his web: gets angry
         # awareness: the cursor, the user being away, what happens on screen
         import time as _time
         self._now = _time.monotonic
         self.last_activity = self._now()
+        self.gaze: tuple[float, float] | None = None   # head turned toward the cursor (yaw, pitch)
+        self.gaze_t = 0.0
         self.look_hold = 0.0                 # seconds left looking at something on screen
         self.thought, self.thought_t = "", 0.0
         self._last_react = 0.0
@@ -869,7 +872,13 @@ class DesktopPet(QWidget):
                 self._set_state("getup", 0.55)
         elif st == "getup":
             if self.state_left <= 0:
-                self._set_state("dizzy", 1.6)                           # ...and sits a moment, dazed
+                if self.web_torn:
+                    self._get_angry()
+                else:
+                    self._set_state("dizzy", 1.6)
+        elif st == "angry":
+            if self.state_left <= 0:
+                self._set_state("idle", 1.5)                           # ...and sits a moment, dazed
         elif st == "shoot":
             self.shoot_k = min(1.0, self.shoot_k + dt / 0.35)
             self._fit_shoot()
@@ -937,6 +946,7 @@ class DesktopPet(QWidget):
             piece["age"] += dt
         self.cut_pieces = [pc for pc in self.cut_pieces if pc["age"] < 0.7]
         self.thought_t = max(0.0, self.thought_t - dt)
+        self.gaze_t = max(0.0, self.gaze_t - dt)
         self.look_hold = max(0.0, self.look_hold - dt)
         if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave", "sit"):
             self._choose_next()
@@ -1083,7 +1093,11 @@ class DesktopPet(QWidget):
         near = math.hypot(dx, dy) < 170
         if near and self.state not in ("held", "fly"):
             self.sense = 1.0                                           # spidey-sense tingles
-        if near and self.state in ("idle", "look", "sit", "wave"):
+        if near and self.state in ("idle", "look"):
+            # head follows the cursor: left/right and up/down
+            self.gaze = (max(-60.0, min(60.0, dx / 110 * 60)), max(-24.0, min(28.0, -dy / 90 * 28)))
+            self.gaze_t = 0.4
+        if near and self.state in ("sit", "wave"):
             self.yaw = max(-90.0, min(90.0, math.degrees(math.atan2(dx, max(dy, 1.0)))))   # looks at the cursor
             self.facing = 1 if dx >= 0 else -1
             if self.state == "look":
@@ -1095,6 +1109,11 @@ class DesktopPet(QWidget):
             self._set_state(kind, 9999.0)
             if kind == "snack":
                 self.say("Snack time!")
+
+    def _get_angry(self) -> None:
+        self.web_torn = False
+        self._set_state("angry", 2.6)
+        self.say(self._rng.choice(["Hey! My web!!", "Grrr!", "Not cool, boss!", "Hmph!"]), 2.2)
 
     def say(self, text: str, secs: float = 1.6) -> None:
         self.bubble, self.bubble_t = text, secs
@@ -1200,6 +1219,8 @@ class DesktopPet(QWidget):
                 if abs(tilt) > 50:                                      # tipped over: lands flat at that angle
                     self.splat_rot = 90.0 if tilt > 0 else -90.0
                     self._set_state("splat", 1.6)
+                elif self.web_torn:
+                    self._get_angry()
                 elif hard:
                     self._set_state("dizzy", 2.6)
                 else:
@@ -1264,6 +1285,7 @@ class DesktopPet(QWidget):
             vx, vy = 0.0, -160.0
             self.fx, self.fy = spot.x(), spot.y() + 60
         self.start_fly(vx, vy, "Eek!")
+        self.web_torn = True
 
     def set_calm(self, on: bool) -> None:
         """Sit calmly on the spot (on) or go back to wandering around (off)."""
@@ -1519,6 +1541,14 @@ def _paint_3d(self, p: QPainter) -> None:
             _burger(p, hand, S, self.t)
             if int(self.t) % 4 == 0 and self.bubble_t <= 0:
                 self.say("nom nom", 1.0)
+    elif st == "angry":
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        shake = math.sin(self.t * 40) * 1.5                          # trembling with frustration
+        anim = "angry" if b.has("angry") else "idle"
+        pts = b.blit(p, anim, 0, int(self.t * 5), "feet", QPointF(feet.x() + shake, feet.y()), S)
+        head = pts["head"]
+        _steam(p, head, self.t, S)
     elif st == "sit":
         feet = loc(QPointF(self.fx, self.fy))
         _shadow(p, feet, S)
@@ -1558,7 +1588,13 @@ def _paint_3d(self, p: QPainter) -> None:
             yaw = max(-90.0, min(90.0, self.yaw if abs(self.yaw) <= 100 else 0.0))
             if st == "look":
                 yaw = 50 * math.sin(self.t * 1.8)
-            pts = b.blit(p, "idle", yaw, int(self.t * 2.5), "feet", at, scale, 0, opacity)
+            if self.gaze_t > 0 and self.gaze is not None and b.has("gaze") and st in ("idle", "look"):
+                gy, gp = self.gaze
+                yi = min(range(3), key=lambda i: abs(abs(gy) - (0, 30, 60)[i]))
+                pi_ = min(range(3), key=lambda i: abs(gp - (28, 0, -24)[i]))
+                pts = b.blit(p, "gaze", 0, yi * 3 + pi_, "feet", at, scale, 0, opacity, mirror_x=gy < 0)
+            else:
+                pts = b.blit(p, "idle", yaw, int(self.t * 2.5), "feet", at, scale, 0, opacity)
         head = pts["head"]
     if head is not None:
         if self.sense > 0:
@@ -1682,6 +1718,25 @@ def _stars(p: QPainter, head: QPointF, t: float, S: float) -> None:
         p.setPen(QPen(QColor(120, 80, 0), 1.0))
         p.setBrush(QBrush(QColor(255, 215, 40)))
         p.drawPath(star)
+    p.restore()
+
+
+def _steam(p: QPainter, head: QPointF, t: float, S: float) -> None:
+    """Little angry steam puffs and a red anger mark by his head."""
+    p.save()
+    k = S / SPRITE_SCALE
+    for i, side in enumerate((-1, 1)):
+        ph = (t * 1.6 + i * 0.5) % 1.0
+        c = QPointF(head.x() + side * 30 * k, head.y() - 26 * k - ph * 18)
+        p.setOpacity(1 - ph)
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(235, 235, 245)))
+        p.drawEllipse(c, 5 + ph * 4, 4 + ph * 3)
+    p.setOpacity(1.0)
+    m = QPointF(head.x() + 22 * k, head.y() - 30 * k)                # cartoon anger mark
+    p.setPen(QPen(QColor(230, 30, 40), 2.4, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+    for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        p.drawLine(QPointF(m.x() + dx * 2, m.y() + dy * 2), QPointF(m.x() + dx * 6, m.y() + dy * 6 - dx * dy * 2))
     p.restore()
 
 

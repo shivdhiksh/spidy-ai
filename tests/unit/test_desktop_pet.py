@@ -314,7 +314,9 @@ def test_cursor_near_triggers_spidey_sense_and_he_looks_at_it():
     pet._be_aware(0.033, QPointF(head.x() + 300, head.y()))          # far away
     assert pet.sense == 0.0
     pet._be_aware(0.033, QPointF(head.x() + 90, head.y() + 20))      # cursor comes close on his right
-    assert pet.sense == 1.0 and pet.yaw > 30                          # tingles, turns to look
+    assert pet.sense == 1.0 and pet.gaze is not None and pet.gaze[0] > 30   # tingles, turns his head
+    pet._be_aware(0.033, QPointF(head.x(), head.y() - 90))           # cursor above him
+    assert pet.gaze[1] > 15                                           # looks up
     pet._watch.stop(); pet._hide_now()
 
 
@@ -342,5 +344,27 @@ def test_new_tab_makes_him_look_and_think():
     pet.fg.poll = lambda: ("tab", "New Tab - Chrome", (1000, 100, 1600, 900))
     pet._watch_screen()
     assert pet.thought_t > 0 and pet.thought and pet.look_hold > 0 and pet.yaw > 0
+    pet.grab()
+    pet._watch.stop(); pet._hide_now()
+
+def test_tearing_his_web_makes_him_angry_after_the_fall():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    pet._rng.seed(3)
+    pet._set_state("shoot", 0.45)
+    for _ in range(40):
+        pet._tick()
+    a, g = pet.anchor, pet._body_world()
+    mid = QPointF((a.x() + g.x()) / 2, (a.y() + g.y()) / 2)
+    pet._last_cursor = QPointF(mid.x() - 40, mid.y())
+    assert pet._check_web_cut(QPointF(mid.x() + 40, mid.y() + 2))
+    seen = set()
+    for _ in range(600):
+        pet._tick()
+        seen.add(pet.state)
+        if pet.state == "angry":
+            break
+    assert pet.state == "angry" and pet.bubble in ("Hey! My web!!", "Grrr!", "Not cool, boss!", "Hmph!")
     pet.grab()
     pet._watch.stop(); pet._hide_now()

@@ -69,9 +69,10 @@ class SpriteBank:
         return pm, pts, mirror
 
     def blit(self, p: QPainter, anim: str, yaw: float, idx: int, anchor: str, at: QPointF,
-             scale: float, rot: float = 0.0, opacity: float = 1.0) -> dict[str, QPointF]:
+             scale: float, rot: float = 0.0, opacity: float = 1.0, mirror_x: bool = False) -> dict[str, QPointF]:
         """Draw a frame with its ``anchor`` point placed at ``at``; returns every key point on screen."""
         pm, pts, mirror = self.frame(anim, yaw, idx)
+        mirror = mirror ^ mirror_x
         ax, ay = pts[anchor]
         sx = -scale if mirror else scale
         p.save()

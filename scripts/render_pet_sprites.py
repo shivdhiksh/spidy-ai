@@ -60,6 +60,7 @@ class Pose:
     phone: bool = False
     leg_spread: float = 0.0     # extra sideways splay (deg) -- for the upside-down hang
     can: bool = False           # (unused) spray can prop
+    head_pitch: float = 0.0     # + looks up, - looks down
     expr: str = "normal"        # normal | surprised (big round eyes) | dizzy (spiral eyes)
 
 
@@ -150,7 +151,8 @@ class Character:
         j = self.j
         self.head_c = j["head"]
         hy, ht = math.radians(pose.head_yaw), math.radians(pose.head_tilt)
-        f = np.array([math.sin(hy), -0.16, math.cos(hy)])
+        hp = math.radians(pose.head_pitch)
+        f = np.array([math.sin(hy) * math.cos(hp), math.sin(hp) - 0.16, math.cos(hy) * math.cos(hp)])
         f = _rot_x(f, 0) / np.linalg.norm(f)
         right = np.array([math.cos(hy), 0.0, -math.sin(hy)])
         up = np.cross(f, right)
@@ -159,18 +161,35 @@ class Character:
         c, s = math.cos(ht), math.sin(ht)
         self.face = (f, right * c + up * s, -right * s + up * c)
 
+    def _to_head_local(self, p):
+        """Undo the head's yaw / pitch around the head centre (vectorised)."""
+        hy, hp = math.radians(self.pose.head_yaw), math.radians(self.pose.head_pitch)
+        if hy == 0 and hp == 0:
+            return p
+        q = p - self.head_c
+        c, s_ = math.cos(-hy), math.sin(-hy)
+        x = q[:, 0] * c + q[:, 2] * s_
+        z = -q[:, 0] * s_ + q[:, 2] * c
+        y = q[:, 1]
+        c2, s2 = math.cos(hp), math.sin(hp)                  # undo pitch (look up = positive)
+        y2 = y * c2 - z * s2
+        z2 = y * s2 + z * c2
+        return np.stack([x, y2, z2], axis=1) + self.head_c
+
     def parts(self, p):
         """Distance of every part: list of (material, distance)."""
         j, P = self.j, self.pose
         hc = self.head_c
         out = []
+        p_world = p
+        p = self._to_head_local(p)                     # head + hood turn together as one piece
         # head: round skull + soft cheeks narrowing to a small chin
         skull = sd_ellipsoid(p, hc, np.array([0.58, 0.53, 0.545]))
         cheeks = sd_ellipsoid(p, hc + np.array([0, -0.17, 0.07]), np.array([0.45, 0.35, 0.43]))
         out.append(("head", smin(skull, cheeks, 0.12)))
         # hood: fabric shell that frames the face with a thick rolled rim, drapes down the back of the
         # neck onto the shoulders, and ends in a soft tip flopping backwards
-        f = self.face[0]
+        f = np.array([0.0, -0.16, 1.0]) / np.linalg.norm([0.0, -0.16, 1.0])
         rel = p - hc
         shell = np.maximum(sd_ellipsoid(p, hc + np.array([0, 0.04, -0.06]), np.array([0.665, 0.645, 0.64])),
                            -sd_ellipsoid(p, hc + np.array([0, 0.02, -0.03]), np.array([0.62, 0.60, 0.61])))
@@ -187,7 +206,9 @@ class Character:
         rim = np.sqrt(ell ** 2 + (q[:, 2] * 0.9) ** 2) - 0.06
         rim = np.maximum(rim, -(q[:, 1] + 0.40))                                # only around the top and sides
         tip = sd_capsule(p, hc + np.array([0, 0.48, -0.28]), hc + np.array([0, 0.56, -0.66]), 0.15, 0.045)
-        out.append(("hood", smin(smin(shell, rim, 0.05), tip, 0.12)))        # body: a short round hoodie with a little belly, blended with chubby limbs like a vinyl toy
+        out.append(("hood", smin(smin(shell, rim, 0.05), tip, 0.12)))
+        p = p_world
+        # body: a short round hoodie with a little belly, blended with chubby limbs like a vinyl toy
         chest, hip_c = j["chest"], j["hip_c"]
         torso = sd_capsule(p, hip_c + np.array([0, 0.10, 0.0]), chest + np.array([0, 0.0, 0]), 0.265, 0.25)
         belly = sd_ellipsoid(p, hip_c + np.array([0, 0.12, 0.045]), np.array([0.265, 0.20, 0.23]))
@@ -275,6 +296,9 @@ def head_color(ch: Character, p):
         col[(e < 1.42) & front] = C["eye_frame"]
         col[(e < 1.18) & front] = C["eye_rim"]
         col[(e < 1.0) & front] = C["eye"]
+        if expr == "angry":
+            brow = (ry > 0.03 + rx * side * 0.6) & front & (e < 1.42)
+            col[brow & (e < 1.18)] = C["eye_frame"]
         if expr == "closed":                                                       # asleep: eyes shut
             lid = (e < 1.42) & front
             col[lid] = C["suit"]
@@ -578,6 +602,21 @@ def nap(i, n):                       # dozing while sitting: eyes closed, head n
                 head_tilt=8 + b * 5, expr="closed")
 
 
+GAZE_YAWS = (0, 30, 60)
+GAZE_PITCHES = (28, 0, -24)
+
+
+def gaze(i, n):                      # standing, head turned toward the cursor (yaw x pitch grid)
+    yaw, pitch = GAZE_YAWS[i // 3], GAZE_PITCHES[i % 3]
+    return Pose(arm_l=(4, 14, 18), arm_r=(4, 14, 18), head_yaw=yaw, head_pitch=pitch)
+
+
+def angry(i, n):                     # web torn: fists clenched down, stomping, angry eyes
+    w = math.sin(2 * math.pi * i / n)
+    return Pose(arm_l=(-15, 28, 75), arm_r=(-15, 28, 75), hip_l=6 + w * 14, knee_l=10 + max(0, w) * 30,
+                hip_r=-4, knee_r=6, lean=6, head_pitch=-6, head_tilt=w * 4, expr="angry")
+
+
 def sleep(i, n):
     return Pose(arm_l=(0, 8, 10), arm_r=(0, 8, 10), head_tilt=6)
 
@@ -595,6 +634,8 @@ ANIMS = {
     "tumble": (lambda i, n: tumble(i, n), 4, [0]),
     "dizzy": (lambda i, n: dizzy(i, n), 2, [0]),
     "sit": (sit, 2, [0]),
+    "angry": (angry, 2, [0]),
+    "gaze": (gaze, 9, [0]),
     "nap": (nap, 2, [0]),
 }
 
