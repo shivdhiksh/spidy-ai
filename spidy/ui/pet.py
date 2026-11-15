@@ -21,7 +21,10 @@ from dataclasses import dataclass, field
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import (QBrush, QColor, QGuiApplication, QLinearGradient, QPainter, QPainterPath, QPen,
                            QRadialGradient)
+from PySide6.QtGui import QCursor
 from PySide6.QtWidgets import QMenu, QWidget
+
+from spidy.ui.pet_sprites import SpriteBank
 
 RED = QColor(214, 35, 43)
 RED_SHADE = QColor(168, 22, 32)
@@ -38,8 +41,11 @@ JACKET = QColor(62, 74, 78)        # dark grey-teal hoodie jacket
 SHORTS = QColor(66, 56, 52)        # dark shorts
 SNEAKER = QColor(214, 34, 44)      # red sneakers with white soles
 
-W, H = 130, 140                 # widget size while on the floor
-FOOT = QPointF(W / 2, H - 10)   # where his feet stand inside that widget
+W, H = 200, 225                 # widget size while on the floor (room for bubbles and spidey-sense)
+FOOT = QPointF(W / 2, H - 12)   # where his feet stand inside that widget
+SPRITE_SCALE = 0.95             # 3D sprite size on screen (x depth: nearer = bigger)
+ROAM = 150                      # depth of the floor band above the taskbar he wanders around in
+THROW_GRAVITY = 2100.0          # px/s^2 when thrown or falling
 GRAVITY = 1400.0                # px/s^2 for the web swing
 INTRO_WAKE, INTRO_WAVE, INTRO_STAND, INTRO_END = 1.8, 2.3, 5.2, 6.1   # wake-up intro timeline (seconds)
 
@@ -572,6 +578,17 @@ class DesktopPet(QWidget):
         self.hammock_k = 0.0
         self._press: QPointF | None = None
         self._dragged = False
+        # 3D sprites + physics
+        self.bank = SpriteBank()
+        self.yaw = 0.0                      # which way he faces (0 = toward you, 90 = right, 180 = away)
+        self.target_y = 0.0
+        self.vx = self.vy = 0.0             # thrown / falling velocity
+        self.spin = 0.0
+        self.peak_speed = 0.0
+        self.bubble, self.bubble_t = "", 0.0
+        self.cut_pieces: list[dict] = []    # snapped web ends recoiling after a cut
+        self._drag_samples: list[tuple[float, QPointF]] = []
+        self._last_cursor: QPointF | None = None
         self._anim = QTimer(self)
         self._anim.setInterval(33)
         self._anim.timeout.connect(self._tick)
@@ -661,6 +678,7 @@ class DesktopPet(QWidget):
         if state == "walk":
             a = self._area()
             self.target_x = self._rng.uniform(a.left() + 60, a.right() - 60)
+            self.target_y = self._floor() - self._rng.uniform(0, ROAM) if self.bank.ok else self._floor()
             self.facing = 1 if self.target_x > self.fx else -1
         elif state == "shoot":
             if self.after_shoot == "hammock" and self.hammock is not None:
@@ -763,13 +781,25 @@ class DesktopPet(QWidget):
             return
         st = self.state
         if st == "walk":
-            speed = 62.0
+            speed = 62.0 * self._depth()
             self.walk_phase += dt * speed / 9.0            # stride matched to speed: no foot sliding
-            nx = self.fx + speed * dt * self.facing
-            if (self.facing > 0 and nx >= self.target_x) or (self.facing < 0 and nx <= self.target_x):
-                nx, self.state_left = self.target_x, 0
-            self.fx, self.fy = nx, self._floor()
+            dx, dy = self.target_x - self.fx, self.target_y - self.fy
+            dist = math.hypot(dx, dy)
+            if dist < speed * dt or dist < 1:
+                self.fx, self.fy, self.state_left = self.target_x, self.target_y, 0
+            else:
+                self.fx += dx / dist * speed * dt
+                self.fy += dy / dist * speed * dt
+                self.yaw = math.degrees(math.atan2(dx, dy))           # toward you = 0, right = 90, away = 180
+                self.facing = 1 if dx >= 0 else -1
             self._fit_floor()
+        elif st == "held":
+            pass
+        elif st == "fly":
+            self._fly(dt)
+        elif st == "dizzy":
+            if self.state_left <= 0:
+                self._set_state("idle", 1.0)
         elif st == "shoot":
             self.shoot_k = min(1.0, self.shoot_k + dt / 0.35)
             self._fit_shoot()
@@ -830,6 +860,11 @@ class DesktopPet(QWidget):
             if self.hop >= 1.0:
                 self._hide_now()
                 return
+        self._check_web_cut()
+        self.bubble_t = max(0.0, self.bubble_t - dt)
+        for piece in self.cut_pieces:
+            piece["age"] += dt
+        self.cut_pieces = [pc for pc in self.cut_pieces if pc["age"] < 0.7]
         if self.state_left <= 0 and self.state in ("idle", "walk", "look", "wave"):
             self._choose_next()
         self.update()
@@ -839,7 +874,7 @@ class DesktopPet(QWidget):
         return self.fx + 34
 
     def _fit_intro(self) -> None:
-        self.setGeometry(QRect(int(self.fx - 150), int(self.fy - 205), 280, 215))
+        self.setGeometry(QRect(int(self.fx - 170), int(self.fy - 250), 330, 262))
 
     def _paint_intro(self, p: QPainter) -> None:
         t = self.intro_t
@@ -916,22 +951,151 @@ class DesktopPet(QWidget):
             if (g - self._press).manhattanLength() > 5:
                 self._dragged = True
             if self._dragged:
-                if self.state in ("swing", "lower", "shoot", "hammock"):
-                    self.state, self.hammock, self.after_shoot = "idle", None, ""
-                self.fx, self.fy = g.x(), g.y() + 40
-                self.setGeometry(QRect(int(self.fx - FOOT.x()), int(self.fy - FOOT.y()), W, H))
+                self.grab_to(g)
+
+    def grab_to(self, g: QPointF) -> None:
+        """Being carried by the hood: he dangles under the cursor, flailing with a surprised face."""
+        import time as _time
+        if self.state != "held":
+            self.hammock, self.after_shoot = None, ""
+            self.state, self.state_left = "held", 99.0
+            self.bubble, self.bubble_t = "Hey!", 0.9
+        self.fx, self.fy = g.x(), g.y() + 95 * self._depth()
+        now = _time.monotonic()
+        self._drag_samples = [s for s in self._drag_samples if now - s[0] < 0.12] + [(now, QPointF(g))]
+        self._fit_fly()
+
+    def throw_release(self, g: QPointF | None = None) -> None:
+        """Let go: he flies off with the cursor's speed and direction (or just drops)."""
+        import time as _time
+        now = _time.monotonic()
+        vx = vy = 0.0
+        samples = [s for s in self._drag_samples if now - s[0] < 0.12]
+        if len(samples) >= 2 and samples[-1][0] > samples[0][0]:
+            dt = samples[-1][0] - samples[0][0]
+            vx = (samples[-1][1].x() - samples[0][1].x()) / dt
+            vy = (samples[-1][1].y() - samples[0][1].y()) / dt
+        self._drag_samples = []
+        speed = math.hypot(vx, vy)
+        if speed > 2600:
+            vx, vy = vx / speed * 2600, vy / speed * 2600
+        self.start_fly(vx, vy, "Whoa!" if speed > 350 else "")
 
     def mouseReleaseEvent(self, e) -> None:
         if e.button() != Qt.MouseButton.LeftButton:
             return
         dragged, self._press = self._dragged, None
         if dragged:
-            self.fy = self._floor()
-            self._fit_floor()
-            self._set_state("idle", 1.5)
+            self.throw_release(e.globalPosition())
             return
         self._set_state("hop", 0.45)
         self.clicked.emit()
+
+    # ── physics: thrown / falling ──────────────────────────────────────────
+    def _depth(self) -> float:
+        """Perspective: 1.0 at the front of the floor band (near the taskbar), smaller further back."""
+        fl = self._floor()
+        k = 1.0 - min(1.0, max(0.0, (fl - self.fy) / ROAM))
+        return 0.84 + 0.16 * k
+
+    def start_fly(self, vx: float, vy: float, shout: str = "") -> None:
+        self.vx, self.vy = vx, vy
+        self.spin = 0.0
+        self.peak_speed = math.hypot(vx, vy)
+        self.hammock, self.after_shoot, self.upside = None, "", False
+        self.state, self.state_left = "fly", 99.0
+        if shout:
+            self.bubble, self.bubble_t = shout, 1.0
+        self._fit_fly()
+
+    def _fly(self, dt: float) -> None:
+        a = self._area()
+        fl = self._floor()
+        self.vy += THROW_GRAVITY * dt
+        self.fx += self.vx * dt
+        self.fy += self.vy * dt
+        self.spin += self.vx * dt * 0.55 + (60 if abs(self.vx) < 40 and self.vy < 0 else 0) * dt
+        self.peak_speed = max(self.peak_speed, math.hypot(self.vx, self.vy))
+        if self.fx < a.left() + 30:                                     # bounce off the screen edges
+            self.fx, self.vx = a.left() + 30, abs(self.vx) * 0.55
+        elif self.fx > a.right() - 30:
+            self.fx, self.vx = a.right() - 30, -abs(self.vx) * 0.55
+        if self.fy - 130 < a.top():
+            self.fy, self.vy = a.top() + 130, abs(self.vy) * 0.4
+        if self.fy >= fl:                                               # hit the floor: bounce, then land
+            self.fy = fl
+            if self.vy > 260:
+                self.vy = -self.vy * 0.38
+                self.vx *= 0.7
+                self.spin *= 0.5
+            else:
+                self.vx = self.vy = 0.0
+                self.spin = 0.0
+                hard = self.peak_speed > 700
+                self.peak_speed = 0.0
+                if hard:
+                    self._set_state("dizzy", 2.6)
+                else:
+                    self._set_state("idle", 1.0)
+                self._fit_floor()
+                return
+        self._fit_fly()
+
+    def _fit_fly(self) -> None:
+        cx, cy = self.fx, self.fy - 60
+        rect = QRect(int(cx - 140), int(cy - 150), 280, 300)
+        for pc in self.cut_pieces:
+            for pt in (pc["a"], pc["b"]):
+                rect = rect.united(QRect(int(pt.x()) - 12, int(pt.y()) - 12, 24, 24))
+        self.setGeometry(rect)
+
+    # ── swiping across a web snaps it ─────────────────────────────────────
+    def _web_segments(self) -> list[tuple[QPointF, QPointF]]:
+        if self.state in ("swing", "lower"):
+            return [(self.anchor, self._body_world())]
+        if self.state == "hammock" and self.hammock is not None and self.hammock_k > 0.5:
+            pts = [self._hammock_point(i / 10) for i in range(11)]
+            segs = list(zip(pts, pts[1:]))
+            return segs + [(self.hammock[0], pts[0]), (self.hammock[1], pts[-1])]
+        return []
+
+    @staticmethod
+    def _seg_cross(p1, p2, q1, q2) -> QPointF | None:
+        d = (p2.x() - p1.x()) * (q2.y() - q1.y()) - (p2.y() - p1.y()) * (q2.x() - q1.x())
+        if abs(d) < 1e-9:
+            return None
+        t = ((q1.x() - p1.x()) * (q2.y() - q1.y()) - (q1.y() - p1.y()) * (q2.x() - q1.x())) / d
+        u = ((q1.x() - p1.x()) * (p2.y() - p1.y()) - (q1.y() - p1.y()) * (p2.x() - p1.x())) / d
+        if 0 <= t <= 1 and 0 <= u <= 1:
+            return QPointF(p1.x() + t * (p2.x() - p1.x()), p1.y() + t * (p2.y() - p1.y()))
+        return None
+
+    def _check_web_cut(self, cursor: QPointF | None = None) -> bool:
+        cur = QPointF(cursor) if cursor is not None else QPointF(QCursor.pos())
+        prev, self._last_cursor = self._last_cursor, cur
+        if prev is None or (cur - prev).manhattanLength() < 3 or self._press is not None:
+            return False
+        for a, b in self._web_segments():
+            hit = self._seg_cross(prev, cur, a, b)
+            if hit is not None:
+                self.cut_web(hit, a, b)
+                return True
+        return False
+
+    def cut_web(self, at: QPointF, a: QPointF, b: QPointF) -> None:
+        """The web snaps where the cursor crossed it: both ends recoil and Spidey drops with an "Eek!"."""
+        self.cut_pieces = [{"a": QPointF(a), "b": QPointF(at), "age": 0.0, "fall": False},
+                           {"a": QPointF(at), "b": QPointF(b), "age": 0.0, "fall": True}]
+        if self.state in ("swing", "lower"):
+            v = self.omega * self.rope                                   # keep the swing's momentum
+            vx, vy = math.cos(self.theta) * v, -math.sin(self.theta) * v
+            g = self._body_world()
+            self.fx, self.fy = g.x(), g.y() + 120 * self._depth()
+        else:                                                           # out of the hammock
+            spot = self._hammock_point(0.5)
+            vx, vy = 0.0, -160.0
+            self.fx, self.fy = spot.x(), spot.y() + 60
+        self.start_fly(vx, vy, "Eek!")
 
     def contextMenuEvent(self, e) -> None:
         m = QMenu(self)
@@ -951,6 +1115,11 @@ class DesktopPet(QWidget):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         st = self.state
+        self._paint_cut_pieces(p)
+        if self.bank.ok:
+            self._paint_3d(p)
+            p.end()
+            return
         if st in ("swing", "lower"):
             self._paint_hanging(p)
         elif st == "hammock":
@@ -1092,6 +1261,237 @@ class DesktopPet(QWidget):
         p.translate(-attach.x(), -attach.y())                          # ...put exactly that on the rope end
         draw_spidey_pose(p, pose)
         p.restore()
+
+
+# ── 3D sprite painting ─────────────────────────────────────────────────────────
+def _paint_3d(self, p: QPainter) -> None:
+    st, b = self.state, self.bank
+    S = SPRITE_SCALE * self._depth()
+    loc = self._local
+    head = None
+    if st in ("swing", "lower"):
+        anchor, grip = loc(self.anchor), loc(self._body_world())
+        draw_web(p, anchor, grip)
+        rot = -math.degrees(self.theta)
+        if self.upside:
+            pts = b.blit(p, "upside", 0, int(self.t * 3), "feet", grip, S, rot + 180)
+        else:
+            pts = b.blit(p, "hang", 25 * self.facing, int(self.t * 3), "hand_r", grip, S, rot)
+        head = pts["head"]
+    elif st == "shoot":
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        pts = b.blit(p, "shoot", 30 * self.facing, 0, "feet", feet, S)
+        hand, anchor = pts["hand_r"], loc(self.anchor)
+        tip = QPointF(hand.x() + (anchor.x() - hand.x()) * self.shoot_k, hand.y() + (anchor.y() - hand.y()) * self.shoot_k)
+        draw_web(p, tip, hand)
+        head = pts["head"]
+    elif st == "hammock":
+        self._paint_hammock_net(p)
+        if self.hammock is not None and self.hammock_k >= 0.35:
+            a, bb = self.hammock
+            here = self._hammock_point(0.5, offset=6)
+            ahead, behind = self._hammock_point(0.44), self._hammock_point(0.56)
+            ang = math.degrees(math.atan2(ahead.x() - behind.x(), -(ahead.y() - behind.y())))
+            side = 1 if a.x() < bb.x() else -1
+            p.save()
+            p.setOpacity(min(1.0, (self.hammock_k - 0.35) / 0.4))
+            pts = b.blit(p, "lounge", 70 * side, int(self.t * 0.8), "hip_c", loc(here), S, ang)
+            p.restore()
+            head = pts["head"]
+    elif st == "intro":
+        head = self._paint_intro_3d(p, S)
+    elif st == "held":
+        at = loc(QPointF(self.fx, self.fy - 95 * self._depth()))
+        pts = b.blit(p, "tumble", 0, int(self.t * 8), "head", QPointF(at.x(), at.y() + 34 * S),
+                     S, math.sin(self.t * 9) * 10)
+        head = pts["head"]
+    elif st == "fly":
+        hip = loc(QPointF(self.fx, self.fy - 62 * S / SPRITE_SCALE))
+        pts = b.blit(p, "tumble", 0, int(self.t * 10), "hip_c", hip, S, self.spin)
+        head = pts["head"]
+    elif st == "dizzy":
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        pts = b.blit(p, "dizzy", 0, int(self.t * 2), "feet", feet, S)
+        head = pts["head"]
+        _stars(p, head, self.t, S)
+    else:                                                              # on the floor
+        feet = loc(QPointF(self.fx, self.fy))
+        _shadow(p, feet, S)
+        opacity, scale, lift = 1.0, S, 0.0
+        if st == "hop":
+            k = self.hop
+            lift, scale, opacity = 60 * math.sin(k * math.pi / 2), S * (1 + 0.6 * k), max(0.0, 1 - k ** 2)
+        at = QPointF(feet.x(), feet.y() - lift)
+        if st == "walk":
+            idx = int(self.walk_phase / (2 * math.pi) * b.frames("walk"))
+            pts = b.blit(p, "walk", self.yaw, idx, "feet", at, scale, 0, opacity)
+        elif st == "wave":
+            pts = b.blit(p, "wave", 15 * self.facing, int(self.t * 9), "feet", at, scale, 0, opacity)
+        else:
+            yaw = max(-90.0, min(90.0, self.yaw if abs(self.yaw) <= 100 else 0.0))
+            if st == "look":
+                yaw = 50 * math.sin(self.t * 1.8)
+            pts = b.blit(p, "idle", yaw, int(self.t * 2.5), "feet", at, scale, 0, opacity)
+        head = pts["head"]
+    if head is not None:
+        if self.sense > 0:
+            _spidey_sense(p, head, self.sense)
+        if self.bubble_t > 0 and self.bubble:
+            _draw_bubble(p, QPointF(head.x() + 26 * S, head.y() - 40 * S), self.bubble, min(1.0, self.bubble_t * 4))
+
+
+def _paint_intro_3d(self, p: QPainter, S: float):
+    """Asleep in bed (Zzz) -> sits up and waves "Hello boss!" -> stands up beside the bed."""
+    t = self.intro_t
+    b = self.bank
+    floor = self._local(QPointF(self.fx, self.fy))
+    bed_fade = 1.0 if t < INTRO_STAND else max(0.0, 1 - (t - INTRO_STAND) / 0.7)
+    mat_y = floor.y() - 26
+    if bed_fade > 0:
+        p.save()
+        p.setOpacity(bed_fade)
+        _draw_bed(p, floor, mat_y)
+        p.restore()
+    hips_bed = QPointF(floor.x() - 30, mat_y - 14)
+    stand = min(1.0, max(0.0, (t - INTRO_STAND) / 0.6))
+    ease = stand * stand * (3 - 2 * stand)
+    if t < INTRO_WAVE:                                                 # lying asleep under the blanket
+        pts = b.blit(p, "sleep", 0, 0, "hip_c", hips_bed, S, -90)
+        if t < INTRO_STAND:
+            _blanket_over(p, pts, S)
+        head = pts["head"]
+        if t < INTRO_WAKE:
+            _zzz(p, head, t)
+        return head
+    if t < INTRO_STAND:                                                # sits up, waves from bed
+        pts = b.blit(p, "wave", 0, int(t * 9), "hip_c", hips_bed, S, -32)
+        _blanket_over(p, pts, S, legs_only=True)
+    else:                                                              # gets up, bed fades
+        feet_end = QPointF(floor.x() + 34, floor.y())
+        hips_end = QPointF(feet_end.x(), feet_end.y() - 58 * S / SPRITE_SCALE)
+        at = QPointF(hips_bed.x() + (hips_end.x() - hips_bed.x()) * ease, hips_bed.y() + (hips_end.y() - hips_bed.y()) * ease)
+        pts = b.blit(p, "idle", 0, 0, "hip_c", at, S, -32 * (1 - ease))
+    head = pts["head"]
+    if INTRO_WAVE <= t < INTRO_END - 0.2:
+        _draw_bubble(p, QPointF(head.x() + 22, head.y() - 40), self.greeting, min(1.0, (t - INTRO_WAVE) / 0.25))
+    return head
+
+
+def _paint_cut_pieces(self, p: QPainter) -> None:
+    """Snapped web ends: the top piece springs back to its anchor, the bottom one falls and fades."""
+    for pc in self.cut_pieces:
+        k = min(1.0, pc["age"] / 0.5)
+        a, b = self._local(pc["a"]), self._local(pc["b"])
+        if pc["fall"]:
+            a = QPointF(a.x() + (b.x() - a.x()) * k, a.y() + (b.y() - a.y()) * k + 40 * k)
+        else:
+            b = QPointF(b.x() + (a.x() - b.x()) * k, b.y() + (a.y() - b.y()) * k)
+        draw_web(p, a, b, alpha=max(0.0, 1 - k))
+
+
+def _paint_hammock_net(self, p: QPainter) -> None:
+    if self.hammock is None:
+        return
+    k = self.hammock_k
+    a, b = self.hammock
+    n = 22
+    top = [self._local(self._hammock_point(i / n)) for i in range(n + 1)]
+    bot = [self._local(self._hammock_point(i / n, offset=26 * math.sin(math.pi * i / n))) for i in range(n + 1)]
+    shown = max(2, int((n + 1) * min(1.0, k * 1.4)))
+    p.save()
+    for pts, w in ((top, 2.2), (bot, 1.8)):
+        path = QPainterPath(pts[0])
+        for q in pts[1:shown]:
+            path.lineTo(q)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        p.setPen(QPen(QColor(20, 20, 30, 140), w + 2.2, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawPath(path)
+        p.setPen(QPen(WEB, w, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.drawPath(path)
+    p.setPen(QPen(QColor(246, 248, 255, 210), 1.1))
+    for i in range(min(shown, n)):
+        p.drawLine(top[i], bot[i + 1])
+        p.drawLine(bot[i], top[i + 1])
+    draw_web(p, self._local(a), top[0])
+    draw_web(p, self._local(b), top[-1])
+    p.restore()
+
+
+DesktopPet._paint_3d = _paint_3d
+DesktopPet._paint_intro_3d = _paint_intro_3d
+DesktopPet._paint_cut_pieces = _paint_cut_pieces
+DesktopPet._paint_hammock_net = _paint_hammock_net
+
+
+def _shadow(p: QPainter, feet: QPointF, S: float) -> None:
+    sh = QRadialGradient(QPointF(0, 0), 30)
+    sh.setColorAt(0.0, QColor(0, 0, 0, 100))
+    sh.setColorAt(0.55, QColor(0, 0, 0, 42))
+    sh.setColorAt(1.0, QColor(0, 0, 0, 0))
+    p.save()
+    p.translate(feet.x(), feet.y() + 1)
+    p.scale(S / SPRITE_SCALE, 0.24 * S / SPRITE_SCALE)
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(sh))
+    p.drawEllipse(QPointF(0, 0), 30, 30)
+    p.restore()
+
+
+def _stars(p: QPainter, head: QPointF, t: float, S: float) -> None:
+    """Little yellow stars circling his head after a hard landing."""
+    p.save()
+    for i in range(4):
+        a = t * 3.2 + i * math.pi / 2
+        c = QPointF(head.x() + math.cos(a) * 34 * S / SPRITE_SCALE, head.y() - 30 * S / SPRITE_SCALE + math.sin(a) * 9)
+        star = QPainterPath()
+        for k in range(10):
+            r = 6.5 if k % 2 == 0 else 2.8
+            ang = -math.pi / 2 + k * math.pi / 5
+            q = QPointF(c.x() + math.cos(ang) * r, c.y() + math.sin(ang) * r)
+            star.moveTo(q) if k == 0 else star.lineTo(q)
+        star.closeSubpath()
+        p.setPen(QPen(QColor(120, 80, 0), 1.0))
+        p.setBrush(QBrush(QColor(255, 215, 40)))
+        p.drawPath(star)
+    p.restore()
+
+
+def _zzz(p: QPainter, head: QPointF, t: float) -> None:
+    for i in range(3):
+        k = ((t * 0.8 + i / 3) % 1.0)
+        p.save()
+        p.setOpacity(1 - k)
+        f = p.font()
+        f.setPixelSize(int(11 + 6 * k))
+        f.setBold(True)
+        p.setFont(f)
+        p.setPen(QColor(235, 240, 255))
+        p.drawText(QPointF(head.x() + 18 + 14 * k, head.y() - 26 - 30 * k), "Z")
+        p.restore()
+
+
+def _blanket_over(p: QPainter, pts: dict, S: float, legs_only: bool = False) -> None:
+    """A soft blue blanket from his feet up to his chest (or just over his legs while sitting up)."""
+    feet, hip = pts["feet"], pts["hip_c"]
+    top = hip if legs_only else QPointF(hip.x() + (pts["head"].x() - hip.x()) * 0.45, hip.y() + (pts["head"].y() - hip.y()) * 0.45)
+    dx, dy = top.x() - feet.x(), top.y() - feet.y()
+    L = math.hypot(dx, dy) or 1.0
+    nx, ny = -dy / L, dx / L
+    w = 30 * S / SPRITE_SCALE
+    poly = QPainterPath(QPointF(feet.x() + nx * w - dx / L * 8, feet.y() + ny * w - dy / L * 8))
+    poly.lineTo(QPointF(top.x() + nx * w, top.y() + ny * w))
+    poly.quadTo(QPointF(top.x() + dx / L * 6, top.y() + dy / L * 6), QPointF(top.x() - nx * w, top.y() - ny * w))
+    poly.lineTo(QPointF(feet.x() - nx * w - dx / L * 8, feet.y() - ny * w - dy / L * 8))
+    poly.closeSubpath()
+    g = QLinearGradient(QPointF(feet.x() + nx * w, feet.y() + ny * w), QPointF(feet.x() - nx * w, feet.y() - ny * w))
+    g.setColorAt(0.0, QColor(70, 120, 220))
+    g.setColorAt(0.45, QColor(122, 172, 250))
+    g.setColorAt(1.0, QColor(40, 78, 170))
+    p.setPen(QPen(QColor(20, 40, 100, 220), 1.4))
+    p.setBrush(QBrush(g))
+    p.drawPath(poly)
 
 
 class _NullPainter:

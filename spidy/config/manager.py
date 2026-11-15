@@ -408,7 +408,7 @@ class UIConfig(BaseModel):
     position: str = "center"         # "center" | "top-right" | "top-left" | "bottom-right" | "bottom-left"
     width: int = 0                   # M17.2: 0 = auto-responsive (75-90% screen)
     height: int = 0                  # M17.2: 0 = auto-responsive
-    always_on_top: bool = True
+    always_on_top: bool = False      # off by default: Spidy does not sit above other windows
     animate: bool = True
     desktop_pet: bool = True         # little Spidey walking on the desktop while the HUD is closed
     hotkey: str = "ctrl+space"       # Global toggle hotkey

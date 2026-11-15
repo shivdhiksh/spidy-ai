@@ -312,7 +312,7 @@ ui:
   position: "center"              # center | top-right | top-left | bottom-right
   width: 0                        # 0 = auto-responsive wide HUD (1400–1700px)
   height: 0                       # 0 = auto-responsive wide HUD (700–850px)
-  always_on_top: true
+  always_on_top: false          # Spidy does not stay above other windows (Settings toggle starts OFF)
   animate: true
   hotkey: "ctrl+space"            # Backup wake hotkey
 

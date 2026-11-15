@@ -50,3 +50,6 @@ assets/models/*
 
 # Windows folder metadata
 desktop.ini
+
+# pet render previews
+assets/pet/_*.png

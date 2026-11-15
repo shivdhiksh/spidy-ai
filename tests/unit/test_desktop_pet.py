@@ -175,3 +175,74 @@ def test_pet_walks_around():
         pet._tick()
     assert pet.x() != x0
     pet._watch.stop(); pet._hide_now()
+
+def test_thrown_spidey_flies_bounces_and_lands_dizzy():
+    """Grab him and fling him: he flies that way with a 'Whoa!', bounces off the floor, then sits dizzy."""
+    pet, _ = _pet()
+    pet.start()
+    pet._set_state("idle", 5)
+    floor = pet._floor()
+    pet.fx, pet.fy = pet._area().center().x(), floor - 300
+    pet.start_fly(300.0, -900.0, "Whoa!")
+    x0 = pet.fx
+    seen = set()
+    for _ in range(400):
+        pet._tick()
+        seen.add(pet.state)
+        if pet.state != "fly":
+            break
+    assert pet.fx > x0 + 100                                           # went the way he was thrown
+    assert pet.state == "dizzy" and abs(pet.fy - floor) < 1             # hard landing -> dizzy on the floor
+    for _ in range(120):
+        pet._tick()
+    assert pet.state not in ("dizzy", "fly")                            # shakes it off
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_drag_then_release_throws_in_the_drag_direction():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    start = QPointF(500, 400)
+    import time as _t
+    for i in range(6):
+        pet.grab_to(QPointF(start.x() - 25 * i, start.y() - 10 * i))   # flick up and to the left
+        _t.sleep(0.012)
+    assert pet.state == "held"
+    pet.throw_release()
+    assert pet.state == "fly" and pet.vx < -200 and pet.vy < 0
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_swiping_across_his_web_cuts_it_and_he_falls():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    pet._rng.seed(3)
+    pet._set_state("shoot", 0.45)
+    for _ in range(40):
+        pet._tick()
+    assert pet.state == "swing"
+    a, g = pet.anchor, pet._body_world()
+    mid = QPointF((a.x() + g.x()) / 2, (a.y() + g.y()) / 2)
+    pet._last_cursor = QPointF(mid.x() - 40, mid.y())                   # cursor sweeps across the web line
+    assert pet._check_web_cut(QPointF(mid.x() + 40, mid.y() + 2))
+    assert pet.state == "fly" and pet.bubble == "Eek!" and len(pet.cut_pieces) == 2
+    for _ in range(400):
+        pet._tick()
+        if pet.state not in ("fly",):
+            break
+    assert abs(pet.fy - pet._floor()) < 1                               # landed
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_sprite_bank_picks_and_mirrors_views():
+    from spidy.ui.pet_sprites import SpriteBank
+    bank = SpriteBank()
+    if not bank.ok:
+        return                                                          # sprites not rendered on this machine
+    assert bank._pick_view("walk", 90) == (90, False)
+    assert bank._pick_view("walk", -90) == (90, True)                  # facing left = mirrored right view
+    assert bank._pick_view("walk", 170)[0] == 180
+    pm, pts, _ = bank.frame("walk", 0, 3)
+    assert not pm.isNull() and {"hand_r", "feet", "head", "hip_c"} <= set(pts)
