@@ -43,7 +43,7 @@ SNEAKER = QColor(214, 34, 44)      # red sneakers with white soles
 
 W, H = 200, 225                 # widget size while on the floor (room for bubbles and spidey-sense)
 FOOT = QPointF(W / 2, H - 12)   # where his feet stand inside that widget
-SPRITE_SCALE = 0.95             # 3D sprite size on screen (x depth: nearer = bigger)
+SPRITE_SCALE = 0.76             # 3D sprite size on screen (x depth: nearer = bigger)
 ROAM = 150                      # depth of the floor band above the taskbar he wanders around in
 THROW_GRAVITY = 2100.0          # px/s^2 when thrown or falling
 GRAVITY = 1400.0                # px/s^2 for the web swing
@@ -589,6 +589,9 @@ class DesktopPet(QWidget):
         self.cut_pieces: list[dict] = []    # snapped web ends recoiling after a cut
         self._drag_samples: list[tuple[float, QPointF]] = []
         self._last_cursor: QPointF | None = None
+        self.jump = None                    # (start, end, t) while hopping onto / off a box
+        self.perch_box = -1                 # which toy box he is sitting on (-1 = floor)
+        self.boxes = PetBoxes()             # the toy boxes in his corner
         self._anim = QTimer(self)
         self._anim.setInterval(33)
         self._anim.timeout.connect(self._tick)
@@ -631,13 +634,16 @@ class DesktopPet(QWidget):
         else:
             self._set_state("idle", 1.5)
         self.setWindowOpacity(1.0)
+        self.boxes.place(self._area())
+        self.boxes.show()
         self.show()
-        self.raise_()
+        self.raise_()                                   # always in front of his boxes
         self._anim.start()
 
     def _hide_now(self) -> None:
         self._anim.stop()
         self.hide()
+        self.boxes.hide()
 
     # ── geometry ───────────────────────────────────────────────────────────
     def _area(self):
@@ -650,7 +656,7 @@ class DesktopPet(QWidget):
     def _place_on_floor(self) -> None:
         a = self._area()
         if self.fx <= 0:
-            self.fx = a.right() - 220
+            self.fx = a.right() - 300
         self.fx = max(a.left() + 40, min(self.fx, a.right() - 40))
         self.fy = self._floor()
         self._fit_floor()
@@ -677,8 +683,14 @@ class DesktopPet(QWidget):
         self.state, self.state_left = state, seconds
         if state == "walk":
             a = self._area()
-            self.target_x = self._rng.uniform(a.left() + 60, a.right() - 60)
-            self.target_y = self._floor() - self._rng.uniform(0, ROAM) if self.bank.ok else self._floor()
+            if self._rng.random() < 0.78:                        # mostly pottering about in his corner
+                x0, x1 = self.boxes.play_area(a)
+                self.target_x = self._rng.uniform(x0, x1)
+                self.target_y = self._floor() - self._rng.uniform(0, 55)
+            else:                                               # sometimes a wander across the screen
+                self.target_x = self._rng.uniform(a.left() + 60, a.right() - 60)
+                self.target_y = self._floor() - self._rng.uniform(0, ROAM) if self.bank.ok else self._floor()
+            self.perch_box = -1
             self.facing = 1 if self.target_x > self.fx else -1
         elif state == "shoot":
             if self.after_shoot == "hammock" and self.hammock is not None:
@@ -726,6 +738,20 @@ class DesktopPet(QWidget):
         self._set_state("shoot", 0.45)
 
     def _choose_next(self) -> None:
+        if self.perch_box >= 0:                                 # sitting on a box: wave, look, or hop down
+            r = self._rng.random()
+            if r < 0.35:
+                self._set_state("wave", 2.4)
+            elif r < 0.6:
+                self._set_state("look", 2.6)
+            else:
+                x0, x1 = self.boxes.play_area(self._area())
+                self.start_jump(QPointF(self._rng.uniform(x0, x1), self._floor() - self._rng.uniform(0, 40)), -1)
+            return
+        if self._near_corner() and self._rng.random() < 0.38:   # hop up onto a toy box
+            i = self._rng.randrange(len(self.boxes.tops(self._area())))
+            self.start_jump(self.boxes.tops(self._area())[i], i)
+            return
         r = self._rng.random()
         if r < 0.40:
             self._set_state("walk", 14.0)
@@ -795,6 +821,17 @@ class DesktopPet(QWidget):
             self._fit_floor()
         elif st == "held":
             pass
+        elif st == "jump":
+            start, end, k = self.jump
+            k = min(1.0, k + dt / 0.55)
+            self.jump = (start, end, k)
+            self.fx = start.x() + (end.x() - start.x()) * k
+            self.fy = start.y() + (end.y() - start.y()) * k - 70 * math.sin(math.pi * k)
+            self._fit_fly()
+            if k >= 1.0:
+                self.fx, self.fy = end.x(), end.y()
+                self._fit_floor()
+                self._set_state("idle", self._rng.uniform(2.5, 5.0))
         elif st == "fly":
             self._fly(dt)
         elif st == "dizzy":
@@ -991,6 +1028,19 @@ class DesktopPet(QWidget):
         self._set_state("hop", 0.45)
         self.clicked.emit()
 
+    # ── his play corner ───────────────────────────────────────────────────
+    def _near_corner(self) -> bool:
+        x0, x1 = self.boxes.play_area(self._area())
+        return x0 - 40 <= self.fx <= x1 + 40 and self.fy > self._floor() - 70
+
+    def start_jump(self, to: QPointF, box: int) -> None:
+        """Hop in an arc onto a toy box (box >= 0) or back down to the floor (box = -1)."""
+        self.jump = (QPointF(self.fx, self.fy), QPointF(to), 0.0)
+        self.perch_box = box
+        self.facing = 1 if to.x() >= self.fx else -1
+        self.yaw = 90.0 * self.facing
+        self.state, self.state_left = "jump", 99.0
+
     # ── physics: thrown / falling ──────────────────────────────────────────
     def _depth(self) -> float:
         """Perspective: 1.0 at the front of the floor band (near the taskbar), smaller further back."""
@@ -999,6 +1049,7 @@ class DesktopPet(QWidget):
         return 0.84 + 0.16 * k
 
     def start_fly(self, vx: float, vy: float, shout: str = "") -> None:
+        self.perch_box = -1
         self.vx, self.vy = vx, vy
         self.spin = 0.0
         self.peak_speed = math.hypot(vx, vy)
@@ -1306,6 +1357,11 @@ def _paint_3d(self, p: QPainter) -> None:
         pts = b.blit(p, "tumble", 0, int(self.t * 8), "head", QPointF(at.x(), at.y() + 34 * S),
                      S, math.sin(self.t * 9) * 10)
         head = pts["head"]
+    elif st == "jump":
+        start, end, k = self.jump
+        feet = loc(QPointF(self.fx, self.fy))
+        pts = b.blit(p, "walk", 90 * self.facing, 2, "feet", feet, S, 8 * self.facing * math.sin(math.pi * k))
+        head = pts["head"]
     elif st == "fly":
         hip = loc(QPointF(self.fx, self.fy - 62 * S / SPRITE_SCALE))
         pts = b.blit(p, "tumble", 0, int(self.t * 10), "hip_c", hip, S, self.spin)
@@ -1492,6 +1548,122 @@ def _blanket_over(p: QPainter, pts: dict, S: float, legs_only: bool = False) -> 
     p.setPen(QPen(QColor(20, 40, 100, 220), 1.4))
     p.setBrush(QBrush(g))
     p.drawPath(poly)
+
+
+class PetBoxes(QWidget):
+    """A little stack of 3D-shaded toy boxes in the bottom-right corner: his play spot."""
+
+    BOXES = [  # (x offset from the right edge, width, height, kind) -- left to right
+        (300, 66, 52, "toy"), (214, 92, 70, "cardboard"), (214 - 6, 70, 46, "cardboard_top"), (110, 54, 54, "blue")]
+
+    def __init__(self) -> None:
+        super().__init__(None)
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
+                            | Qt.WindowType.Tool | Qt.WindowType.NoDropShadowWindowHint)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        self._area = None
+
+    def _rects(self, area) -> list[tuple[QRectF, str]]:
+        floor = area.bottom() - 4
+        out = []
+        for dx, w, h, kind in self.BOXES:
+            x = area.right() - dx
+            if kind == "cardboard_top":                       # stacked on the big cardboard box
+                base = out[1][0]
+                out.append((QRectF(base.left() + 10, base.top() - h, w, h), kind))
+            else:
+                out.append((QRectF(x, floor - h, w, h), kind))
+        return out
+
+    def tops(self, area) -> list[QPointF]:
+        """Where his feet go when he sits on each box."""
+        return [QPointF(r.center().x(), r.top() + 3) for r, _ in self._rects(area)]
+
+    def play_area(self, area) -> tuple[float, float]:
+        return float(area.right() - 360), float(area.right() - 40)
+
+    def place(self, area) -> None:
+        self._area = area
+        self.setGeometry(QRect(int(area.right() - 330), int(area.bottom() - 200), 320, 200))
+        self.update()
+
+    def paintEvent(self, _e) -> None:
+        if self._area is None:
+            return
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.translate(-self.x(), -self.y())
+        for r, kind in self._rects(self._area):
+            _draw_box(p, r, kind)
+        p.end()
+
+
+def _draw_box(p: QPainter, r: QRectF, kind: str) -> None:
+    """A 3D-shaded box: front face, lit top face and darker side, with a little decoration."""
+    base = {"toy": QColor(205, 36, 46), "blue": QColor(46, 92, 190)}.get(kind, QColor(196, 150, 96))
+    d = r.height() * 0.28                                              # depth of the top/side faces
+    # soft contact shadow
+    sh = QRadialGradient(QPointF(r.center().x(), r.bottom()), r.width() * 0.75)
+    sh.setColorAt(0.0, QColor(0, 0, 0, 70))
+    sh.setColorAt(1.0, QColor(0, 0, 0, 0))
+    p.setPen(Qt.PenStyle.NoPen)
+    p.setBrush(QBrush(sh))
+    p.drawEllipse(QPointF(r.center().x() + d * 0.4, r.bottom() + 1), r.width() * 0.75, 6)
+    outline = QPen(base.darker(260), 1.3)
+    top = QPainterPath()
+    top.moveTo(r.topLeft())
+    top.lineTo(QPointF(r.left() + d, r.top() - d * 0.6))
+    top.lineTo(QPointF(r.right() + d, r.top() - d * 0.6))
+    top.lineTo(r.topRight())
+    top.closeSubpath()
+    side = QPainterPath()
+    side.moveTo(r.topRight())
+    side.lineTo(QPointF(r.right() + d, r.top() - d * 0.6))
+    side.lineTo(QPointF(r.right() + d, r.bottom() - d * 0.6))
+    side.lineTo(r.bottomRight())
+    side.closeSubpath()
+    front = QLinearGradient(r.topLeft(), r.bottomLeft())
+    front.setColorAt(0.0, base.lighter(118))
+    front.setColorAt(1.0, base.darker(125))
+    p.setPen(outline)
+    p.setBrush(QBrush(front))
+    p.drawRoundedRect(r, 3, 3)
+    p.setBrush(QBrush(base.lighter(145)))
+    p.drawPath(top)
+    p.setBrush(QBrush(base.darker(165)))
+    p.drawPath(side)
+    if kind.startswith("cardboard"):                                  # packing tape
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(222, 196, 140, 230)))
+        p.drawRect(QRectF(r.center().x() - 6, r.top(), 12, r.height() * 0.45))
+        tape = QPainterPath()
+        tape.moveTo(QPointF(r.center().x() - 6, r.top()))
+        tape.lineTo(QPointF(r.center().x() - 6 + d, r.top() - d * 0.6))
+        tape.lineTo(QPointF(r.center().x() + 6 + d, r.top() - d * 0.6))
+        tape.lineTo(QPointF(r.center().x() + 6, r.top()))
+        p.drawPath(tape)
+    elif kind == "toy":                                               # spider logo on the red block
+        c = r.center()
+        p.setPen(QPen(QColor(20, 16, 24), 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap))
+        p.setBrush(QBrush(QColor(20, 16, 24)))
+        p.drawEllipse(c, 4.5, 6)
+        for k in (-1, 1):
+            for dy in (-4, 0, 4):
+                p.drawLine(QPointF(c.x() + k * 3, c.y() + dy), QPointF(c.x() + k * 11, c.y() + dy + (dy or -2) * 0.8))
+    else:                                                             # a white star on the blue box
+        c = r.center()
+        star = QPainterPath()
+        for k in range(10):
+            rr = 12 if k % 2 == 0 else 5
+            ang = -math.pi / 2 + k * math.pi / 5
+            q = QPointF(c.x() + math.cos(ang) * rr, c.y() + math.sin(ang) * rr)
+            star.moveTo(q) if k == 0 else star.lineTo(q)
+        star.closeSubpath()
+        p.setPen(Qt.PenStyle.NoPen)
+        p.setBrush(QBrush(QColor(250, 250, 255)))
+        p.drawPath(star)
 
 
 class _NullPainter:

@@ -246,3 +246,26 @@ def test_sprite_bank_picks_and_mirrors_views():
     assert bank._pick_view("walk", 170)[0] == 180
     pm, pts, _ = bank.frame("walk", 0, 3)
     assert not pm.isNull() and {"hand_r", "feet", "head", "hip_c"} <= set(pts)
+
+def test_plays_in_his_corner_and_hops_onto_the_boxes():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    a = pet._area()
+    x0, x1 = pet.boxes.play_area(a)
+    pet._rng.seed(5)
+    inside = 0
+    for _ in range(40):                                  # most walks stay in the corner
+        pet.perch_box = -1
+        pet._set_state("walk", 5)
+        inside += x0 <= pet.target_x <= x1
+    assert inside >= 25
+    top = pet.boxes.tops(a)[2]
+    pet.start_jump(top, 2)
+    for _ in range(30):
+        pet._tick()
+    assert pet.perch_box == 2 and abs(pet.fx - top.x()) < 1 and abs(pet.fy - top.y()) < 1
+    assert pet.boxes.isVisible()
+    pet._hide_now()
+    assert not pet.boxes.isVisible()                     # boxes go away with him
+    pet._watch.stop()
