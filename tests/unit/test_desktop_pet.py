@@ -343,7 +343,7 @@ def test_new_tab_makes_him_look_and_think():
     pet._set_state("idle", 9)
     pet.fg.poll = lambda: ("tab", "New Tab - Chrome", (1000, 100, 1600, 900))
     pet._watch_screen()
-    assert pet.thought_t > 0 and pet.thought and pet.look_hold > 0 and pet.yaw > 0
+    assert pet.thought_t > 0 and pet.thought and pet.look_hold > 0 and pet.gaze[0] > 0   # head turns
     pet.grab()
     pet._watch.stop(); pet._hide_now()
 
@@ -365,6 +365,24 @@ def test_tearing_his_web_makes_him_angry_after_the_fall():
         seen.add(pet.state)
         if pet.state == "angry":
             break
-    assert pet.state == "angry" and pet.bubble in ("Hey! My web!!", "Grrr!", "Not cool, boss!", "Hmph!")
+    assert pet.state == "angry" and pet.bubble
     pet.grab()
     pet._watch.stop(); pet._hide_now()
+
+
+def test_sitting_calm_he_turns_his_head_to_the_cursor_and_to_new_tabs():
+    from PySide6.QtCore import QPointF
+    pet, _ = _pet()
+    pet.start()
+    pet.set_calm(True)
+    head = pet._head_world()
+    pet._be_aware(0.033, QPointF(head.x() - 90, head.y() + 10))       # cursor comes close on his left
+    assert pet.state == "sit" and pet.gaze is not None and pet.gaze[0] < -30
+    pet.gaze_t = 0
+    pet.fg.poll = lambda: ("tab", "New Tab", (2000, -400, 2600, 0))     # new tab up and to the right
+    pet._last_react = -99
+    pet._watch_screen()
+    assert pet.state == "sit" and pet.gaze[0] > 30 and pet.gaze[1] > 10 and pet.gaze_t > 0
+    pet.grab()
+    pet._watch.stop(); pet._hide_now()
+

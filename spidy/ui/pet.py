@@ -1093,7 +1093,7 @@ class DesktopPet(QWidget):
         near = math.hypot(dx, dy) < 170
         if near and self.state not in ("held", "fly"):
             self.sense = 1.0                                           # spidey-sense tingles
-        if near and self.state in ("idle", "look"):
+        if near and self.state in ("idle", "look", "sit"):
             # head follows the cursor: left/right and up/down
             self.gaze = (max(-60.0, min(60.0, dx / 110 * 60)), max(-24.0, min(28.0, -dy / 90 * 28)))
             self.gaze_t = 0.4
@@ -1113,7 +1113,8 @@ class DesktopPet(QWidget):
     def _get_angry(self) -> None:
         self.web_torn = False
         self._set_state("angry", 2.6)
-        self.say(self._rng.choice(["Hey! My web!!", "Grrr!", "Not cool, boss!", "Hmph!"]), 2.2)
+        self.say(self._rng.choice(["Hey! My web!!", "Grrr!", "Not cool, boss!", "Hmph!",
+                                  "Hey! My web!! #@%&!", "Grrr! *!@#$%!!", "#$%&*!! My web!", "@#*&!!"]), 2.2)
 
     def say(self, text: str, secs: float = 1.6) -> None:
         self.bubble, self.bubble_t = text, secs
@@ -1124,13 +1125,14 @@ class DesktopPet(QWidget):
             return
         self.thought, self.thought_t = text, 3.2
         if look_at is not None:
-            dx = look_at.x() - self.fx
-            self.yaw = max(-90.0, min(90.0, 70.0 if dx > 40 else -70.0 if dx < -40 else 0.0))
-            self.facing = 1 if dx >= 0 else -1
+            head = self._head_world()
+            dx, dy = look_at.x() - head.x(), look_at.y() - head.y()
+            self.gaze = (max(-60.0, min(60.0, dx / 260 * 60)), max(-24.0, min(28.0, -dy / 260 * 28)))
+            self.gaze_t = 3.0                                          # head turns toward it
             self.look_hold = 3.0
-        if self.state in ("phone", "snack"):
-            self._set_state("idle", 3.0)
-        elif self.state == "walk":
+        if self.calm:
+            return                                                     # sitting calmly: only the head turns
+        if self.state in ("phone", "snack", "walk"):
             self._set_state("idle", 3.0)
 
     def _watch_screen(self) -> None:
@@ -1552,8 +1554,14 @@ def _paint_3d(self, p: QPainter) -> None:
     elif st == "sit":
         feet = loc(QPointF(self.fx, self.fy))
         _shadow(p, feet, S)
-        anim = "sit" if b.has("sit") else "idle"
-        pts = b.blit(p, anim, 0, int(self.t * 0.7), "feet", feet, S)
+        if self.gaze_t > 0 and self.gaze is not None and b.has("sitgaze"):
+            gy, gp = self.gaze
+            yi = min(range(3), key=lambda i: abs(abs(gy) - (0, 30, 60)[i]))
+            pi_ = min(range(3), key=lambda i: abs(gp - (28, 0, -24)[i]))
+            pts = b.blit(p, "sitgaze", 0, yi * 3 + pi_, "feet", feet, S, 0, 1.0, mirror_x=gy < 0)
+        else:
+            anim = "sit" if b.has("sit") else "idle"
+            pts = b.blit(p, anim, 0, int(self.t * 0.7), "feet", feet, S)
         head = pts["head"]
     elif st in ("splat", "getup"):
         feet = loc(QPointF(self.fx, self.fy))

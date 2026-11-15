@@ -617,6 +617,12 @@ def angry(i, n):                     # web torn: fists clenched down, stomping, 
                 hip_r=-4, knee_r=6, lean=6, head_pitch=-6, head_tilt=w * 4, expr="angry")
 
 
+def sitgaze(i, n):                   # sitting calmly, head turned toward the cursor / an app
+    yaw, pitch = GAZE_YAWS[i // 3], GAZE_PITCHES[i % 3]
+    return Pose(hip_l=86, knee_l=40, hip_r=82, knee_r=46, bob=-0.30, arm_l=(30, 22, 40), arm_r=(30, 22, 40),
+                head_yaw=yaw, head_pitch=pitch)
+
+
 def sleep(i, n):
     return Pose(arm_l=(0, 8, 10), arm_r=(0, 8, 10), head_tilt=6)
 
@@ -636,6 +642,7 @@ ANIMS = {
     "sit": (sit, 2, [0]),
     "angry": (angry, 2, [0]),
     "gaze": (gaze, 9, [0]),
+    "sitgaze": (sitgaze, 9, [0]),
     "nap": (nap, 2, [0]),
 }
 
