@@ -192,10 +192,10 @@ def test_thrown_spidey_flies_bounces_and_lands_dizzy():
         if pet.state != "fly":
             break
     assert pet.fx > x0 + 100                                           # went the way he was thrown
-    assert pet.state == "dizzy" and abs(pet.fy - floor) < 1             # hard landing -> dizzy on the floor
-    for _ in range(120):
+    assert pet.state in ("dizzy", "splat") and abs(pet.fy - floor) < 1  # hard landing: sits dizzy or lands flat
+    for _ in range(220):
         pet._tick()
-    assert pet.state not in ("dizzy", "fly")                            # shakes it off
+    assert pet.state not in ("dizzy", "fly", "splat", "getup")                            # shakes it off
     pet._watch.stop(); pet._hide_now()
 
 
@@ -268,3 +268,21 @@ def test_plays_in_his_corner_and_hops_onto_the_boxes():
     pet._hide_now()
     assert not pet.boxes.isVisible()                     # boxes go away with him
     pet._watch.stop()
+
+def test_lands_flat_when_tipped_over_then_gets_up():
+    pet, _ = _pet()
+    pet.start()
+    pet._set_state("idle", 5)
+    pet.fx, pet.fy = pet._area().center().x(), pet._floor() - 5
+    pet.start_fly(0.0, 50.0)
+    pet.spin = 100.0                                    # tumbling face-first as he hits the ground
+    seen = []
+    for _ in range(200):
+        pet._tick()
+        if not seen or seen[-1] != pet.state:
+            seen.append(pet.state)
+        if pet.state == "idle" and "splat" in seen:
+            break
+    assert seen[:4] == ["fly", "splat", "getup", "dizzy"] or seen[1:4] == ["splat", "getup", "dizzy"]
+    pet.grab()                                          # every state paints
+    pet._watch.stop(); pet._hide_now()

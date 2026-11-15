@@ -589,7 +589,8 @@ class DesktopPet(QWidget):
         self.cut_pieces: list[dict] = []    # snapped web ends recoiling after a cut
         self._drag_samples: list[tuple[float, QPointF]] = []
         self._last_cursor: QPointF | None = None
-        self.jump = None                    # (start, end, t) while hopping onto / off a box
+        self.jump = None
+        self.splat_rot = 90.0                    # (start, end, t) while hopping onto / off a box
         self.perch_box = -1                 # which toy box he is sitting on (-1 = floor)
         self.boxes = PetBoxes()             # the toy boxes in his corner
         self._anim = QTimer(self)
@@ -835,6 +836,12 @@ class DesktopPet(QWidget):
         elif st == "dizzy":
             if self.state_left <= 0:
                 self._set_state("idle", 1.0)
+        elif st == "splat":                                             # flat on the ground, then push up
+            if self.state_left <= 0:
+                self._set_state("getup", 0.55)
+        elif st == "getup":
+            if self.state_left <= 0:
+                self._set_state("dizzy", 1.6)                           # ...and sits a moment, dazed
         elif st == "shoot":
             self.shoot_k = min(1.0, self.shoot_k + dt / 0.35)
             self._fit_shoot()
@@ -1076,16 +1083,19 @@ class DesktopPet(QWidget):
             if self.vy > 260:
                 self.vy = -self.vy * 0.38
                 self.vx *= 0.7
-                self.spin *= 0.5
             else:
                 self.vx = self.vy = 0.0
-                self.spin = 0.0
                 hard = self.peak_speed > 520 or (self.peak_speed > 220 and self._rng.random() < 0.55)
                 self.peak_speed = 0.0
-                if hard:
+                tilt = ((self.spin + 180) % 360) - 180                 # how he is turned as he lands
+                if abs(tilt) > 50:                                      # tipped over: lands flat at that angle
+                    self.splat_rot = 90.0 if tilt > 0 else -90.0
+                    self._set_state("splat", 1.6)
+                elif hard:
                     self._set_state("dizzy", 2.6)
                 else:
                     self._set_state("idle", 1.0)
+                self.spin = 0.0
                 self._fit_floor()
                 return
         self._fit_fly()
@@ -1364,6 +1374,16 @@ def _paint_3d(self, p: QPainter) -> None:
         hip = loc(QPointF(self.fx, self.fy - 62 * S / SPRITE_SCALE))
         pts = b.blit(p, "tumble", 0, int(self.t * 10), "hip_c", hip, S, self.spin)
         head = pts["head"]
+    elif st in ("splat", "getup"):
+        feet = loc(QPointF(self.fx, self.fy))
+        k = 1.0 if st == "splat" else max(0.0, self.state_left / 0.55)   # 1 = flat, 0 = upright
+        rot = self.splat_rot * k
+        hip = QPointF(feet.x(), feet.y() - (62 * S / SPRITE_SCALE) * (1 - k) - 14 * S * k)
+        _shadow(p, feet, S)
+        pts = b.blit(p, "tumble" if st == "splat" else "idle", 0, 0, "hip_c", hip, S, rot)
+        head = pts["head"]
+        if st == "splat":
+            _stars(p, head, self.t, S)
     elif st == "dizzy":
         feet = loc(QPointF(self.fx, self.fy))
         _shadow(p, feet, S)
