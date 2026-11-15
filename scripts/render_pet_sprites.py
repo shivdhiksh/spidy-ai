@@ -531,7 +531,7 @@ def upside(i, n):                   # rendered upright; the pet rotates it 180 d
 
 
 def shoot(i, n):
-    return Pose(arm_r=(25, 140, 0), arm_l=(10, 25, 30), hip_l=12, knee_l=10, hip_r=-8, knee_r=12, lean=-3)
+    return Pose(arm_r=(60, 100, -10), arm_l=(10, 25, 30), hip_l=12, knee_l=10, hip_r=-8, knee_r=12, lean=-3)   # arm out, away from the face
 
 
 def lounge(i, n):                   # rendered upright; rotated to lie in the hammock / bed

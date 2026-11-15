@@ -748,7 +748,7 @@ class DesktopPet(QWidget):
                 x0, x1 = self.boxes.play_area(self._area())
                 self.start_jump(QPointF(self._rng.uniform(x0, x1), self._floor() - self._rng.uniform(0, 40)), -1)
             return
-        if self._near_corner() and self._rng.random() < 0.38:   # hop up onto a toy box
+        if False:                                               # tiny toys: he plays beside them, no climbing
             i = self._rng.randrange(len(self.boxes.tops(self._area())))
             self.start_jump(self.boxes.tops(self._area())[i], i)
             return
@@ -1082,7 +1082,7 @@ class DesktopPet(QWidget):
             else:
                 self.vx = self.vy = 0.0
                 self.spin = 0.0
-                hard = self.peak_speed > 700
+                hard = self.peak_speed > 520 or (self.peak_speed > 220 and self._rng.random() < 0.55)
                 self.peak_speed = 0.0
                 if hard:
                     self._set_state("dizzy", 2.6)
@@ -1554,7 +1554,7 @@ class PetBoxes(QWidget):
     """A little stack of 3D-shaded toy boxes in the bottom-right corner: his play spot."""
 
     BOXES = [  # (x offset from the right edge, width, height, kind) -- left to right
-        (300, 66, 52, "toy"), (214, 92, 70, "cardboard"), (214 - 6, 70, 46, "cardboard_top"), (110, 54, 54, "blue")]
+        (236, 18, 15, "toy"), (196, 24, 20, "cardboard"), (196 - 3, 17, 13, "cardboard_top"), (150, 16, 16, "blue")]
 
     def __init__(self) -> None:
         super().__init__(None)
