@@ -37,7 +37,7 @@ def test_dots_start_on_the_pet_and_end_on_the_blob_sphere(app):
         assert morph.dot_state(d, morph.TOTAL, target, r)[2] == 0.0
 
 
-def test_whole_morph_opens_the_hud_and_finishes_under_1_5_seconds(app):
+def test_whole_morph_opens_the_hud_and_finishes_under_2_seconds(app):
     calls = {}
     dots = morph.sample_dots(_img(), QPointF(100, 100))
     t0 = time.monotonic()
@@ -48,6 +48,6 @@ def test_whole_morph_opens_the_hud_and_finishes_under_1_5_seconds(app):
     while "done" not in calls and time.monotonic() - t0 < 3:
         app.processEvents()
         time.sleep(0.005)
-    assert "hud" in calls and calls["hud"] < 1.0
-    assert calls["done"] < 1.5
-    assert morph.TOTAL <= 1.5
+    assert "hud" in calls and calls["hud"] < 1.5
+    assert calls["done"] < 2.0
+    assert morph.TOTAL < 2.0

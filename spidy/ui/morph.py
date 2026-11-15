@@ -2,7 +2,7 @@
 Pet -> HUD morph
 ================
 When the HUD opens while the desktop pet is on screen (pet clicked, "Hey Spidy", "Wake up Spidy"),
-the pet dissolves into holographic violet dots that fly across the screen and swirl into the HUD's
+the pet bursts into holographic violet dots that roll round the screen in a ring and spiral into the HUD's
 dot blob, and the HUD fades in underneath them. The whole thing takes TOTAL (1.3 s).
 
 Timeline (seconds)
@@ -21,10 +21,13 @@ from PySide6.QtCore import QObject, QPointF, QRect, QRectF, Qt, QTimer
 from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QRadialGradient
 from PySide6.QtWidgets import QWidget
 
-TOTAL = 1.30
-DISSOLVE = 0.30
-FLIGHT_END = 0.85
-HUD_AT = 0.85
+TOTAL = 1.80
+DISSOLVE = 0.15          # burst: the pet is gone almost at once
+GHOST = 0.06             # how long the pet picture lingers while it bursts
+RING_IN = 0.45           # dots fly out onto a big ring around the screen
+SPIRAL_AT = 0.95         # ring starts spiralling into the UI
+FLIGHT_END = 1.40        # every dot has reached the blob sphere
+HUD_AT = 1.20
 MAX_DOTS = 520
 _VIOLET = (168, 120, 255)
 _CYAN = (120, 220, 255)
@@ -60,8 +63,10 @@ def sample_dots(img: QImage, origin: QPointF, step: int = 4, limit: int = MAX_DO
     return dots
 
 
-def dot_state(d: dict, t: float, target: QPointF, radius: float):
-    """Where one dot is at time t: (x, y, alpha 0..1, colour mix 0=pet colour .. 1=hologram)."""
+def dot_state(d: dict, t: float, target: QPointF, radius: float, ring=None):
+    """Where one dot is at time t: (x, y, alpha 0..1, colour mix 0=pet colour .. 1=hologram).
+
+    ring = (centre QPointF, radius): the big circle the dots roll around before flowing into the UI."""
     sx, sy = d["sx"], d["sy"]
     dx, dy = d["drift"]
     k = _ease(t / DISSOLVE)
@@ -72,14 +77,21 @@ def dot_state(d: dict, t: float, target: QPointF, radius: float):
     ey = target.y() + radius * math.cos(d["phi"])
     if t <= DISSOLVE:
         return px, py, 1.0, k
-    f0 = DISSOLVE + d["delay"]
-    f = _ease((t - f0) / max(0.05, FLIGHT_END - f0))
-    # quadratic bezier with a sideways bend: streams, not a straight line
-    mx, my = (px + ex) / 2, (py + ey) / 2
-    nx, ny = -(ey - py), (ex - px)
-    cx, cy = mx + nx * d["bend"], my + ny * d["bend"]
-    x = (1 - f) ** 2 * px + 2 * (1 - f) * f * cx + f * f * ex
-    y = (1 - f) ** 2 * py + 2 * (1 - f) * f * cy + f * f * ey
+    rc, rr = ring if ring is not None else (target, radius * 2.5)
+    ang = d["theta"] + 6.0 * (t - DISSOLVE)                  # rolling round the ring
+    # 1) burst position -> onto the ring
+    f1 = _ease((t - DISSOLVE - d["delay"]) / RING_IN)
+    rx, ry = rc.x() + rr * math.cos(ang), rc.y() + rr * math.sin(ang)
+    x, y = px + (rx - px) * f1, py + (ry - py) * f1
+    # 2) ring spirals in: centre slides to the blob, radius shrinks, then lands on the sphere
+    f2 = _ease((t - SPIRAL_AT - d["delay"] * 0.5) / max(0.05, FLIGHT_END - SPIRAL_AT - d["delay"] * 0.5))
+    if f2 > 0:
+        cx = rc.x() + (target.x() - rc.x()) * f2
+        cy = rc.y() + (target.y() - rc.y()) * f2
+        r2 = rr + (radius - rr) * f2
+        sx2, sy2 = cx + r2 * math.cos(ang), cy + r2 * math.sin(ang)
+        w = f2 * f2
+        x, y = sx2 + (ex - sx2) * w, sy2 + (ey - sy2) * w
     alpha = 1.0 if t < FLIGHT_END else max(0.0, 1.0 - (t - FLIGHT_END) / (TOTAL - FLIGHT_END))
     return x, y, alpha, 1.0
 
@@ -88,7 +100,7 @@ class MorphOverlay(QWidget):
     """Transparent, click-through window that paints the flying dots."""
 
     def __init__(self, dots: list[dict], target: QPointF, radius: float, ghost: QImage | None,
-                 ghost_at: QPointF, on_hud, on_done) -> None:
+                 ghost_at: QPointF, on_hud, on_done, ring=None) -> None:
         super().__init__(None)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool | Qt.WindowType.NoDropShadowWindowHint
@@ -97,6 +109,11 @@ class MorphOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         self.dots, self.target, self.radius = dots, target, radius
+        scr = QGuiApplication.screenAt(target.toPoint()) or QGuiApplication.primaryScreen()
+        if ring is None and scr is not None:
+            g = scr.geometry()
+            ring = (QPointF(g.center()), 0.36 * min(g.width(), g.height()))
+        self.ring = ring
         self.ghost, self.ghost_at = ghost, ghost_at
         self._on_hud, self._on_done = on_hud, on_done
         self._hud_fired = False
@@ -109,6 +126,9 @@ class MorphOverlay(QWidget):
         virt = QRect()
         for s in QGuiApplication.screens():
             virt = virt.united(s.geometry())
+        if self.ring is not None:
+            c, r = self.ring
+            box = box.united(QRect(int(c.x() - r) - 40, int(c.y() - r) - 40, int(2 * r) + 80, int(2 * r) + 80))
         self.setGeometry(box.intersected(virt) if not virt.isNull() else box)
         self._timer = QTimer(self)
         self._timer.setInterval(16)
@@ -143,8 +163,8 @@ class MorphOverlay(QWidget):
         off = QPointF(self.x(), self.y())
         t = self.t
         # the pet itself fades out as it breaks apart
-        if self.ghost is not None and t < DISSOLVE:
-            p.setOpacity(1.0 - _ease(t / DISSOLVE))
+        if self.ghost is not None and t < GHOST:
+            p.setOpacity(1.0 - t / GHOST)
             p.drawImage(self.ghost_at - off, self.ghost)
             p.setOpacity(1.0)
         p.setCompositionMode(QPainter.CompositionMode.CompositionMode_Plus)
@@ -161,7 +181,7 @@ class MorphOverlay(QWidget):
             p.drawEllipse(tgt, self.radius * 1.5, self.radius * 1.5)
         p.setPen(Qt.PenStyle.NoPen)
         for i, d in enumerate(self.dots):
-            x, y, a, mix = dot_state(d, t, self.target, self.radius)
+            x, y, a, mix = dot_state(d, t, self.target, self.radius, self.ring)
             if a <= 0.01:
                 continue
             hue = _CYAN if i % 5 == 0 else _VIOLET
