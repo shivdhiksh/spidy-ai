@@ -99,8 +99,9 @@ def dot_state(d: dict, t: float, target: QPointF, radius: float, ring=None):
 class MorphOverlay(QWidget):
     """Transparent, click-through window that paints the flying dots."""
 
-    def __init__(self, dots: list[dict], target: QPointF, radius: float, ghost: QImage | None,
-                 ghost_at: QPointF, on_hud, on_done, ring=None) -> None:
+    def __init__(self, dots: list[dict] | None = None, target: QPointF | None = None, radius: float = 100.0,
+                 ghost: QImage | None = None, ghost_at: QPointF | None = None, on_hud=None, on_done=None,
+                 ring=None, reusable: bool = False) -> None:
         super().__init__(None)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint
                             | Qt.WindowType.Tool | Qt.WindowType.NoDropShadowWindowHint
@@ -108,6 +109,23 @@ class MorphOverlay(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
         self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.reusable = reusable
+        self._timer = QTimer(self)
+        self._timer.setInterval(16)
+        self._timer.timeout.connect(self._step)
+        import time
+        self._clock = time.monotonic
+        self._t0 = 0.0
+        self.dots, self.t = [], 0.0
+        if dots:
+            self.load(dots, target, radius, ghost, ghost_at, on_hud, on_done, ring)
+
+    def warm_up(self) -> None:
+        """Create the native window now, so the first morph starts on the very next frame."""
+        self.setGeometry(-10, -10, 2, 2)
+        self.winId()
+
+    def load(self, dots, target, radius, ghost, ghost_at, on_hud, on_done, ring=None) -> None:
         self.dots, self.target, self.radius = dots, target, radius
         scr = QGuiApplication.screenAt(target.toPoint()) or QGuiApplication.primaryScreen()
         if ring is None and scr is not None:
@@ -130,17 +148,13 @@ class MorphOverlay(QWidget):
             c, r = self.ring
             box = box.united(QRect(int(c.x() - r) - 40, int(c.y() - r) - 40, int(2 * r) + 80, int(2 * r) + 80))
         self.setGeometry(box.intersected(virt) if not virt.isNull() else box)
-        self._timer = QTimer(self)
-        self._timer.setInterval(16)
-        self._timer.timeout.connect(self._step)
-        import time
-        self._clock = time.monotonic
-        self._t0 = 0.0
 
     def run(self) -> None:
         self._t0 = self._clock()
+        self.t = 0.0
         self.show()
         self.raise_()
+        self.repaint()                        # first frame right now, not on the next timer tick
         self._timer.start()
 
     def _step(self) -> None:
@@ -153,7 +167,8 @@ class MorphOverlay(QWidget):
             self._timer.stop()
             self.hide()
             self._on_done()
-            self.deleteLater()
+            if not self.reusable:
+                self.deleteLater()
             return
         self.update()
 
@@ -205,6 +220,8 @@ class HudMorph(QObject):
         self._overlay = overlay
         self._pet = pet_getter
         self._running: MorphOverlay | None = None
+        self._view = MorphOverlay(reusable=True)
+        self._view.warm_up()
 
     def _hud_on_screen(self) -> bool:
         ov = self._overlay
@@ -229,6 +246,7 @@ class HudMorph(QObject):
             self._overlay.restore_hud()
             return
         try:
+            pet.setWindowOpacity(0.0)                       # gone this very instant
             img = pet.grab().toImage()
             dpr = img.devicePixelRatio() or 1.0
             if dpr != 1.0:
@@ -249,5 +267,6 @@ class HudMorph(QObject):
         def done() -> None:
             self._running = None
 
-        self._running = MorphOverlay(dots, target, radius, img, origin, self._overlay.restore_hud, done)
-        self._running.run()
+        self._running = self._view
+        self._view.load(dots, target, radius, None, origin, self._overlay.restore_hud, done)
+        self._view.run()

@@ -1004,9 +1004,7 @@ class VoiceEngine:
     def _fire_wake(self, model: str, phrase: str, score: float) -> None:
         """Enter WAKING and announce the wake word (audio thread or verify thread)."""
         self._set_state(VoiceState.WAKING)
-        self._prewarm_models()          # wake confirmed: bring the conversation models in now
-        # Reset OWW's temporal smoothing buffer immediately after detection.
-        self._wake_model.reset_buffer()
+        # Announce first, so the pet -> UI morph starts the instant the wake is confirmed.
         self._bus.publish_threadsafe(
             WakeWordDetectedEvent(
                 confidence=score,
@@ -1014,6 +1012,9 @@ class VoiceEngine:
                 wake_phrase=phrase,
             )
         )
+        self._prewarm_models()          # wake confirmed: bring the conversation models in now
+        # Reset OWW's temporal smoothing buffer immediately after detection.
+        self._wake_model.reset_buffer()
         # Signal async loop to start listening if not in conversation mode
         # (In conversation mode, ContinuousVoiceController coordinates ack and listening)
         if not self._conversation_mode:
