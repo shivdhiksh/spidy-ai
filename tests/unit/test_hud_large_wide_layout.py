@@ -265,6 +265,7 @@ async def test_spidy_app_wake_word_and_hotkey_reopen(qapp, theme):
 
     app = SpidyApp(bus=bus, config=config)
     app.start()
+    app._pet = None          # no desktop pet: the HUD opens directly (no pet -> UI morph)
 
     # Hide HUD
     app.hide_hud()

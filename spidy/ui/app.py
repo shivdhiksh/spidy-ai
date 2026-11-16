@@ -265,6 +265,9 @@ class SpidyApp:
         b = self._bus
         bridge = self._bridge
 
+        import time as _t
+        self._ui_born = _t.monotonic()
+        b.subscribe("system.started", self._handle_core_started)
         b.subscribe("ui.show", self._handle_show)
         b.subscribe("ui.hide", self._handle_hide)
         b.subscribe("ui.restore", self._handle_restore)
@@ -303,6 +306,15 @@ class SpidyApp:
         log.debug("UI EventBus subscriptions registered.")
 
     # ── EventBus handlers (async — called from asyncio loop) ─────────────
+
+    async def _handle_core_started(self, event) -> None:
+        """Voice is up: say any pet greeting that came before it was ready."""
+        self._voice_ready = True
+        text, self._pending_greet = getattr(self, "_pending_greet", None), None
+        if text:
+            from spidy.brain.events import BrainResponseReadyEvent
+            await self._bus.publish(BrainResponseReadyEvent(session_id="pet", response_text=text,
+                                                            decision_mode="greeting"))
 
     async def _handle_show(self, event: UIShowEvent) -> None:
         log.info("[HUD LIFECYCLE] show_hud requested via EventBus ui.show")
@@ -501,6 +513,13 @@ class SpidyApp:
 
     def _pet_greets(self, text: str) -> None:
         """The pet woke up and waves: Spidy says it out loud (same path as her timer announcements)."""
+        import time as _t
+        if not getattr(self, "_voice_ready", False) and _t.monotonic() - getattr(self, "_ui_born", 0.0) > 150:
+            self._voice_ready = True                       # safety net: never hold a greeting forever
+        if not getattr(self, "_voice_ready", False):      # UI starts before the voice: say it once it's up
+            self._pending_greet = text
+            log.info("[PET] greeting waits for the voice: {t}", t=text)
+            return
         try:
             from spidy.brain.events import BrainResponseReadyEvent
             self._publish_sync(BrainResponseReadyEvent(session_id="pet", response_text=text, decision_mode="greeting"))

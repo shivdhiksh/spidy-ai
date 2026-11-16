@@ -142,6 +142,7 @@ async def test_wake_event_restores_hidden_hud(qapp, mock_config):
     bus = MagicMock()
     app = SpidyApp(bus=bus, config=mock_config)
     app.start()
+    app._pet = None          # no desktop pet: the HUD opens directly (no pet -> UI morph)
 
     # Minimize HUD
     app.minimize_hud()
@@ -171,6 +172,7 @@ async def test_ui_restore_event_restores_hud(qapp, mock_config):
     bus = MagicMock()
     app = SpidyApp(bus=bus, config=mock_config)
     app.start()
+    app._pet = None          # no desktop pet: the HUD opens directly (no pet -> UI morph)
 
     # Minimize HUD
     app.minimize_hud()

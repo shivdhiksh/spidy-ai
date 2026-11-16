@@ -577,7 +577,7 @@ class DesktopPet(QWidget):
         self.after_shoot = ""               # "hammock": the web shot is for stringing a hammock
         self.intro_t = 0.0                  # wake-up intro after Spidy starts (bed -> wave -> stand)
         self._greeted = False
-        self.greeting = "Welcome boss!"              # door intro (unlock)
+        self.greeting = "Welcome Back Boss!"              # door intro (unlock)
         self.wake_greeting = "Hi Boss!! Welcome Back"  # start-up: after you wipe the webs
         self.hammock: tuple[QPointF, QPointF] | None = None
         self.hammock_k = 0.0

@@ -158,7 +158,7 @@ def test_door_intro_on_unlock_waves_then_stands():
     assert pet.state == "intro"
     for _ in range(int(7 / 0.033)):
         pet._tick()
-    assert said == ["Welcome boss!"]                    # greeted exactly once
+    assert said == ["Welcome Back Boss!"]                    # greeted exactly once
     assert pet.state not in ("intro",) and abs(pet.fy - pet._floor()) < 2
     pet._hide_now()
     pet._sync_with_ui()                              # shown again later: no second greeting
@@ -414,7 +414,7 @@ def test_door_intro_says_welcome_boss_and_hidden_pet_returns_after_opening_spidy
     pet.play_door_intro()
     for _ in range(int(6.5 / 0.033)):
         pet._tick()
-    assert said == ["Welcome boss!"] and pet.state != "intro"
+    assert said == ["Welcome Back Boss!"] and pet.state != "intro"
     pet.set_enabled(False)
     assert not pet.isVisible()
     ui["ui"] = True; pet._sync_with_ui()           # you open Spidy (taskbar S) ...
