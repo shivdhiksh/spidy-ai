@@ -53,6 +53,17 @@ class QuickGreeter:
             missing.append(text)
         if missing:
             threading.Thread(target=self._synthesise, args=(missing,), name="QuickGreeter", daemon=True).start()
+        threading.Thread(target=self._warm_audio, name="QuickGreeterWarm", daemon=True).start()
+
+    def _warm_audio(self) -> None:
+        """Load the audio library and open the speaker once now, so the first greeting doesn't stall."""
+        try:
+            import sounddevice as sd
+            with sd.OutputStream(samplerate=22050, channels=1, dtype="float32"):
+                pass
+            self._sd = sd
+        except Exception as exc:  # noqa: BLE001
+            log.debug("[PET] audio warm-up skipped: {exc}", exc=exc)
 
     def _synthesise(self, texts: list[str]) -> None:
         try:
@@ -91,7 +102,9 @@ class QuickGreeter:
             return False
         def play() -> None:                      # opening the audio device can take a moment: off the UI thread
             try:
-                import sounddevice as sd
+                sd = getattr(self, "_sd", None)
+                if sd is None:
+                    import sounddevice as sd
                 sd.play(item[0], item[1])
                 sd.wait()
             except Exception as exc:  # noqa: BLE001
