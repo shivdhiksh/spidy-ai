@@ -779,6 +779,7 @@ class DesktopPet(QWidget):
                 self.state_left = 0.0                    # climbs down on a web on the next tick
             self.say(self.greeting, 3.0)
             self.greet.emit(self.greeting)
+            self._welcome_until = self._now() + 8.0       # his climb-down web can't be torn meanwhile
 
     def play_door_intro(self) -> None:
         """Unlock / screen back on: the pink door opens and he walks out saying "Welcome boss!"."""
@@ -1339,6 +1340,10 @@ class DesktopPet(QWidget):
 
     def cut_web(self, at: QPointF, a: QPointF, b: QPointF) -> None:
         """The web snaps where the cursor crossed it: both ends recoil and Spidey drops with an "Eek!"."""
+        if getattr(self, "hammock_sleep", False) or self._now() < getattr(self, "_welcome_until", 0.0):
+            if getattr(self, "hammock_sleep", False):   # waking up: no tantrum, he just climbs down
+                self.wake_from_hammock()
+            return
         self.cut_pieces = [{"a": QPointF(a), "b": QPointF(at), "age": 0.0, "fall": False},
                            {"a": QPointF(at), "b": QPointF(b), "age": 0.0, "fall": True}]
         if self.state in ("swing", "lower"):

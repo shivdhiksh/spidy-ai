@@ -437,3 +437,21 @@ def test_after_the_boot_webs_are_cleared_he_climbs_down_and_welcomes_you():
         pet._tick()
     assert said == ["Welcome boss!"] and pet.state != "hammock"
     pet._watch.stop(); pet._hide_now()
+
+
+def test_sweeping_his_hammock_at_start_up_wakes_him_calmly_not_angry():
+    pet, _ = _pet()
+    said = []
+    pet.greet.connect(said.append)
+    pet.start()
+    pet.sleep_in_hammock()
+    pet._tick()
+    a, b = pet._web_segments()[0]
+    pet.cut_web(QPointF((a.x() + b.x()) / 2, (a.y() + b.y()) / 2), a, b)
+    for _ in range(int(6 / 0.033)):
+        pet._tick()
+        if pet.state in ("swing", "lower"):
+            s = pet._web_segments()[0]
+            pet.cut_web(s[0], s[0], s[1])      # cursor keeps brushing his web: still no tantrum
+    assert said == ["Welcome boss!"] and pet.state != "angry" and not pet.web_torn
+    pet._watch.stop(); pet._hide_now()
