@@ -402,7 +402,7 @@ class LongAwayWatcher(QObject):
         self._timer.timeout.connect(self.poll)
         self._was_locked = False
         self._lock_timer = QTimer(self)
-        self._lock_timer.setInterval(1500)
+        self._lock_timer.setInterval(300)
         self._lock_timer.timeout.connect(self.check_lock)
 
     def start(self, boot: bool = True) -> None:
@@ -418,9 +418,17 @@ class LongAwayWatcher(QObject):
         gap = now - getattr(self, "_last_lock_poll", now)    # big gap: the laptop slept, screen just woke
         self._last_lock_poll = now
         if locked:
+            if not self._was_locked and self.pet is not None:     # tuck him away right now, so he isn't
+                try:                                              # standing in his old spot on unlock
+                    self.pet.away = True
+                    self.pet._hide_now()
+                except Exception:  # noqa: BLE001
+                    pass
             self._was_locked = True
             return
         woke = gap > 30.0
+        if (self._was_locked or woke) and self.pet is not None:
+            self.pet.away = False
         if self._was_locked or woke:
             self._was_locked = False
             if gap >= self.idle_secs:

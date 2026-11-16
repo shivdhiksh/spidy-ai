@@ -25,6 +25,9 @@ class _Pet:
     def raise_(self):
         pass
 
+    def _hide_now(self):
+        self.calls.append("hide")
+
 
 def test_an_hour_idle_or_asleep_spins_webs_and_puts_the_pet_in_the_hammock(app):
     pet = _Pet()
@@ -84,7 +87,7 @@ def test_unlocking_plays_the_door_intro(app):
     w.check_lock(locked=False, now=1000.0)
     w.check_lock(locked=True, now=1001.5)
     w.check_lock(locked=False, now=1003.0)
-    assert pet.calls == ["door"]
+    assert pet.calls == ["hide", "door"]            # hidden the moment it locked, door on unlock
     w.check_lock(locked=False, now=1004.5)          # nothing new
     w.check_lock(locked=False, now=1100.0)          # screen woke after a short sleep
-    assert pet.calls == ["door", "door"]
+    assert pet.calls == ["hide", "door", "door"]
