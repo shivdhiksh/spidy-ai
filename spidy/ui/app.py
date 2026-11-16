@@ -500,6 +500,17 @@ class SpidyApp:
             self._pet.greet.connect(self._pet_greets)
             if self._tray is not None and hasattr(self._tray, "show_pet_requested"):
                 self._tray.show_pet_requested.connect(lambda: self._pet.set_enabled(True))
+            try:                                             # greetings ready to speak at once (cached audio)
+                from spidy.ui.quick_voice import QuickGreeter
+                tts = getattr(getattr(self._config, "voice", None), "tts", None)
+                vname = getattr(tts, "voice", "en_US-lessac-high")
+                self._greeter = QuickGreeter(vname if isinstance(vname, str) else "en_US-lessac-high",
+                                             float(getattr(tts, "speed", 1.0) or 1.0) if tts is not None else 1.0,
+                                             float(getattr(tts, "volume", 1.0) or 1.0) if tts is not None else 1.0)
+                self._greeter.prepare([self._pet.wake_greeting, self._pet.greeting])
+            except Exception as exc:  # noqa: BLE001
+                self._greeter = None
+                log.debug("[PET] quick greeter off: {exc}", exc=exc)
             self._webs = None
             try:
                 from spidy.ui.web_cover import LongAwayWatcher
@@ -516,6 +527,10 @@ class SpidyApp:
 
     def _pet_greets(self, text: str) -> None:
         """The pet woke up and waves: Spidy says it out loud (same path as her timer announcements)."""
+        g = getattr(self, "_greeter", None)
+        if g is not None and g.say(text):                    # cached audio: spoken this instant
+            log.info("[PET] greeting spoken: {t}", t=text)
+            return
         import time as _t
         if not getattr(self, "_voice_ready", False) and _t.monotonic() - getattr(self, "_ui_born", 0.0) > 150:
             self._voice_ready = True                       # safety net: never hold a greeting forever
