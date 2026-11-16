@@ -435,7 +435,7 @@ def test_after_the_boot_webs_are_cleared_he_climbs_down_and_welcomes_you():
     pet.wake_from_hammock()
     for _ in range(10):
         pet._tick()
-    assert said == ["Welcome boss!"] and pet.state != "hammock"
+    assert said == ["Hi Boss!! Welcome Back"] and pet.state != "hammock"
     pet._watch.stop(); pet._hide_now()
 
 
@@ -453,5 +453,5 @@ def test_sweeping_his_hammock_at_start_up_wakes_him_calmly_not_angry():
         if pet.state in ("swing", "lower"):
             s = pet._web_segments()[0]
             pet.cut_web(s[0], s[0], s[1])      # cursor keeps brushing his web: still no tantrum
-    assert said == ["Welcome boss!"] and pet.state != "angry" and not pet.web_torn
+    assert said == ["Hi Boss!! Welcome Back"] and pet.state != "angry" and not pet.web_torn
     pet._watch.stop(); pet._hide_now()
