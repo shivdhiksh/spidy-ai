@@ -48,7 +48,7 @@ def test_cursor_sweeps_every_web_away_then_the_pet_wakes(app):
             c.sweep(QPointF(x, y))
     assert all(s["cut"] is not None for s in c.segs)
     for s in c.segs:
-        s["cut"] -= 1.0
+        s["cut"] -= wc.FALL_SECS + 1
     c._step()
     assert not c.isVisible() and pet.calls[-1] == "wake"
 
@@ -56,3 +56,20 @@ def test_cursor_sweeps_every_web_away_then_the_pet_wakes(app):
 def test_webs_cover_corners_and_middle():
     segs = wc.build_webs(QRect(0, 0, 1920, 1080))
     assert len(segs) > 300
+
+
+def test_one_swipe_brings_down_a_whole_tangle(app):
+    import random
+    c = wc.WebCover()
+    c.setGeometry(0, 0, 1600, 900)
+    c.load(wc.build_webs(QRect(0, 0, 1600, 900), random.Random(1)))
+    c.shown_at -= wc.GROW_SECS + 1
+    for x in range(0, 1600, 30):                     # one swipe straight across the middle
+        c.sweep(QPointF(x, 450))
+    direct = sum(s["cut"] is not None for s in c.segs)
+    for _ in range(wc.CHAIN_HOPS + 1):               # let the chain reaction play out
+        for s in c.segs:
+            if s["cut"] is None and s["pend"] is not None:
+                c._snap(s, c._now(), s["pend"][1])
+    chained = sum(s["cut"] is not None for s in c.segs)
+    assert chained > direct * 2

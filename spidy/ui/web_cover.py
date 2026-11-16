@@ -23,9 +23,12 @@ from PySide6.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QP
 from PySide6.QtWidgets import QWidget
 
 IDLE_SECS = 3600.0          # one hour away
-CUT_RADIUS = 38.0           # how close the cursor must come to a thread to snap it
+CUT_RADIUS = 60.0           # how close the cursor must come to a thread to snap it
 GROW_SECS = 5.0             # the webs are spun in over this long when they first appear
-FALL_SECS = 0.45
+FALL_SECS = 1.1             # a snapped thread tumbles down for this long
+GRAVITY = 900.0
+CHAIN_HOPS = 6              # a snap pulls down threads tied to it, this many knots deep
+LAST_BITS = 0.12            # when only this fraction is left, the rest falls on its own
 
 
 def idle_seconds() -> float:
@@ -150,6 +153,8 @@ class WebCover(QWidget):
         self.segs: list[dict] = []
         self.shown_at = 0.0
         self._cache: QImage | None = None
+        self._built_at, self._stale = 0.0, True
+        self._rng = random.Random()
         self._timer = QTimer(self)
         self._timer.setInterval(33)
         self._timer.timeout.connect(self._step)
@@ -157,96 +162,165 @@ class WebCover(QWidget):
 
     @property
     def active(self) -> bool:
-        return self.isVisible() and bool(self.segs)
+        return self.isVisible() and any(not s.get("gone") for s in self.segs)
 
     def cover(self) -> None:
         screen = QGuiApplication.primaryScreen()
         area = screen.geometry() if screen else QRect(0, 0, 1920, 1080)
         self.setGeometry(area)
-        self.segs = build_webs(QRect(0, 0, area.width(), area.height()))
-        self.shown_at = self._now()
-        self._cache = None
+        self.load(build_webs(QRect(0, 0, area.width(), area.height())))
         self.show()
         self._timer.start()
+
+    def load(self, segs: list[dict]) -> None:
+        """Take a set of threads and work out which ones are tied together at a knot."""
+        self.segs = segs
+        self.shown_at = self._now()
+        self._cache, self._built_at, self._stale = None, 0.0, True
+        grid: dict[tuple[int, int], list[int]] = {}
+        for i, sg in enumerate(segs):
+            sg.update(cut=None, pend=None, gone=False, nb=[])
+            for q in (sg["a"], sg["b"]):
+                grid.setdefault((int(q.x() // 14), int(q.y() // 14)), []).append(i)
+        for i, sg in enumerate(segs):
+            nb = set()
+            for q in (sg["a"], sg["b"]):
+                cx, cy = int(q.x() // 14), int(q.y() // 14)
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        nb.update(grid.get((cx + dx, cy + dy), ()))
+            nb.discard(i)
+            sg["nb"] = list(nb)
+
+    def _snap(self, sg: dict, now: float, hop: int = 0) -> None:
+        if sg["cut"] is not None:
+            return
+        r = self._rng
+        sg.update(cut=now, vx=r.uniform(-60, 60), vy=r.uniform(-50, 10), spin=r.uniform(-2.8, 2.8),
+                  sway=r.uniform(0, math.tau))
+        self._stale = True
+        if hop < CHAIN_HOPS:                         # threads tied to this one lose their hold too
+            for j in sg["nb"]:
+                o = self.segs[j]
+                if o["cut"] is None and o["pend"] is None and r.random() < 0.85:
+                    o["pend"] = (now + r.uniform(0.04, 0.12), hop + 1)
 
     def sweep(self, cursor: QPointF) -> int:
         """Snap every grown thread near the cursor (local coords). Returns how many snapped."""
         now = self._now()
         grown = (now - self.shown_at) / GROW_SECS
-        n = 0
-        for s in self.segs:
-            if s["cut"] is None and s["order"] <= grown and \
-                    min(_seg_dist(cursor, s["a"], s["m"]), _seg_dist(cursor, s["m"], s["b"])) < CUT_RADIUS:
-                s["cut"] = now
-                n += 1
-        return n
+        hits = [sg for sg in self.segs if sg["cut"] is None and sg["order"] <= grown and
+                min(_seg_dist(cursor, sg["a"], sg["m"]), _seg_dist(cursor, sg["m"], sg["b"])) < CUT_RADIUS]
+        for sg in hits:
+            self._snap(sg, now)
+        return len(hits)
 
     def _step(self) -> None:
         now = self._now()
         cur = QPointF(QCursor.pos()) - QPointF(self.x(), self.y())
-        snapped = self.sweep(cur)
-        before = len(self.segs)
-        self.segs = [s for s in self.segs if s["cut"] is None or now - s["cut"] < FALL_SECS]
-        if not self.segs:
+        self.sweep(cur)
+        standing = 0
+        for sg in self.segs:
+            if sg["cut"] is None:
+                if sg["pend"] is not None and now >= sg["pend"][0]:
+                    self._snap(sg, now, sg["pend"][1])
+                else:
+                    standing += 1
+            elif not sg["gone"] and now - sg["cut"] >= FALL_SECS:
+                sg["gone"] = True
+        grown = now - self.shown_at >= GROW_SECS
+        if grown and 0 < standing <= len(self.segs) * LAST_BITS:          # the last scraps let go
+            for sg in self.segs:
+                if sg["cut"] is None and sg["pend"] is None:
+                    sg["pend"] = (now + self._rng.uniform(0.0, 0.6), CHAIN_HOPS)
+        if not any(not sg["gone"] for sg in self.segs):
             self._timer.stop()
             self.hide()
             self.cleared.emit()
             return
-        if (now - self.shown_at < GROW_SECS + 0.3 or snapped or len(self.segs) != before
-                or any(s["cut"] is not None for s in self.segs)):
-            self._cache = None                                        # something changed: redraw
-            self.update()
+        if not grown:
+            self._stale = True
+        if self._stale and now - self._built_at > 0.12:                    # rebuild the still webs
+            self._cache = None
+        self.update()
 
-    def _draw(self, p: QPainter, now: float) -> None:
+    def _fallen(self, sg: dict, now: float):
+        """Where a snapped thread is now: limp, tumbling and drifting down."""
+        t = now - sg["cut"]
+        k = min(1.0, t / FALL_SECS)
+        m = sg["m"]
+        ang = sg["spin"] * t
+        ca, sa = math.cos(ang), math.sin(ang)
+        dx = sg["vx"] * t + 18 * math.sin(sg["sway"] + t * 5) * k          # floats side to side
+        dy = sg["vy"] * t + 0.5 * GRAVITY * t * t
+        shrink = 1 - 0.45 * k                                              # curls up as it falls
+
+        def move(q: QPointF, limp: float = 0.0) -> QPointF:
+            rx, ry = (q.x() - m.x()) * shrink, (q.y() - m.y()) * shrink + limp
+            return QPointF(m.x() + rx * ca - ry * sa + dx, m.y() + rx * sa + ry * ca + dy)
+        return move(sg["a"]), move(sg["b"]), move(sg["c"], 40 * k), max(0.0, 1 - k ** 1.6)
+
+    def _draw_still(self, p: QPainter, now: float) -> None:
         grown = (now - self.shown_at) / GROW_SECS
-        glow, line = QPen(), QPen()
-        glow.setCapStyle(Qt.PenCapStyle.RoundCap)
+        line = QPen()
         line.setCapStyle(Qt.PenCapStyle.RoundCap)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        for s in self.segs:
-            if s["order"] > grown:
+        for sg in self.segs:
+            if sg["cut"] is not None or sg["order"] > grown:
                 continue
-            a, b, c = s["a"], s["b"], s["c"]
-            alpha = 1.0
-            if s["cut"] is not None:                                   # snapped: droops down and fades
-                k = (now - s["cut"]) / FALL_SECS
-                alpha = max(0.0, 1 - k)
-                drop = 60 * k * k
-                a, b, c = (QPointF(q.x(), q.y() + drop * f) for q, f in ((a, 1.0), (b, 1.3), (c, 1.6)))
-            fresh = min(1.0, (grown - s["order"]) * 4)
-            path = QPainterPath(a)
-            path.quadTo(c, b)
-            lum = s["lum"] * alpha * fresh
+            path = QPainterPath(sg["a"])
+            path.quadTo(sg["c"], sg["b"])
+            lum = sg["lum"] * min(1.0, (grown - sg["order"]) * 4)
             line.setColor(QColor(242, 246, 255, int(205 * lum)))
-            line.setWidthF(s["w"])
+            line.setWidthF(sg["w"])
             p.setPen(line)
             p.drawPath(path)
 
+    def _build_cache(self, now: float) -> None:
+        img = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        img.fill(Qt.GlobalColor.transparent)
+        q = QPainter(img)
+        q.setRenderHint(QPainter.RenderHint.Antialiasing)
+        self._draw_still(q, now)
+        q.end()
+        # soft blur: a downscaled + upscaled copy underneath gives the hazy, glowing look
+        small = img.scaled(max(1, img.width() // 6), max(1, img.height() // 6),
+                           Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        haze = small.scaled(img.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
+                            Qt.TransformationMode.SmoothTransformation)
+        out = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
+        out.fill(Qt.GlobalColor.transparent)
+        q = QPainter(out)
+        q.drawImage(0, 0, haze)
+        q.drawImage(0, 0, haze)
+        q.setOpacity(0.9)
+        q.drawImage(0, 0, img)
+        q.end()
+        self._cache, self._built_at, self._stale = out, now, False
+
     def paintEvent(self, _e) -> None:
+        now = self._now()
         if self._cache is None or self._cache.size() != self.size():
-            img = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
-            img.fill(Qt.GlobalColor.transparent)
-            q = QPainter(img)
-            q.setRenderHint(QPainter.RenderHint.Antialiasing)
-            self._draw(q, self._now())
-            q.end()
-            # soft blur: a downscaled + upscaled copy underneath gives the hazy, glowing look
-            small = img.scaled(max(1, img.width() // 6), max(1, img.height() // 6),
-                               Qt.AspectRatioMode.IgnoreAspectRatio, Qt.TransformationMode.SmoothTransformation)
-            haze = small.scaled(img.size(), Qt.AspectRatioMode.IgnoreAspectRatio,
-                                Qt.TransformationMode.SmoothTransformation)
-            out = QImage(self.size(), QImage.Format.Format_ARGB32_Premultiplied)
-            out.fill(Qt.GlobalColor.transparent)
-            q = QPainter(out)
-            q.setOpacity(1.0)
-            q.drawImage(0, 0, haze)
-            q.drawImage(0, 0, haze)
-            q.setOpacity(0.9)
-            q.drawImage(0, 0, img)
-            q.end()
-            self._cache = out
+            self._build_cache(now)
         p = QPainter(self)
         p.drawImage(0, 0, self._cache)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        p.setBrush(Qt.BrushStyle.NoBrush)
+        glow, line = QPen(), QPen()
+        for sg in self.segs:                                               # the threads falling right now
+            if sg["cut"] is None or sg["gone"]:
+                continue
+            a, b, c, alpha = self._fallen(sg, now)
+            path = QPainterPath(a)
+            path.quadTo(c, b)
+            glow.setColor(QColor(225, 232, 255, int(45 * alpha * sg["lum"])))
+            glow.setWidthF(sg["w"] * 4)
+            p.setPen(glow)
+            p.drawPath(path)
+            line.setColor(QColor(245, 248, 255, int(230 * alpha * sg["lum"])))
+            line.setWidthF(sg["w"] * 1.2)
+            p.setPen(line)
+            p.drawPath(path)
         p.end()
 
 
