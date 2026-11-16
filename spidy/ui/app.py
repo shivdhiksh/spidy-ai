@@ -500,14 +500,17 @@ class SpidyApp:
             self._pet.greet.connect(self._pet_greets)
             if self._tray is not None and hasattr(self._tray, "show_pet_requested"):
                 self._tray.show_pet_requested.connect(lambda: self._pet.set_enabled(True))
-            self._pet.start()
-            log.info("[PET] desktop Spidey ready.")
+            self._webs = None
             try:
                 from spidy.ui.web_cover import LongAwayWatcher
-                self._webs = LongAwayWatcher(self._pet)      # an hour away: cobwebs + hammock nap
-                self._webs.start()
+                self._webs = LongAwayWatcher(self._pet)      # start-up / an hour away: cobwebs + hammock nap
+                if not hud_on_screen():
+                    self._webs.trigger()                     # he appears already asleep in the hammock
+                self._webs.start(boot=False)
             except Exception as exc:  # noqa: BLE001
                 log.warning("[PET] cobweb watcher not started: {exc}", exc=exc)
+            self._pet.start()
+            log.info("[PET] desktop Spidey ready.")
         except Exception as exc:  # noqa: BLE001 -- the pet is a toy; never let it stop Spidy
             log.warning("[PET] could not start the desktop pet: {exc}", exc=exc)
 
