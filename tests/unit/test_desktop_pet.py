@@ -148,12 +148,13 @@ def test_upside_down_and_spidey_sense_poses_draw():
         assert yellow > 3                               # the spidey-sense squiggles are there
 
 
-def test_wakes_up_in_bed_waves_hello_boss_then_stands():
-    """First appearance after Spidy starts (every boot/login): asleep in bed -> wave + 'Hello boss!' -> stand up."""
+def test_door_intro_on_unlock_waves_then_stands():
+    """Unlock / screen on: door opens -> walks out, waves + 'Welcome boss!' -> stands."""
     pet, _ = _pet()
     said = []
     pet.greet.connect(said.append)
     pet.start()
+    pet.play_door_intro()                          # unlock / screen on
     assert pet.state == "intro"
     for _ in range(int(7 / 0.033)):
         pet._tick()
@@ -410,6 +411,7 @@ def test_door_intro_says_welcome_boss_and_hidden_pet_returns_after_opening_spidy
     said = []
     pet.greet.connect(said.append)
     pet.start()
+    pet.play_door_intro()
     for _ in range(int(6.5 / 0.033)):
         pet._tick()
     assert said == ["Welcome boss!"] and pet.state != "intro"
@@ -418,4 +420,20 @@ def test_door_intro_says_welcome_boss_and_hidden_pet_returns_after_opening_spidy
     ui["ui"] = True; pet._sync_with_ui()           # you open Spidy (taskbar S) ...
     ui["ui"] = False; pet._sync_with_ui()          # ... and close it again: he's back
     assert pet.enabled and pet.isVisible()
+    pet._watch.stop(); pet._hide_now()
+
+
+def test_after_the_boot_webs_are_cleared_he_climbs_down_and_welcomes_you():
+    pet, _ = _pet()
+    said = []
+    pet.greet.connect(said.append)
+    pet.start()
+    pet.sleep_in_hammock()
+    for _ in range(30):
+        pet._tick()
+    assert pet.state == "hammock"
+    pet.wake_from_hammock()
+    for _ in range(10):
+        pet._tick()
+    assert said == ["Welcome boss!"] and pet.state != "hammock"
     pet._watch.stop(); pet._hide_now()

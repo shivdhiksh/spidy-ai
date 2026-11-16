@@ -665,12 +665,10 @@ class DesktopPet(QWidget):
     def _show_now(self) -> None:
         self.hop = 0.0
         self._place_on_floor()
-        if not self._greeted:                    # first appearance since Spidy started (every boot/login)
-            self._greeted = True
-            self.intro_t = 0.0
-            self.state, self.state_left = "intro", 99.0
+        if self.state == "intro":                # the door intro asked to show him
             self._fit_intro()
         else:
+            self._greeted = True
             self._set_state("idle", 1.5)
         self.setWindowOpacity(1.0)
         self.show()
@@ -774,11 +772,26 @@ class DesktopPet(QWidget):
         self._fit_hammock()
 
     def wake_from_hammock(self) -> None:
+        """The webs are cleared: he climbs down out of the hammock and welcomes you (out loud)."""
         if getattr(self, "hammock_sleep", False):
             self.hammock_sleep = False
             if self.state == "hammock":
-                self.state_left = 0.0                    # climbs out on his own on the next tick
-                self.say("Morning, boss!")
+                self.state_left = 0.0                    # climbs down on a web on the next tick
+            self.say(self.greeting, 3.0)
+            self.greet.emit(self.greeting)
+
+    def play_door_intro(self) -> None:
+        """Unlock / screen back on: the pink door opens and he walks out saying "Welcome boss!"."""
+        if not self.enabled or bool(self._ui_visible()) or getattr(self, "hammock_sleep", False):
+            return
+        self._greeted = True
+        self.intro_t = 0.0
+        self.state, self.state_left = "intro", 99.0
+        if self.isVisible():
+            self._place_on_floor()
+            self._fit_intro()
+        else:
+            self._show_now()
 
     def start_hammock(self) -> None:
         """String a web hammock diagonally across a top corner and lounge in it for a while."""

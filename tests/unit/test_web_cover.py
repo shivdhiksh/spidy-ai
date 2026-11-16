@@ -72,4 +72,19 @@ def test_one_swipe_brings_down_a_whole_tangle(app):
             if s["cut"] is None and s["pend"] is not None:
                 c._snap(s, c._now(), s["pend"][1])
     chained = sum(s["cut"] is not None for s in c.segs)
-    assert chained > direct * 2
+    assert direct * 1.2 < chained < len(c.segs) * 0.6      # a sheet comes down, not the whole screen
+
+
+def test_unlocking_plays_the_door_intro(app):
+    class P(_Pet):
+        def play_door_intro(self):
+            self.calls.append("door")
+    pet = P()
+    w = wc.LongAwayWatcher(pet)
+    w.check_lock(locked=False, now=1000.0)
+    w.check_lock(locked=True, now=1001.5)
+    w.check_lock(locked=False, now=1003.0)
+    assert pet.calls == ["door"]
+    w.check_lock(locked=False, now=1004.5)          # nothing new
+    w.check_lock(locked=False, now=1100.0)          # screen woke after a short sleep
+    assert pet.calls == ["door", "door"]

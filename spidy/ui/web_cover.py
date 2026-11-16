@@ -18,6 +18,8 @@ import math
 import random
 import time
 
+import numpy as np
+
 from PySide6.QtCore import QObject, QPointF, QRect, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QCursor, QGuiApplication, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QWidget
@@ -25,9 +27,9 @@ from PySide6.QtWidgets import QWidget
 IDLE_SECS = 3600.0          # one hour away
 CUT_RADIUS = 60.0           # how close the cursor must come to a thread to snap it
 GROW_SECS = 5.0             # the webs are spun in over this long when they first appear
-FALL_SECS = 1.1             # a snapped thread tumbles down for this long
+FALL_SECS = 0.9             # a snapped thread tumbles down for this long
 GRAVITY = 900.0
-CHAIN_HOPS = 6              # a snap pulls down threads tied to it, this many knots deep
+CHAIN_HOPS = 3              # a snap pulls down threads tied to it, this many knots deep
 LAST_BITS = 0.12            # when only this fraction is left, the rest falls on its own
 
 
@@ -154,6 +156,7 @@ class WebCover(QWidget):
         self.shown_at = 0.0
         self._cache: QImage | None = None
         self._built_at, self._stale = 0.0, True
+        self._erase, self._last_snap = [], 0.0
         self._rng = random.Random()
         self._timer = QTimer(self)
         self._timer.setInterval(33)
@@ -176,41 +179,67 @@ class WebCover(QWidget):
         """Take a set of threads and work out which ones are tied together at a knot."""
         self.segs = segs
         self.shown_at = self._now()
+        # flat arrays so the cursor check runs in numpy (thousands of threads, every frame)
+        self._P = np.array([[sg["a"].x(), sg["a"].y(), sg["m"].x(), sg["m"].y(), sg["b"].x(), sg["b"].y()]
+                            for sg in segs], dtype=np.float32).reshape(-1, 6)
+        self._order = np.array([sg["order"] for sg in segs], dtype=np.float32)
+        self._alive = np.ones(len(segs), dtype=bool)
         self._cache, self._built_at, self._stale = None, 0.0, True
+        self._erase, self._last_snap = [], 0.0
         grid: dict[tuple[int, int], list[int]] = {}
         for i, sg in enumerate(segs):
-            sg.update(cut=None, pend=None, gone=False, nb=[])
+            sg.update(cut=None, pend=None, gone=False, nb=[], idx=i)
             for q in (sg["a"], sg["b"]):
-                grid.setdefault((int(q.x() // 14), int(q.y() // 14)), []).append(i)
+                if not self._on_edge(q):
+                    grid.setdefault((int(q.x() // 6), int(q.y() // 6)), []).append(i)
         for i, sg in enumerate(segs):
             nb = set()
             for q in (sg["a"], sg["b"]):
-                cx, cy = int(q.x() // 14), int(q.y() // 14)
+                if self._on_edge(q):
+                    continue
+                cx, cy = int(q.x() // 6), int(q.y() // 6)
                 for dx in (-1, 0, 1):
                     for dy in (-1, 0, 1):
                         nb.update(grid.get((cx + dx, cy + dy), ()))
             nb.discard(i)
             sg["nb"] = list(nb)
 
+    def _on_edge(self, q: QPointF) -> bool:
+        return q.x() <= 3 or q.y() <= 3 or q.x() >= self.width() - 4 or q.y() >= self.height() - 4
+
     def _snap(self, sg: dict, now: float, hop: int = 0) -> None:
         if sg["cut"] is not None:
             return
         r = self._rng
+        if "idx" in sg:
+            self._alive[sg["idx"]] = False
         sg.update(cut=now, vx=r.uniform(-60, 60), vy=r.uniform(-50, 10), spin=r.uniform(-2.8, 2.8),
                   sway=r.uniform(0, math.tau))
+        self._erase.append(sg)
+        self._last_snap = now
         self._stale = True
         if hop < CHAIN_HOPS:                         # threads tied to this one lose their hold too
             for j in sg["nb"]:
                 o = self.segs[j]
-                if o["cut"] is None and o["pend"] is None and r.random() < 0.85:
+                if o["cut"] is None and o["pend"] is None and r.random() < 0.6:
                     o["pend"] = (now + r.uniform(0.04, 0.12), hop + 1)
 
     def sweep(self, cursor: QPointF) -> int:
         """Snap every grown thread near the cursor (local coords). Returns how many snapped."""
         now = self._now()
         grown = (now - self.shown_at) / GROW_SECS
-        hits = [sg for sg in self.segs if sg["cut"] is None and sg["order"] <= grown and
-                min(_seg_dist(cursor, sg["a"], sg["m"]), _seg_dist(cursor, sg["m"], sg["b"])) < CUT_RADIUS]
+        if not len(self.segs):
+            return 0
+        P, cx, cy = self._P, cursor.x(), cursor.y()
+
+        def dist(ax, ay, bx, by):
+            dx, dy = bx - ax, by - ay
+            L = dx * dx + dy * dy
+            t = np.clip(((cx - ax) * dx + (cy - ay) * dy) / np.maximum(L, 1e-6), 0.0, 1.0)
+            return np.hypot(cx - (ax + t * dx), cy - (ay + t * dy))
+        d = np.minimum(dist(P[:, 0], P[:, 1], P[:, 2], P[:, 3]), dist(P[:, 2], P[:, 3], P[:, 4], P[:, 5]))
+        mask = self._alive & (self._order <= grown) & (d < CUT_RADIUS)
+        hits = [self.segs[i] for i in np.nonzero(mask)[0]]
         for sg in hits:
             self._snap(sg, now)
         return len(hits)
@@ -218,7 +247,9 @@ class WebCover(QWidget):
     def _step(self) -> None:
         now = self._now()
         cur = QPointF(QCursor.pos()) - QPointF(self.x(), self.y())
-        self.sweep(cur)
+        last, self._last_cur = getattr(self, "_last_cur", None), cur
+        if last is not None and (cur - last).manhattanLength() > 3 and now - self.shown_at > GROW_SECS:
+            self.sweep(cur)
         standing = 0
         for sg in self.segs:
             if sg["cut"] is None:
@@ -238,10 +269,25 @@ class WebCover(QWidget):
             self.hide()
             self.cleared.emit()
             return
-        if not grown:
-            self._stale = True
-        if self._stale and now - self._built_at > 0.12:                    # rebuild the still webs
+        if not grown and now - self._built_at > 0.15:                      # still being spun in
             self._cache = None
+        elif self._erase and self._cache is not None:                       # cheap: rub out just the snapped threads
+            q = QPainter(self._cache)
+            q.setRenderHint(QPainter.RenderHint.Antialiasing)
+            q.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+            pen = QPen(Qt.GlobalColor.black)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            q.setBrush(Qt.BrushStyle.NoBrush)
+            for sg in self._erase:
+                path = QPainterPath(sg["a"])
+                path.quadTo(sg["c"], sg["b"])
+                pen.setWidthF(sg["w"] + 9)                                   # also clears its blurry halo
+                q.setPen(pen)
+                q.drawPath(path)
+            q.end()
+        elif grown and self._stale and now - self._last_snap > 0.8:         # calm again: tidy full redraw
+            self._cache = None
+        self._erase = []
         self.update()
 
     def _fallen(self, sg: dict, now: float):
@@ -297,6 +343,7 @@ class WebCover(QWidget):
         q.drawImage(0, 0, img)
         q.end()
         self._cache, self._built_at, self._stale = out, now, False
+        self._erase = []
 
     def paintEvent(self, _e) -> None:
         now = self._now()
@@ -306,26 +353,42 @@ class WebCover(QWidget):
         p.drawImage(0, 0, self._cache)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
         p.setBrush(Qt.BrushStyle.NoBrush)
-        glow, line = QPen(), QPen()
-        for sg in self.segs:                                               # the threads falling right now
-            if sg["cut"] is None or sg["gone"]:
-                continue
+        line = QPen()
+        falling = [sg for sg in self.segs if sg["cut"] is not None and not sg["gone"]]
+        if len(falling) > 380:                                             # keep it smooth: newest snaps only
+            falling.sort(key=lambda sg: sg["cut"], reverse=True)
+            for sg in falling[380:]:
+                sg["gone"] = True
+            falling = falling[:380]
+        for sg in falling:                                                 # the threads falling right now
             a, b, c, alpha = self._fallen(sg, now)
+            if alpha * sg["lum"] < 0.04:
+                continue
             path = QPainterPath(a)
             path.quadTo(c, b)
-            glow.setColor(QColor(225, 232, 255, int(45 * alpha * sg["lum"])))
-            glow.setWidthF(sg["w"] * 4)
-            p.setPen(glow)
-            p.drawPath(path)
-            line.setColor(QColor(245, 248, 255, int(230 * alpha * sg["lum"])))
-            line.setWidthF(sg["w"] * 1.2)
+            line.setColor(QColor(245, 248, 255, int(235 * alpha * sg["lum"])))
+            line.setWidthF(sg["w"] * 1.3)
             p.setPen(line)
             p.drawPath(path)
         p.end()
 
 
+def screen_locked() -> bool:
+    """True while Windows shows the lock screen (the input desktop can't be switched to)."""
+    try:
+        u = ctypes.windll.user32
+        h = u.OpenInputDesktop(0, False, 0x0100)          # DESKTOP_SWITCHDESKTOP
+        if not h:
+            return True
+        ok = u.SwitchDesktop(h)
+        u.CloseDesktop(h)
+        return not ok
+    except Exception:  # noqa: BLE001
+        return False
+
+
 class LongAwayWatcher(QObject):
-    """Shows the cobwebs (and puts the pet to sleep in its hammock) after an hour away."""
+    """Cobwebs + hammock nap at start-up and after an hour away; the door intro after an unlock."""
 
     def __init__(self, pet=None, idle_secs: float = IDLE_SECS, parent=None) -> None:
         super().__init__(parent)
@@ -337,10 +400,36 @@ class LongAwayWatcher(QObject):
         self._timer = QTimer(self)
         self._timer.setInterval(20_000)
         self._timer.timeout.connect(self.poll)
+        self._was_locked = False
+        self._lock_timer = QTimer(self)
+        self._lock_timer.setInterval(1500)
+        self._lock_timer.timeout.connect(self.check_lock)
 
-    def start(self) -> None:
+    def start(self, boot: bool = True) -> None:
         self._last_poll = time.time()
         self._timer.start()
+        self._lock_timer.start()
+        if boot:                                          # laptop just switched on: webs + hammock
+            QTimer.singleShot(1200, self.trigger)
+
+    def check_lock(self, locked: bool | None = None, now: float | None = None) -> None:
+        locked = screen_locked() if locked is None else locked
+        now = time.time() if now is None else now
+        gap = now - getattr(self, "_last_lock_poll", now)    # big gap: the laptop slept, screen just woke
+        self._last_lock_poll = now
+        if locked:
+            self._was_locked = True
+            return
+        woke = gap > 30.0
+        if self._was_locked or woke:
+            self._was_locked = False
+            if gap >= self.idle_secs:
+                return                                    # gone an hour+: poll() spins the webs instead
+            if self.pet is not None and not self.cover.active:
+                try:
+                    self.pet.play_door_intro()
+                except Exception:  # noqa: BLE001
+                    pass
 
     def poll(self, idle: float | None = None, now: float | None = None) -> None:
         now = time.time() if now is None else now
