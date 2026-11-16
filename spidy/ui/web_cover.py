@@ -125,6 +125,12 @@ def build_webs(area: QRect, rng: random.Random | None = None) -> list[dict]:
         o = rng.uniform(0.0, 0.4)
         for p, q in zip(pts, pts[1:]):
             segs.append(_strand(p, q, rng, 0.05, o))
+
+    def clamp(q: QPointF) -> QPointF:                    # every thread stays where the cursor can reach it
+        return QPointF(min(max(q.x(), L), R), min(max(q.y(), T), B))
+    for sg in segs:
+        for key in ("a", "b", "c", "m"):
+            sg[key] = clamp(sg[key])
     return segs
 
 
