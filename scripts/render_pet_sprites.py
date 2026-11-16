@@ -568,6 +568,12 @@ def lounge(i, n):                   # rendered upright; rotated to lie in the ha
                 arm_l=(-20, 165, 120), phone=True, head_tilt=-8)
 
 
+def hamsleep(i, n):                 # asleep in the hammock: arms folded on the chest, eyes shut
+    b = math.sin(2 * math.pi * i / n)
+    return Pose(hip_l=70, knee_l=110, hip_r=20, knee_r=10, arm_r=(40, 120, 150 + b * 3),
+                arm_l=(-30, 120, 150), head_tilt=-14 + b * 2, expr="closed")
+
+
 def hero(i, n):
     return Pose(hip_l=-30, knee_l=70, hip_r=70, knee_r=105, arm_r=(-10, 150, 40), arm_l=(55, 40, 95),
                 can=True, lean=8, head_tilt=-8, head_yaw=-10)
@@ -644,6 +650,7 @@ ANIMS = {
     "gaze": (gaze, 9, [0]),
     "sitgaze": (sitgaze, 9, [0]),
     "nap": (nap, 2, [0]),
+    "hamsleep": (hamsleep, 2, [70]),
 }
 
 
@@ -651,6 +658,7 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--preview", action="store_true")
     ap.add_argument("--ss", type=int, default=2)
+    ap.add_argument("--only", default="", help="comma list: render just these, merge into meta.json")
     args = ap.parse_args()
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication(sys.argv[:1] + ["-platform", "offscreen"])
@@ -673,8 +681,14 @@ def main() -> None:
         print(f"preview done in {time.time() - t0:.1f}s", flush=True)
         return
     meta = {"size": [150, 190], "anims": {}}
+    only = [x for x in args.only.split(",") if x]
+    if only and os.path.exists(os.path.join(OUT, "meta.json")):
+        with open(os.path.join(OUT, "meta.json"), encoding="utf-8") as fh:
+            meta = json.load(fh)
     t0 = time.time()
     for name, (fn, n, views) in ANIMS.items():
+        if only and name not in only:
+            continue
         meta["anims"][name] = {"frames": n, "views": views}
         for v in views:
             for i in range(n):

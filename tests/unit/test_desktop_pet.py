@@ -157,7 +157,7 @@ def test_wakes_up_in_bed_waves_hello_boss_then_stands():
     assert pet.state == "intro"
     for _ in range(int(7 / 0.033)):
         pet._tick()
-    assert said == ["Hello boss!"]                    # greeted exactly once
+    assert said == ["Welcome boss!"]                    # greeted exactly once
     assert pet.state not in ("intro",) and abs(pet.fy - pet._floor()) < 2
     pet._hide_now()
     pet._sync_with_ui()                              # shown again later: no second greeting
@@ -403,3 +403,19 @@ def test_sitting_he_takes_a_phone_or_snack_break_every_minute_or_two():
     assert pet.state == "sit"                              # back to sitting afterwards
     pet._watch.stop(); pet._hide_now()
 
+
+
+def test_door_intro_says_welcome_boss_and_hidden_pet_returns_after_opening_spidy():
+    pet, ui = _pet()
+    said = []
+    pet.greet.connect(said.append)
+    pet.start()
+    for _ in range(int(6.5 / 0.033)):
+        pet._tick()
+    assert said == ["Welcome boss!"] and pet.state != "intro"
+    pet.set_enabled(False)
+    assert not pet.isVisible()
+    ui["ui"] = True; pet._sync_with_ui()           # you open Spidy (taskbar S) ...
+    ui["ui"] = False; pet._sync_with_ui()          # ... and close it again: he's back
+    assert pet.enabled and pet.isVisible()
+    pet._watch.stop(); pet._hide_now()

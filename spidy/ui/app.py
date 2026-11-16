@@ -490,6 +490,12 @@ class SpidyApp:
                 self._tray.show_pet_requested.connect(lambda: self._pet.set_enabled(True))
             self._pet.start()
             log.info("[PET] desktop Spidey ready.")
+            try:
+                from spidy.ui.web_cover import LongAwayWatcher
+                self._webs = LongAwayWatcher(self._pet)      # an hour away: cobwebs + hammock nap
+                self._webs.start()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("[PET] cobweb watcher not started: {exc}", exc=exc)
         except Exception as exc:  # noqa: BLE001 -- the pet is a toy; never let it stop Spidy
             log.warning("[PET] could not start the desktop pet: {exc}", exc=exc)
 

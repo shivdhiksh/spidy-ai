@@ -170,8 +170,8 @@ def _task_xml(background: bool = True) -> str:
 <Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><Description>Starts Spidy so "Hey Spidy" works after every boot, login and unlock.</Description></RegistrationInfo>
   <Triggers>
-    <LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId><Delay>PT15S</Delay></LogonTrigger>
-    <SessionStateChangeTrigger><Enabled>true</Enabled><StateChange>SessionUnlock</StateChange><UserId>{user}</UserId><Delay>PT5S</Delay></SessionStateChangeTrigger>
+    <LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId><Delay>PT2S</Delay></LogonTrigger>
+    <SessionStateChangeTrigger><Enabled>true</Enabled><StateChange>SessionUnlock</StateChange><UserId>{user}</UserId><Delay>PT1S</Delay></SessionStateChangeTrigger>
   </Triggers>
   <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
   <Settings>
@@ -181,7 +181,7 @@ def _task_xml(background: bool = True) -> str:
     <StartWhenAvailable>true</StartWhenAvailable>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <RestartOnFailure><Interval>PT1M</Interval><Count>10</Count></RestartOnFailure>
-    <Priority>6</Priority>
+    <Priority>4</Priority>
   </Settings>
   <Actions Context="Author"><Exec><Command>{exe}</Command><Arguments>{args}</Arguments><WorkingDirectory>{cwd}</WorkingDirectory></Exec></Actions>
 </Task>"""

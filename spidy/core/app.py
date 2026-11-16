@@ -333,6 +333,7 @@ class SpidyCore:
         # ── 1a. LLM provider chain startup log (no Ollama health check) ──────
         await self._log_llm_provider_chain()
 
+
         # ── 2. Logging (reconfigure with values from config) ──────────────
         log_dir = self._settings.paths.resolve("log_dir")
         configure_logging(
@@ -353,6 +354,17 @@ class SpidyCore:
         self._bus.subscribe("system.quit_requested", self._on_quit_requested)
         self._bus.subscribe("ui.closed", self._on_ui_closed)
         self._bus.subscribe("ui.command_submitted", self._on_ui_command)
+
+        # ── 1b. Qt UI + desktop pet right away (they only need config + bus), so the pet is on the
+        # desktop seconds after login instead of after memory / knowledge / voice have loaded.
+        self._ui_started_early = False
+        if self._settings and self._settings.ui.enabled and not self._text_mode and self._bus is not None:
+            try:
+                is_bg = self._start_hidden or getattr(getattr(self._settings, "app", None), "start_hidden", False)
+                self._start_ui_thread(asyncio.get_running_loop(), start_hidden=is_bg)
+                self._ui_started_early = True
+            except Exception as exc:  # noqa: BLE001 -- fall back to the normal (late) start
+                log.warning("Early UI start failed: {exc}", exc=exc)
 
         # ── 4. Device Manager (CUDA detection) ───────────────────────────
         self._device_mgr = DeviceManager()
@@ -754,7 +766,8 @@ class SpidyCore:
         # ── Start Qt Overlay UI (Milestone 5) ─────────────────────────────
         is_bg = self._start_hidden or getattr(getattr(self._settings, "app", None), "start_hidden", False)
         if self._settings and self._settings.ui.enabled:
-            self._start_ui_thread(loop, start_hidden=is_bg)
+            if not getattr(self, "_ui_started_early", False):
+                self._start_ui_thread(loop, start_hidden=is_bg)
             self._operational_state = AppLifecycleState.HUD_HIDDEN if is_bg else AppLifecycleState.HUD_VISIBLE
         else:
             self._operational_state = AppLifecycleState.RUNNING

@@ -48,7 +48,8 @@ SPRITE_SCALE = 0.76             # 3D sprite size on screen (x depth: nearer = bi
 ROAM = 150                      # depth of the floor band above the taskbar he wanders around in
 THROW_GRAVITY = 2100.0          # px/s^2 when thrown or falling
 GRAVITY = 1400.0                # px/s^2 for the web swing
-INTRO_WAKE, INTRO_WAVE, INTRO_STAND, INTRO_END = 1.8, 2.3, 5.2, 6.1   # wake-up intro timeline (seconds)
+INTRO_WAKE, INTRO_WAVE, INTRO_STAND, INTRO_END = 1.3, 2.3, 4.6, 6.0   # door intro: out, wave, door shuts, end
+DOOR_IN, DOOR_OPEN = 0.5, 1.2                                          # door appears, then swings open
 
 
 # ── pose & drawing ───────────────────────────────────────────────────────────
@@ -576,7 +577,7 @@ class DesktopPet(QWidget):
         self.after_shoot = ""               # "hammock": the web shot is for stringing a hammock
         self.intro_t = 0.0                  # wake-up intro after Spidy starts (bed -> wave -> stand)
         self._greeted = False
-        self.greeting = "Hello boss!"
+        self.greeting = "Welcome boss!"
         self.hammock: tuple[QPointF, QPointF] | None = None
         self.hammock_k = 0.0
         self._press: QPointF | None = None
@@ -646,6 +647,13 @@ class DesktopPet(QWidget):
                 self._hide_now()
             return
         ui = bool(self._ui_visible())
+        # "Hide pet" lasts until you next open Spidy: opening + closing the UI brings him back.
+        if not self.enabled:
+            if ui:
+                self._back_after_ui = True
+            elif getattr(self, "_back_after_ui", False):
+                self._back_after_ui = False
+                self.enabled = True
         if ui and not self._ui_was_visible and self.isVisible() and self.state != "hop":
             self._set_state("hop", 0.45)
         elif ui and self.isVisible() and self.state != "hop":
@@ -750,6 +758,27 @@ class DesktopPet(QWidget):
             self.anchor = QPointF(a.right() - 2, a.top() + a.height() * self._rng.uniform(0.25, 0.55))
         self.upside = where == "top" and self._rng.random() < 0.45
         self.hang_wave = self._rng.random() < 0.5
+
+    def sleep_in_hammock(self) -> None:
+        """You've been away a long time: he strings a hammock in the corner and sleeps in it."""
+        if not self.enabled:
+            return
+        if not self.isVisible():
+            self._show_now()
+        self.hammock_sleep = True
+        a = self._area()
+        span = min(330.0, a.width() * 0.3)
+        self.hammock = (QPointF(a.right() - span, a.top() + 2), QPointF(a.right() - 2, a.top() + span * 0.62))
+        self._set_state("hammock", 1e9)
+        self.hammock_k = 1.0
+        self._fit_hammock()
+
+    def wake_from_hammock(self) -> None:
+        if getattr(self, "hammock_sleep", False):
+            self.hammock_sleep = False
+            if self.state == "hammock":
+                self.state_left = 0.0                    # climbs out on his own on the next tick
+                self.say("Morning, boss!")
 
     def start_hammock(self) -> None:
         """String a web hammock diagonally across a top corner and lounge in it for a while."""
@@ -896,6 +925,8 @@ class DesktopPet(QWidget):
                     self._start_swing()
         elif st == "hammock":
             self.hammock_k = min(1.0, self.hammock_k + dt / 0.6)       # net weaves in, he settles
+            if getattr(self, "hammock_sleep", False):
+                self.state_left = max(self.state_left, 5.0)             # sleeps until the webs are cleared
             self._fit_hammock()
             if self.state_left <= 0:                                    # climb out: drop down on a web
                 spot = self._hammock_point(0.5)
@@ -1097,6 +1128,8 @@ class DesktopPet(QWidget):
         return QPointF(self.fx, self.fy - 92 * SPRITE_SCALE * self._depth())
 
     def _be_aware(self, dt: float, cursor: QPointF | None = None) -> None:
+        if getattr(self, "hammock_sleep", False) and self.state == "hammock":
+            return                                                     # fast asleep: no reactions
         cur = QPointF(cursor) if cursor is not None else QPointF(QCursor.pos())
         last = getattr(self, "_aware_cursor", None)
         self._aware_cursor = cur
@@ -1330,7 +1363,7 @@ class DesktopPet(QWidget):
         else:
             m.addAction("Sit calm", lambda: self.set_calm(True))
         m.addSeparator()
-        m.addAction("Hide the pet", lambda: self.set_enabled(False))
+        m.addAction("Hide the pet (back after you open + close Spidy)", lambda: self.set_enabled(False))
         m.exec(e.globalPos())
 
     # ── drawing ────────────────────────────────────────────────────────────
@@ -1522,9 +1555,12 @@ def _paint_3d(self, p: QPainter) -> None:
             side = 1 if a.x() < bb.x() else -1
             p.save()
             p.setOpacity(min(1.0, (self.hammock_k - 0.35) / 0.4))
-            pts = b.blit(p, "lounge", 70 * side, int(self.t * 0.8), "hip_c", loc(here), S, ang)
+            sleeping = getattr(self, "hammock_sleep", False) and b.has("hamsleep")
+            pts = b.blit(p, "hamsleep" if sleeping else "lounge", 70 * side, int(self.t * 0.8), "hip_c", loc(here), S, ang)
             p.restore()
             head = pts["head"]
+            if sleeping:
+                _zzz(p, head, self.t)
     elif st == "intro":
         head = self._paint_intro_3d(p, S)
     elif st == "held":
@@ -1631,40 +1667,82 @@ def _paint_3d(self, p: QPainter) -> None:
             _thought(p, QPointF(head.x() + 18 * S, head.y() - 34 * S), self.thought, min(1.0, self.thought_t * 3), self.width() - 4)
 
 
+def _draw_door(p: QPainter, base: QPointF, open_k: float, alpha: float, S: float) -> None:
+    """The pink "anywhere door": frame + a panel that swings open on its left hinge, light behind it."""
+    w, h = 78 * S / SPRITE_SCALE, 150 * S / SPRITE_SCALE
+    left, top = base.x() - w / 2, base.y() - h
+    p.save()
+    p.setOpacity(alpha)
+    p.setPen(Qt.PenStyle.NoPen)
+    # floor glow
+    g = QRadialGradient(QPointF(base.x(), base.y()), w * 0.9)
+    g.setColorAt(0.0, QColor(255, 170, 220, 110)); g.setColorAt(1.0, QColor(255, 170, 220, 0))
+    p.setBrush(g); p.drawEllipse(QPointF(base.x(), base.y()), w * 0.9, 10 * S / SPRITE_SCALE)
+    # frame
+    p.setBrush(QColor(196, 62, 132)); p.drawRoundedRect(QRectF(left - 6, top - 6, w + 12, h + 6), 5, 5)
+    # doorway: bright "somewhere else" light, visible as the panel opens
+    if open_k > 0:
+        lg = QLinearGradient(QPointF(left, top), QPointF(left, top + h))
+        lg.setColorAt(0.0, QColor(170, 225, 255)); lg.setColorAt(1.0, QColor(255, 248, 220))
+        p.setBrush(lg); p.drawRect(QRectF(left, top, w, h))
+        p.setOpacity(alpha * 0.5 * open_k)
+        rg = QRadialGradient(QPointF(base.x(), top + h * 0.55), w * 1.2)
+        rg.setColorAt(0.0, QColor(255, 255, 240, 200)); rg.setColorAt(1.0, QColor(255, 255, 240, 0))
+        p.setBrush(rg); p.drawEllipse(QPointF(base.x(), top + h * 0.55), w * 1.2, h * 0.7)
+        p.setOpacity(alpha)
+    # panel, foreshortened as it swings toward you on the left hinge
+    pw = w * max(0.0, 1.0 - open_k * 0.82)
+    bulge = 10 * S / SPRITE_SCALE * math.sin(open_k * math.pi / 2)
+    panel = QPainterPath()
+    panel.moveTo(left, top); panel.lineTo(left + pw, top - bulge * 0.4)
+    panel.lineTo(left + pw, top + h + bulge * 0.4); panel.lineTo(left, top + h); panel.closeSubpath()
+    shade = int(232 - 60 * open_k)
+    p.setBrush(QColor(shade, 110, 170)); p.drawPath(panel)
+    p.setPen(QPen(QColor(150, 40, 100, 160), 1.4)); p.setBrush(Qt.BrushStyle.NoBrush)
+    inset = 7 * S / SPRITE_SCALE
+    if pw > inset * 3:
+        p.drawRect(QRectF(left + inset, top + inset, pw - 2 * inset, h * 0.42))
+        p.drawRect(QRectF(left + inset, top + h * 0.5, pw - 2 * inset, h * 0.42))
+        p.setPen(Qt.PenStyle.NoPen); p.setBrush(QColor(255, 214, 90))
+        p.drawEllipse(QPointF(left + pw - inset * 1.4, top + h * 0.5), 3.6 * S / SPRITE_SCALE, 3.6 * S / SPRITE_SCALE)
+    p.restore()
+
+
 def _paint_intro_3d(self, p: QPainter, S: float):
-    """Asleep in bed (Zzz) -> sits up and waves "Hello boss!" -> stands up beside the bed."""
+    """Pink door pops up -> swings open -> Spidey walks out, waves "Welcome boss!" -> door shuts and vanishes."""
     t = self.intro_t
     b = self.bank
     floor = self._local(QPointF(self.fx, self.fy))
-    bed_fade = 1.0 if t < INTRO_STAND else max(0.0, 1 - (t - INTRO_STAND) / 0.7)
-    mat_y = floor.y() - 26
-    if bed_fade > 0:
-        p.save()
-        p.setOpacity(bed_fade)
-        _draw_bed(p, floor, mat_y)
+    door_at = QPointF(floor.x() - 40, floor.y())
+    def ease(x):
+        x = min(1.0, max(0.0, x)); return x * x * (3 - 2 * x)
+    appear = ease(t / DOOR_IN)
+    vanish = 1.0 - ease((t - (INTRO_STAND + 0.6)) / 0.6)
+    if t < INTRO_STAND:
+        open_k = ease((t - DOOR_IN) / (DOOR_OPEN - DOOR_IN))
+    else:
+        open_k = 1.0 - ease((t - INTRO_STAND) / 0.5)
+    alpha = min(appear, vanish)
+    # the door rises out of the floor as it appears
+    rise = QPointF(door_at.x(), door_at.y() + (1 - appear) * 30)
+    _draw_door(p, rise, open_k, alpha, S)
+    if t < DOOR_OPEN - 0.15:
+        return QPointF(door_at.x(), door_at.y() - 120)
+    stand_x = floor.x() + 34
+    if t < INTRO_WAVE:                                                  # walks out of the doorway
+        k = ease((t - (DOOR_OPEN - 0.15)) / (INTRO_WAVE - DOOR_OPEN + 0.15))
+        feet = QPointF(door_at.x() + (stand_x - door_at.x()) * k, floor.y() - 4 * (1 - k))
+        p.save(); p.setOpacity(min(1.0, k * 3))
+        pts = b.blit(p, "walk", 25, int(t * 10), "feet", feet, S * (0.82 + 0.18 * k))
         p.restore()
-    hips_bed = QPointF(floor.x() - 30, mat_y - 14)
-    stand = min(1.0, max(0.0, (t - INTRO_STAND) / 0.6))
-    ease = stand * stand * (3 - 2 * stand)
-    if t < INTRO_WAVE:                                                 # lying asleep under the blanket
-        pts = b.blit(p, "sleep", 0, 0, "hip_c", hips_bed, S, -90)
-        if t < INTRO_STAND:
-            _blanket_over(p, pts, S)
-        head = pts["head"]
-        if t < INTRO_WAKE:
-            _zzz(p, head, t)
-        return head
-    if t < INTRO_STAND:                                                # sits up, waves from bed
-        pts = b.blit(p, "wave", 0, int(t * 9), "hip_c", hips_bed, S, -32)
-        _blanket_over(p, pts, S, legs_only=True)
-    else:                                                              # gets up, bed fades
-        feet_end = QPointF(floor.x() + 34, floor.y())
-        hips_end = QPointF(feet_end.x(), feet_end.y() - 58 * S / SPRITE_SCALE)
-        at = QPointF(hips_bed.x() + (hips_end.x() - hips_bed.x()) * ease, hips_bed.y() + (hips_end.y() - hips_bed.y()) * ease)
-        pts = b.blit(p, "idle", 0, 0, "hip_c", at, S, -32 * (1 - ease))
+    elif t < INTRO_STAND + 0.2:                                         # waves at you
+        pts = b.blit(p, "wave", 0, int(t * 9), "feet", QPointF(stand_x, floor.y()), S)
+    else:
+        pts = b.blit(p, "idle", 0, 0, "feet", QPointF(stand_x, floor.y()), S)
     head = pts["head"]
     if INTRO_WAVE <= t < INTRO_END - 0.2:
-        _draw_bubble(p, QPointF(head.x() + 22, head.y() - 40), self.greeting, min(1.0, (t - INTRO_WAVE) / 0.25))
+        _draw_bubble(p, QPointF(head.x() + 22, head.y() - 40), self.greeting, min(1.0, (t - INTRO_WAVE) / 0.25),
+                     self.width() - 4)
     return head
 
 
