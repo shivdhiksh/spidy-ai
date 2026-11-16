@@ -159,8 +159,9 @@ def main() -> None:
 
     if opts.supervise:
         child = [a for a in sys.argv[1:] if a != "--supervise"]
-        from spidy.config.manager import PROJECT_ROOT
-        os.chdir(PROJECT_ROOT)
+        # project root without importing the config stack (pydantic, loguru, yaml): right after login
+        # the disk is busy and every import the supervisor makes delays Spidy (and the pet) starting
+        os.chdir(Path(__file__).resolve().parent.parent)
         sys.exit(supervise(child))
 
     config_path = Path(opts.config_path) if opts.config_path else None
