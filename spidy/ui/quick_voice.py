@@ -89,10 +89,12 @@ class QuickGreeter:
             item = self._audio.get(text)
         if item is None:
             return False
-        try:
-            import sounddevice as sd
-            sd.play(item[0], item[1])
-            return True
-        except Exception as exc:  # noqa: BLE001
-            log.debug("[PET] quick greeting playback failed: {exc}", exc=exc)
-            return False
+        def play() -> None:                      # opening the audio device can take a moment: off the UI thread
+            try:
+                import sounddevice as sd
+                sd.play(item[0], item[1])
+                sd.wait()
+            except Exception as exc:  # noqa: BLE001
+                log.debug("[PET] quick greeting playback failed: {exc}", exc=exc)
+        threading.Thread(target=play, name="PetGreeting", daemon=True).start()
+        return True

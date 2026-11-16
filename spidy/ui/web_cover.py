@@ -285,8 +285,6 @@ class WebCover(QWidget):
                 q.setPen(pen)
                 q.drawPath(path)
             q.end()
-        elif grown and self._stale and now - self._last_snap > 0.8:         # calm again: tidy full redraw
-            self._cache = None
         self._erase = []
         self.update()
 

@@ -522,11 +522,16 @@ def _draw_bubble(p: QPainter, at: QPointF, text: str, k: float, max_right: float
     h = 30
     r = QRectF(at.x(), at.y() - h - 10, w, h)
     if r.right() > max_right:
-        r.moveRight(max(max_right, at.x() + 30))
+        r.moveRight(max_right)
+    if r.left() < 2:
+        r.moveLeft(2)
+    # short tail just under the bubble, pointing at the head (never a long stretched line)
+    bx = min(max(at.x() - 8, r.left() + 12), r.right() - 26)
+    tip = QPointF(min(max(at.x() - 4, bx - 6), bx + 22), r.bottom() + 9)
     tail = QPainterPath()
-    tail.moveTo(r.left() + 10, r.bottom() - 2)
-    tail.lineTo(at.x() - 4, at.y() + 4)
-    tail.lineTo(r.left() + 24, r.bottom() - 2)
+    tail.moveTo(bx, r.bottom() - 2)
+    tail.lineTo(tip)
+    tail.lineTo(bx + 14, r.bottom() - 2)
     body = QPainterPath()
     body.addRoundedRect(r, 13, 13)
     body = body.united(tail)
@@ -705,12 +710,18 @@ class DesktopPet(QWidget):
         return QPointF(self.anchor.x() + math.sin(self.theta) * self.rope,
                        self.anchor.y() + math.cos(self.theta) * self.rope)
 
+    def _screen_right_local(self) -> float:
+        """Right edge for a speech bubble: inside this window and on screen."""
+        a = self._area()
+        return min(self.width() - 4, a.right() - self.x() - 4)
+
     def _fit_hanging(self) -> None:
         b = self._body_world()
         pad = 95
-        left = min(self.anchor.x(), b.x()) - pad
+        wide = 240 if self.bubble_t > 0 else pad           # room for a speech bubble on either side
+        left = min(self.anchor.x(), b.x()) - wide
         top = min(self.anchor.y(), b.y()) - 20
-        right = max(self.anchor.x(), b.x()) + pad
+        right = max(self.anchor.x(), b.x()) + wide
         bottom = max(self.anchor.y(), b.y()) + 115
         self.setGeometry(QRect(int(left), int(top), int(right - left), int(bottom - top)))
 
@@ -1681,7 +1692,8 @@ def _paint_3d(self, p: QPainter) -> None:
         if self.sense > 0:
             _spidey_sense(p, head, self.sense)
         if self.bubble_t > 0 and self.bubble:
-            _draw_bubble(p, QPointF(head.x() + 26 * S, head.y() - 40 * S), self.bubble, min(1.0, self.bubble_t * 4), self.width() - 4)
+            _draw_bubble(p, QPointF(head.x() + 26 * S, head.y() - 40 * S), self.bubble, min(1.0, self.bubble_t * 4),
+                         self._screen_right_local())
         elif self.thought_t > 0 and self.thought:
             _thought(p, QPointF(head.x() + 18 * S, head.y() - 34 * S), self.thought, min(1.0, self.thought_t * 3), self.width() - 4)
 
