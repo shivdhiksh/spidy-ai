@@ -161,8 +161,9 @@ class StudySession:
             path = find_pdf_file(name)
             if path:
                 return self.load(path)
-            return (f"I can see '{name}' on your screen, but I can't find the file on this PC. "
-                    f"Download it, or attach it with the 📎 button in my chat.")
+            return (f"I can see '{Path(name).stem}' on your screen, but it's open from the internet, so "
+                    f"there's no file on this PC for me to read. Press Ctrl+S in the browser to save it "
+                    f"to Downloads, then say 'read this PDF' again, or attach it from my 📎 menu.")
         return None
 
     # ── commands ────────────────────────────────────────────────────────────
