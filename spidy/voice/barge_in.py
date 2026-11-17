@@ -76,6 +76,8 @@ from typing import TYPE_CHECKING, Callable
 
 import numpy as np
 
+from spidy.core import playback_gain as _gain
+
 from spidy.logging.logger import get_logger
 from spidy.voice.echo_canceller import EchoCanceller, MicClock, PlaybackReference
 from spidy.voice.interruption import InterruptionHandler, InterruptCommand
@@ -92,9 +94,9 @@ _SAMPLE_RATE = 16000
 # Speech-over-Spidy detection (interrupt by simply talking, no stop phrase needed).
 _HISTORY_CHUNKS = 25            # ~2 s of per-chunk levels: Spidy's own echo level while speaking
 _MIN_HISTORY_CHUNKS = 6         # ~0.5 s of echo history needed before anything can trigger
-_HOT_CHUNKS = 3                 # consecutive loud chunks (~0.25 s) that open a candidate
+_HOT_CHUNKS = 2                 # consecutive loud chunks (~0.25 s) that open a candidate
 _PRE_ROLL_CHUNKS = 4            # chunks kept from just before the onset (the first syllables)
-_FIRST_CHECK_SECONDS = 0.7      # transcribe once this much candidate audio is buffered
+_FIRST_CHECK_SECONDS = 0.5      # transcribe once this much candidate audio is buffered
 _RECHECK_SECONDS = 0.5          # then re-check every time this much more arrives
 _GIVE_UP_SECONDS = 3.2          # a candidate that is still unconvincing by now is dropped
 _COOLDOWN_SECONDS = 0.6         # after a rejected candidate, ignore the mic for a moment
@@ -111,6 +113,21 @@ _FILLER = frozenset(
     {"you", "thank", "thanks", "bye", "okay", "ok", "uh", "um", "hmm", "mm", "huh", "yeah", "the", "so",
      "see", "later", "very", "much", "next", "time", "watching", "for", "subtitles", "good", "night"}
 )
+
+
+def _speechlike(chunk: np.ndarray) -> bool:
+    """Cheap voice check: most of the energy sits in the speech band (250-3500 Hz), not hum or clicks."""
+    try:
+        x = np.asarray(chunk, dtype=np.float32).reshape(-1)
+        if x.size < 64:
+            return True
+        spec = np.abs(np.fft.rfft(x * np.hanning(x.size))) ** 2
+        freqs = np.fft.rfftfreq(x.size, 1.0 / _SAMPLE_RATE)
+        total = float(spec.sum()) + 1e-12
+        band = float(spec[(freqs >= 250) & (freqs <= 3500)].sum())
+        return band / total >= 0.55
+    except Exception:  # noqa: BLE001
+        return True
 
 
 def _words(text: str) -> list[str]:
@@ -443,6 +460,7 @@ class BargeInDetector:
         self._active = False
         self._streaming_tts = None
         self._stop_worker()
+        _gain.reset()
         d = getattr(self, "_diag", None)
         if d:
             log.info("[BargeIn] reply over: loudest mic={pk:.3f} | Spidy echo={ec:.3f} | needed={nd:.3f} | "
@@ -511,6 +529,8 @@ class BargeInDetector:
                 self._cand = list(self._ring)       # includes the loud chunks and a bit before
                 self._cand_samples = sum(len(c) for c in self._cand)
                 self._cand_active = True
+            if self._interrupt_on_speech and _speechlike(chunk):
+                _gain.duck(True)                    # full duplex: a voice-like sound -> Spidy whispers at once
 
     def set_gain_ratio(self, ratio: float) -> None:
         """barge-in mic gain / normal mic gain (see AudioCaptureEngine.barge_in_gain_ratio)."""
@@ -613,6 +633,7 @@ class BargeInDetector:
 
     def _drop_candidate(self) -> None:
         """Forget an unconvincing candidate and ignore the mic briefly (echo comes in bursts)."""
+        _gain.duck(False)                           # not you after all: Spidy back to full volume
         with self._buf_lock:
             self._cand = []
             self._cand_samples = 0
@@ -681,6 +702,7 @@ class BargeInDetector:
         with self._buf_lock:
             self._triggered = True
             self._interrupt_text = text
+        _gain.reset()                               # she's stopping; next reply starts at full volume
         tts = self._streaming_tts
         if tts is not None:
             tts.stop()

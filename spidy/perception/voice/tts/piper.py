@@ -52,6 +52,7 @@ import numpy as np
 from spidy.logging.logger import get_logger
 from spidy.perception.voice.tts.base import AudioBuffer, TTSEngine
 from spidy.core import level_meter as _level_meter
+from spidy.core import playback_gain as _gain
 
 log = get_logger(__name__)
 
@@ -311,7 +312,7 @@ class PiperTTSEngine(TTSEngine):
 
         try:
             self._ensure_stream()
-            chunk_size = 1024
+            chunk_size = 512          # ~23 ms: ducking / stopping takes effect almost at once
             samples = buffer.samples.reshape(-1, 1)
             total_samples = len(samples)
             offset = 0
@@ -322,7 +323,7 @@ class PiperTTSEngine(TTSEngine):
                     log.debug("TTS playback interrupted mid-buffer.")
                     return
                 end = min(offset + chunk_size, total_samples)
-                chunk = samples[offset:end]
+                chunk = _gain.apply(samples[offset:end])     # full-duplex ducking (spidy.core.playback_gain)
                 with self._stream_lock:
                     if self._stream and not self._stream.closed:
                         self._stream.write(chunk)
