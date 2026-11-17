@@ -107,7 +107,9 @@ class DesktopComputerController:
         img_bytes = b""
         if self._is_windows:
             try:
-                img_bytes = self._capture_gdi(region)
+                from spidy.vision.own_windows import hidden_from_capture
+                with hidden_from_capture():                     # your screen, not Spidy's own windows
+                    img_bytes = self._capture_gdi(region)
             except Exception as exc:
                 log.warning("[COMPUTER] screenshot GDI error: {exc}", exc=exc)
 
@@ -204,6 +206,8 @@ class DesktopComputerController:
             hwnd = user32.GetForegroundWindow()
             if not hwnd:
                 return {"hwnd": 0, "title": "", "class_name": "", "pid": 0, "process_name": ""}
+            from spidy.vision.own_windows import window_behind_spidy
+            hwnd = window_behind_spidy(hwnd) or hwnd          # Spidy's HUD in front: the app you were using
 
             title = self._get_window_title(hwnd)
             class_name = self._get_window_class(hwnd)

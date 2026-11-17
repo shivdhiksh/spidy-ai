@@ -97,9 +97,9 @@ _PRE_ROLL_CHUNKS = 4            # chunks kept from just before the onset (the fi
 _FIRST_CHECK_SECONDS = 0.7      # transcribe once this much candidate audio is buffered
 _RECHECK_SECONDS = 0.5          # then re-check every time this much more arrives
 _GIVE_UP_SECONDS = 3.2          # a candidate that is still unconvincing by now is dropped
-_COOLDOWN_SECONDS = 1.0         # after a rejected candidate, ignore the mic for a moment
+_COOLDOWN_SECONDS = 0.6         # after a rejected candidate, ignore the mic for a moment
 _ECHO_OVERLAP = 0.75            # heard words that match what Spidy is saying => it is her own echo
-_UNCONVERGED_RATIO = 2.6        # trigger ratio while the echo canceller has not learnt the room yet
+_UNCONVERGED_RATIO = 1.8        # trigger ratio while the echo canceller has not learnt the room yet
 
 _STOPWORDS = frozenset(
     "a an the and or but of to in on at for with is are was were be been it its this that these those "
@@ -443,6 +443,12 @@ class BargeInDetector:
         self._active = False
         self._streaming_tts = None
         self._stop_worker()
+        d = getattr(self, "_diag", None)
+        if d:
+            log.info("[BargeIn] reply over: loudest mic={pk:.3f} | Spidy echo={ec:.3f} | needed={nd:.3f} | "
+                     "candidates={c} | last heard='{t}'", pk=d["peak"], ec=d["echo"], nd=d["need"],
+                     c=d["cands"], t=d["heard"][:60])
+        self._diag = {"peak": 0.0, "echo": 0.0, "need": 0.0, "cands": 0, "heard": ""}
         log.debug("BargeInDetector: stopped.")
 
     # ── Audio feed (called from audio thread) ─────────────────────────────
@@ -490,7 +496,12 @@ class BargeInDetector:
             # reach 3x its own level: ask for a much louder voice.
             converged = self._aec is not None and self._aec.converged
             ratio = self._trigger_ratio if converged else max(self._trigger_ratio, _UNCONVERGED_RATIO)
-            hot = rms >= max(self._min_rms * 2.0 * self._gain_ratio, echo_level * ratio)
+            need = max(self._min_rms * 2.0 * self._gain_ratio, echo_level * ratio)
+            hot = rms >= need
+            d = getattr(self, "_diag", None)
+            if d is not None:
+                d["peak"] = max(d["peak"], rms)
+                d["echo"], d["need"] = echo_level, need
         self._levels.append(rms)
 
         self._hot_run = self._hot_run + 1 if hot else 0
@@ -562,6 +573,10 @@ class BargeInDetector:
 
             text = self._transcribe(self._normal_level(audio))
             verdict = self._judge(text, samples)
+            d = getattr(self, "_diag", None)
+            if d is not None:
+                d["cands"] += 1
+                d["heard"] = text or d["heard"]
             log.debug("BargeInDetector: heard '{t}' -> {v}", t=text[:80], v=verdict)
 
             if verdict == "stop":

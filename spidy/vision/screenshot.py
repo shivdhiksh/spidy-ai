@@ -154,7 +154,9 @@ class ScreenshotEngine:
                     safe_idx = min(idx + 1, len(real_monitors) - 1)
                     monitor_spec = real_monitors[safe_idx]
 
-                raw = sct.grab(monitor_spec)
+                from spidy.vision.own_windows import hidden_from_capture
+                with hidden_from_capture():                  # your screen, not Spidy's own HUD
+                    raw = sct.grab(monitor_spec)
                 png_bytes = _mss_tools.to_png(raw.rgb, raw.size)
                 w, h = raw.width, raw.height
         except Exception as exc:
@@ -199,7 +201,9 @@ class ScreenshotEngine:
         try:
             with _mss_module.mss() as sct:
                 region_spec = {"left": x, "top": y, "width": width, "height": height}
-                raw = sct.grab(region_spec)
+                from spidy.vision.own_windows import hidden_from_capture
+                with hidden_from_capture():
+                    raw = sct.grab(region_spec)
                 png_bytes = _mss_tools.to_png(raw.rgb, raw.size)
                 w, h = raw.width, raw.height
         except Exception as exc:
@@ -236,6 +240,9 @@ class ScreenshotEngine:
         if _WIN32_AVAILABLE:
             try:
                 hwnd = _win32gui.GetForegroundWindow()
+                from spidy.vision.own_windows import is_own_window
+                if is_own_window(hwnd):                     # Spidy's HUD is in front: look at the screen
+                    raise RuntimeError("foreground window is Spidy's own")
                 rect = _win32gui.GetWindowRect(hwnd)
                 x, y, x2, y2 = rect
                 w = max(1, x2 - x)
