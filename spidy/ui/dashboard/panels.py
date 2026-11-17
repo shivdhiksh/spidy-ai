@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import datetime
 import math
 from collections import deque
@@ -432,6 +434,19 @@ class VoiceControls(RefWidget):
         draw_icon(p, "mic", QRectF(c.x() - 15, c.y() - 15, 30, 30), pal.TEXT if on else pal.SOFT, 1.7)
 
 
+def _emoji_icon(ch: str, size: int = 32):
+    from PySide6.QtGui import QFont, QIcon, QImage, QPainter as _P, QPixmap
+    img = QImage(size, size, QImage.Format.Format_ARGB32_Premultiplied)
+    img.fill(Qt.GlobalColor.transparent)
+    p = _P(img)
+    f = QFont("Segoe UI Emoji")
+    f.setPixelSize(int(size * 0.72))
+    p.setFont(f)
+    p.drawText(img.rect(), int(Qt.AlignmentFlag.AlignCenter), ch)
+    p.end()
+    return QIcon(QPixmap.fromImage(img))
+
+
 class CommandInput(QLineEdit):
     """Text-mode command line (replaces the waveform)."""
 
@@ -441,9 +456,21 @@ class CommandInput(QLineEdit):
         super().__init__(parent)
         self.setFrame(False)
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.setPlaceholderText("Type a command and press Enter")
+        self.setPlaceholderText("Type a command, or 📎 attach a PDF to study")
         self.returnPressed.connect(self._send)
+        from PySide6.QtGui import QAction
+        self._attach = QAction(_emoji_icon("📎"), "Attach a PDF for Spidy to read", self)
+        self._attach.triggered.connect(self._pick_pdf)
+        self.addAction(self._attach, QLineEdit.ActionPosition.TrailingPosition)
         self.hide()
+
+    def _pick_pdf(self) -> None:
+        """📎: choose a PDF; Spidy reads every page and tutors you on it (spidy.brain.study)."""
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(self, "Give Spidy a PDF to study", str(Path.home() / "Downloads"),
+                                              "PDF files (*.pdf)")
+        if path:
+            self.submitted.emit(f"attach pdf {path}")
 
     def apply_scale(self, k: float) -> None:
         self.setStyleSheet(

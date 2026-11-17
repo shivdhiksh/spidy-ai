@@ -169,9 +169,9 @@ voice:
     min_rms_threshold: 0.015      # Energy gate: chunks below this RMS are discarded (speaker bleed).
                                   # Raise if Piper echo falsely triggers detection (~0.03–0.05).
                                   # Lower if your mic is very quiet and stop commands are missed (~0.005).
-    interrupt_on_speech: false    # OFF: talking over Spidy does not stop her (experimental; unreliable on laptop speakers).
+    interrupt_on_speech: true     # ON: just start talking while Spidy speaks -- she stops and listens (history is kept).
                                   # The "Spidy stop" phrase still works.
-    trigger_ratio: 1.5            # Only used when interrupt_on_speech is true: how much louder than Spidy's echo you must be.
+    trigger_ratio: 1.6            # how much louder than Spidy's own echo your voice must be (raise if she interrupts herself).
 
   # TTS Text Pre-Processing Filter
   # ---------------------------------

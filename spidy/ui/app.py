@@ -498,6 +498,7 @@ class SpidyApp:
             self._pet = DesktopPet(ui_visible=hud_on_screen)
             self._pet.clicked.connect(self._on_show_requested)
             self._pet.greet.connect(self._pet_greets)
+            self._pet.command.connect(self._on_command_submitted)
             if self._tray is not None and hasattr(self._tray, "show_pet_requested"):
                 self._tray.show_pet_requested.connect(lambda: self._pet.set_enabled(True))
             try:                                             # greetings ready to speak at once (cached audio)

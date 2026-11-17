@@ -14,6 +14,8 @@ All art is drawn with QPainter (original drawing, no image files). The timer run
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import math
 import random
 from dataclasses import dataclass, field
@@ -547,6 +549,7 @@ def _draw_bubble(p: QPainter, at: QPointF, text: str, k: float, max_right: float
 
 class DesktopPet(QWidget):
     clicked = Signal()                     # open the full Spidy UI
+    command = Signal(str)                  # a command for Spidy's brain (e.g. "attach pdf <path>")
     greet = Signal(str)                    # the wake-up greeting (the app has Spidy say it out loud)
 
     def __init__(self, ui_visible=None, parent=None) -> None:
@@ -1370,6 +1373,14 @@ class DesktopPet(QWidget):
         self.start_fly(vx, vy, "Eek!")
         self.web_torn = True
 
+    def _study_pdf(self) -> None:
+        from PySide6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(None, "Give Spidy a PDF to study", str(Path.home() / "Downloads"),
+                                              "PDF files (*.pdf)")
+        if path:
+            self.command.emit(f"attach pdf {path}")
+            self.clicked.emit()                          # open Spidy to chat about it
+
     def set_calm(self, on: bool) -> None:
         """Sit calmly on the spot (on) or go back to wandering around (off)."""
         self.calm = on
@@ -1385,6 +1396,7 @@ class DesktopPet(QWidget):
     def contextMenuEvent(self, e) -> None:
         m = QMenu(self)
         m.addAction("Open Spidy", self.clicked.emit)
+        m.addAction("📎  Study a PDF…", self._study_pdf)
         m.addAction("Wave!", lambda: self._set_state("wave", 2.4))
         m.addAction("Swing on a web", lambda: self._set_state("shoot", 0.45))
         m.addAction("Relax in a web hammock", self.start_hammock)

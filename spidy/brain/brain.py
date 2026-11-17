@@ -129,6 +129,8 @@ class Brain:
         self._knowledge = knowledge
         self._learning = learning
         self._vision = vision
+        from spidy.brain.study import StudySession
+        self._study = StudySession()           # PDF study mode (see spidy.brain.study)
 
         # Internal components
         self._classifier = IntentClassifier()
@@ -189,6 +191,24 @@ class Brain:
         log.info("Brain stopped.")
 
     # ── Primary processing method ──────────────────────────────────────────
+
+    async def _study_screen_look(self, utterance: str) -> str:
+        """Studying: glance at the screen (OCR, ~1 s) to know the page you're on and what "this" is."""
+        if not self._study.is_question(utterance) or self._vision is None:
+            return ""
+        reader = getattr(self._vision, "read_screen_text", None)
+        if reader is None:
+            return ""
+        try:
+            res = await asyncio.wait_for(reader(), timeout=2.5)
+        except Exception:  # noqa: BLE001 -- the document alone still answers the question
+            return ""
+        text = getattr(res, "text", "") or ""
+        self._study.note_screen_text(text)
+        import re as _re
+        if _re.search(r"\b(this|it|here|screen|that|above|below|highlighted)\b", utterance, _re.I):
+            return text[:2500]
+        return ""
 
     async def process(
         self,
@@ -278,8 +298,19 @@ class Brain:
             ))
             return CREATOR_REPLY
 
+        # Study mode: "read this pdf", "attach pdf <path>", "close the pdf".
+        study_reply = self._study.try_command(utterance)
+        if study_reply:
+            self._conversation.add_turn(TurnRole.USER, utterance)
+            self._conversation.add_turn(TurnRole.ASSISTANT, study_reply)
+            await self._bus.publish(BrainResponseReadyEvent(
+                session_id=sid, response_text=study_reply, decision_mode="study",
+            ))
+            return study_reply
+
         # Everyday tasks (sites, search, weather, timers, files, screen, memory) done directly and reliably.
-        quick = await self._quick_actions().try_handle(utterance)
+        quick = (None if self._study.is_question(utterance)          # studying: questions go to the tutor
+                 else await self._quick_actions().try_handle(utterance))
         if quick is not None and quick.reply:
             self._conversation.add_turn(TurnRole.USER, utterance)
             self._conversation.add_turn(TurnRole.ASSISTANT, quick.reply)
@@ -346,6 +377,9 @@ class Brain:
         # conversation text (so conversation history reads naturally).
         _t0 = time.monotonic()
         intent = await self._classifier.classify(resolved_utterance)
+        if self._study.is_question(utterance):            # studying: always the tutor (LLM + document)
+            from spidy.brain.types import Intent
+            intent = Intent(action="chat", confidence=1.0, raw_utterance=utterance, source="study")
         _t_intent = (time.monotonic() - _t0) * 1000
 
         # ── Step 3: Add user turn with intent attached ───────────────────────
@@ -391,6 +425,14 @@ class Brain:
             LLMMessage(role=m["role"], content=m["content"])
             for m in llm_messages
         ]
+        # Study mode: the relevant pages of the document go with this question only (not into history).
+        screen_now = await self._study_screen_look(utterance)
+        study_ctx = self._study.context_for(utterance)
+        if study_ctx and screen_now:
+            study_ctx += "\n\nWhat is on the user's screen right now (OCR):\n" + screen_now
+        if study_ctx:
+            at = len(typed_messages) - 1 if typed_messages and typed_messages[-1].role == "user" else len(typed_messages)
+            typed_messages.insert(at, LLMMessage(role="system", content=study_ctx))
 
         # ── Step 9: Execute plan ────────────────────────────────────────────
         # NOTE: This step includes the actual LLM call when the decision is LLM-type.
